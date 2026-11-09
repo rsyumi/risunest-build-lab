@@ -13,6 +13,9 @@ const expectedCases = {
     'session-end': ['commit', 'stop-requested', 'saved'],
     'read-session-end': ['saved-before-exit'],
     'session-end-unanswered': ['commit', 'stop-requested'],
+    generation: ['proof-at-issued', 'success-once', 'provider-error', 'cancel-before-execute', 'cancel-after-dispatch', 'unknown-ticket'],
+    'generation-reload': ['listed-after-loss', 'resolved-once'],
+    'generation-lost': ['listed-after-loss', 'resolved-once'],
 }
 export function verifyReport(report, runId, phase, status) {
     assert.ok(Object.hasOwn(expectedCases, phase), 'unknown phase')

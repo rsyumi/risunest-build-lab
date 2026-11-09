@@ -22,7 +22,6 @@ import type {
     PluginStorageValue,
     ConversationMutation,
 } from '../storage/persistentDataStore'
-import { readCurrentRevision } from '../storage/persistentDataStore'
 import {
     acquireCurrentRevisionWithRetry,
     assertPinnedRevision,
@@ -326,7 +325,6 @@ const SYNCHRONOUS_CHARACTER_SET_ERROR =
     'Synchronous plugin character updates are unavailable. Use async setDatabase().'
 const STALE_DATABASE_SET_ERROR =
     'Plugin database update became stale because navigation state changed.'
-class PluginApprovalOvertakenError extends Error {}
 const DANGEROUS_DATABASE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 
 export function linkPluginQueryAbortSignals(
@@ -755,7 +753,7 @@ export function createPluginDatabaseAccess(
     const acquireCurrentRevisionReader = (): Promise<PersistentRevisionLease> =>
         acquireCurrentRevisionWithRetry(
             (revision) => dependencies.store.acquireRevision(revision),
-            () => readCurrentRevision(dependencies.store),
+            async () => (await dependencies.store.readRoot()).revision,
         )
     const prepareQuery = async (signal?: AbortSignal) => {
         throwIfQueryAborted(signal)
@@ -1384,13 +1382,6 @@ export function createPluginDatabaseAccess(
             }
             const changedKeys = new Set(intents.map(intent => String(intent.path[0])))
             const detachedUpdate = Object.fromEntries(Object.entries(detachedSubmission).filter(([key]) => changedKeys.has(key)))
-            const isPluginRecordSet = (intent: (typeof intents)[number]) =>
-                intent.path[0] === 'plugins' && intent.path.length === 2 && intent.path[1] !== '$order' && intent.type === 'set'
-            // Only records the plugin changed are requested: omissions, reordering and unchanged copies are ignored.
-            const requestedPlugins = intents.filter(isPluginRecordSet).map(intent => intent.value as RisuPlugin)
-            if (requestedPlugins.length) detachedUpdate.plugins = requestedPlugins
-            else delete detachedUpdate.plugins
-            const scriptsBeforeConfirmation = new Map((dependencies.getCompatibilityDatabase().plugins ?? []).map(plugin => [plugin.name, plugin.script]))
             const preparedUpdate = dependencies.prepareAuthoritativeDatabaseUpdate
                 ? await dependencies.prepareAuthoritativeDatabaseUpdate(detachedUpdate)
                 : detachedUpdate
@@ -1403,52 +1394,22 @@ export function createPluginDatabaseAccess(
             if (hasCharacterUpdate(preparedUpdate)) {
                 validateCompleteCharacters(preparedUpdate.characters)
             }
-            const approved = new Map((preparedUpdate.plugins as RisuPlugin[] | undefined ?? []).map(plugin => [plugin.name, plugin]))
-            const installedPlugins = () => dependencies.getCompatibilityDatabase().plugins ?? []
-            // An approval applies only to the list it was asked about: an install while the name is
-            // still free, a replacement while the installed script is still the one it replaces.
-            const approvalHolds = (name: string, installed: readonly RisuPlugin[]) => {
-                const current = installed.find(plugin => plugin.name === name)
-                return scriptsBeforeConfirmation.has(name)
-                    ? !!current && current.script === scriptsBeforeConfirmation.get(name)
-                    : !current
-            }
-            while (true) {
-                let acceptedIntents = intents
-                let acceptedNames: string[] = []
-                if (changedKeys.has('plugins')) {
-                    const installed = installedPlugins()
-                    acceptedNames = intents
-                        .filter(intent => isPluginRecordSet(intent) && approved.has(String(intent.path[1])))
-                        .map(intent => String(intent.path[1]))
-                        .filter(name => approvalHolds(name, installed))
-                    const accepted = intents.filter(intent => isPluginRecordSet(intent) && acceptedNames.includes(String(intent.path[1])))
-                        .map(intent => ({ ...intent, value: approved.get(String(intent.path[1]))! }))
-                    // Whole-list API submissions request installation or replacement, while addressed storage deletes remain independent.
-                    acceptedIntents = [...intents.filter(intent => intent.path[0] !== 'plugins'), ...accepted]
-                    const addedNames = new Set(acceptedNames.filter(name => !installed.some(plugin => plugin.name === name)))
-                    if (addedNames.size) {
-                        acceptedIntents.push({ path: ['plugins', '$order'], type: 'set', value: [...installed.map(plugin => plugin.name), ...[...approved.keys()].filter(name => addedNames.has(name))] })
-                    }
-                }
-                const changes = databaseUnitChanges(acceptedIntents, preparedUpdate, allowedKeys)
-                const storageCheck = storageWriteCheck(prepareStorageWrite, changes.units)
-                try {
-                    await dependencies.commitPersistentUnitIntent('plugin-setDatabase', changes.units, [], changes.wholeMessages, undefined, {
-                        // The write can wait behind other saves, so every attempt checks the approvals again.
-                        validate: () => {
-                            const installed = installedPlugins()
-                            if (!acceptedNames.every(name => approvalHolds(name, installed))) throw new PluginApprovalOvertakenError()
-                            storageCheck.validate()
-                        },
-                        committed: storageCheck.committed,
-                    })
-                    break
-                } catch (error) {
-                    // Nothing was written; commit again without the approvals the plugin list overtook.
-                    if (!(error instanceof PluginApprovalOvertakenError)) throw error
+            let acceptedIntents = intents
+            if (Object.hasOwn(detachedUpdate, 'plugins')) {
+                const installed = dependencies.getCompatibilityDatabase().plugins ?? []
+                const installedNames = new Set(installed.map(plugin => plugin.name))
+                const approved = new Map((preparedUpdate.plugins as RisuPlugin[] | undefined ?? []).map(plugin => [plugin.name, plugin]))
+                const additions = intents.filter(intent => intent.path[0] === 'plugins' && intent.path.length === 2 && intent.path[1] !== '$order' && intent.type === 'set' && !installedNames.has(String(intent.path[1])) && approved.has(String(intent.path[1])))
+                    .map(intent => ({ ...intent, value: approved.get(String(intent.path[1]))! }))
+                // Whole-list API submissions request installation, while addressed storage deletes remain independent.
+                acceptedIntents = [...intents.filter(intent => intent.path[0] !== 'plugins'), ...additions]
+                if (additions.length) {
+                    const addedNames = new Set(additions.map(intent => String(intent.path[1])))
+                    acceptedIntents.push({ path: ['plugins', '$order'], type: 'set', value: [...installed.map(plugin => plugin.name), ...[...approved.keys()].filter(name => addedNames.has(name))] })
                 }
             }
+            const changes = databaseUnitChanges(acceptedIntents, preparedUpdate, allowedKeys)
+            await dependencies.commitPersistentUnitIntent('plugin-setDatabase', changes.units, [], changes.wholeMessages, undefined, storageWriteCheck(prepareStorageWrite, changes.units))
             dependencies.assertPersistentMutationAllowed(authorityEpoch)
 
         },
@@ -1501,7 +1462,7 @@ export function createProductionPluginChatOutputProjector(
         }))
         const lease = await acquireCurrentRevisionWithRetry(
             (revision) => persistentStore.acquireRevision(revision),
-            () => readCurrentRevision(persistentStore),
+            async () => (await persistentStore.readRoot()).revision,
         )
         return withPersistentRevisionLease(lease, async (reader) => {
             const detail = await reader.readCharacter(input.characterId)

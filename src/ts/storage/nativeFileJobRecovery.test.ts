@@ -166,7 +166,6 @@ describe('native file job bootstrap reconciliation', () => {
         'prepare-content-import',
         'import-jpeg-asset',
         'restore-official-account-assets',
-        'publish-official-account-assets',
     ] as const)('cancels and drains a nonterminal %s job without restore finalization', async (kind) => {
         const calls: string[] = []
         const pending = await reconcileNativeRestoresBeforeBootstrap({
@@ -425,6 +424,8 @@ describe('native file job bootstrap reconciliation', () => {
         ['export-character-charx', 'risu-charx-123e4567-e89b-42d3-a456-426614174004.jpeg', 'native_character_charx_handoff_cleanup'],
         ['export-character-card', 'risu-character-card-123e4567-e89b-42d3-a456-426614174004.json', 'native_character_card_handoff_cleanup'],
         ['export-character-card', 'risu-character-card-123e4567-e89b-42d3-a456-426614174004.png', 'native_character_card_handoff_cleanup'],
+        ['export-preset', 'preset-123e4567-e89b-42d3-a456-426614174004.json', 'native_preset_handoff_cleanup'],
+        ['export-preset', 'preset-123e4567-e89b-42d3-a456-426614174004.risup', 'native_preset_handoff_cleanup'],
         ['export-risu-module', 'risu-module-123e4567-e89b-42d3-a456-426614174004.risum', 'native_risu_module_handoff_cleanup'],
         ['export-dataset', 'risu-dataset-123e4567-e89b-42d3-a456-426614174004.json', 'native_dataset_export_handoff_cleanup'],
         ['export-gallery-file', 'risu-download-123e4567-e89b-42d3-a456-426614174004.bin', 'native_download_handoff_cleanup'],
@@ -812,4 +813,17 @@ describe('native file job bootstrap reconciliation', () => {
             { jobId: 'restore-1' },
         )
     })
+})
+
+it('discards abandoned preset preparations without importing or using a CAS session', async () => {
+    const calls: string[] = []
+    await reconcileNativeFileJobsBeforeBootstrap({
+        invoke: async command => {
+            calls.push(command)
+            if (command === 'native_file_job_list') return [{ ...restoreStatus('prepared-preset', 'succeeded', 'complete'), kind: 'prepare-preset-import' }]
+            if (command === 'native_file_job_forget') return true
+            throw new Error(`No preset replay or CAS call is allowed: ${command}`)
+        }, wait: async () => {},
+    })
+    expect(calls).toEqual(['native_file_job_list', 'native_file_job_forget'])
 })

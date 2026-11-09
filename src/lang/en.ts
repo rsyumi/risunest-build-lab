@@ -63,7 +63,6 @@ export const languageEnglish = {
             'toggle-preset-prompt-name-unmatched':
                 'Toggle preset prompts without matching names',
             'unavailable-persona-binding': 'Unavailable persona bindings',
-            'missing-asset-references': 'Attachment references without a file',
             'unsupported-inlay-references': 'Unsupported inlay references',
             'unsupported-option-value': 'Unsupported setting values',
             'unsupported-structural-field': 'Unsupported data fields',
@@ -109,7 +108,6 @@ export const languageEnglish = {
             damagedPluginStorage: (count: number) => `Damaged plugin storage (${count}) will not be restored.`,
             oversizedPluginStorage: (count: number) => `Oversized plugin storage (${count}) will not be restored.`,
             inlays: (count: number) => `Unsupported inlay entries (${count}) will not be restored.`,
-            missingAssets: (count: number) => `Attachment references without a file (${count}) will be restored without the file.`,
         },
         "recovery": {
             "dismiss": 'Dismiss attempt',
@@ -172,36 +170,27 @@ export const languageEnglish = {
     applyTogglePresetMismatchConfirm:
         'This toggle preset was saved for a different prompt preset. Toggles may not be compatible. Apply anyway?',
     togglePresetApplied: (name: string) => `Preset "${name}" applied.`,
-    saveNewPreset: 'Save new preset',
+    saveNewTogglePreset: 'Save new preset',
     togglePresetNamePrompt: 'Enter the toggle preset name',
-    presetSaved: (name: string) => `Preset "${name}" saved.`,
+    togglePresetSaved: (name: string) => `Preset "${name}" saved.`,
     importTogglePreset: 'Import from file',
     togglePresetImported: (name: string) => `Preset "${name}" imported.`,
     togglePresetImportError: 'Invalid toggle preset file.',
-    presetActions: 'Preset actions',
-    movePresetUp: 'Move up',
-    movePresetDown: 'Move down',
+    togglePresetActions: 'Preset actions',
+    moveTogglePresetUp: 'Move up',
+    moveTogglePresetDown: 'Move down',
     overwriteTogglePreset: 'Overwrite',
     overwriteTogglePresetConfirm: (name: string) => `Overwrite "${name}" with the current toggle values?`,
     togglePresetOverwritten: (name: string) => `Preset "${name}" overwritten.`,
-    renamePreset: 'Rename',
-    presetRenamed: (from: string, to: string) => `Renamed "${from}" to "${to}".`,
-    duplicatePreset: 'Duplicate',
-    presetDuplicated: (name: string) => `Duplicated as "${name}".`,
+    renameTogglePreset: 'Rename',
+    togglePresetRenamed: (from: string, to: string) => `Renamed "${from}" to "${to}".`,
+    duplicateTogglePreset: 'Duplicate',
+    togglePresetDuplicated: (name: string) => `Duplicated as "${name}".`,
     exportTogglePreset: 'Export',
     togglePresetExported: (name: string) => `Preset "${name}" exported.`,
-    deletePreset: 'Delete',
+    deleteTogglePreset: 'Delete',
     deleteTogglePresetConfirm: (name: string) => `Delete toggle preset "${name}"?`,
-    presetDeleted: (name: string) => `Preset "${name}" deleted.`,
-    authorNotePresets: "Author's note presets",
-    authorNoteStoredInChat: 'Stored in chat',
-    authorNotePresetsEmpty: "No author's note presets saved.",
-    authorNotePresetNamePrompt: "Enter the author's note preset name",
-    selectAuthorNotePresetConfirm: "The current author's note will be replaced by the preset. Select it?",
-    deleteAuthorNotePresetConfirm: (name: string) => `Delete author's note preset "${name}"?`,
-    deleteUsedAuthorNotePresetDescription:
-        "Deleting it also deletes the author's note in every chat that selected this preset. This preset is used in the following chats.",
-    authorNotePresetUsageMore: (count: number) => `and ${count} more`,
+    togglePresetDeleted: (name: string) => `Preset "${name}" deleted.`,
     responseCandidates: 'Response candidates',
     newResponseCandidate: 'Generate a new response candidate',
     confirmNewResponseCandidate:
@@ -1871,7 +1860,6 @@ export const languageEnglish = {
     pluginProviderPermissionDenied: "Plugin provider permission was denied.",
     inlayPermissionConsent: "Plugin {} is requesting permission to access the inlay, which may allow it to read, write or edit the inlay content. Do you want to allow this?",
     sendChatConsent: "Plugin {} is requesting permission to send chat messages on your behalf, which will trigger AI responses. Do you want to allow this?",
-    hostToolPermissionConsent: "Plugin {} is requesting permission to call tools, including MCPs, which may allow it to read or change your data. Do you want to allow this?",
     resetAllPluginPermissions: "Reset plugin permissions",
     resetAllPluginPermissionsConfirm: "Reset all saved plugin permissions?\n\nPlugins will ask again the next time they require permission.",
     resetAllPluginPermissionsDone: "Plugin permissions have been reset",
@@ -1911,8 +1899,7 @@ export const languageEnglish = {
     enableRemoteSaving: "Enable Remote Saving",
     blockquoteStyling: "Blockquote Styling",
     dynamicModelRegistry: "Dynamic Model Registry",
-    confirmInstallPluginViaPlugin: "You are trying to install the plugin \"{plugin}\" via another plugin. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
-    confirmReplacePluginViaPlugin: "Another plugin is trying to replace the installed plugin \"{plugin}\" with a different script. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
+    confirmInstallPluginViaPlugin: "You are trying to install a plugin via another plugin. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
     risuaiProTools: "RisuNest Pro Tools",
     enableRisuaiProTools: "Enable RisuNest Pro Tools",
     easyPanel: "Easy Panel",
@@ -1978,13 +1965,6 @@ export const languageEnglish = {
     skipSavingAssetsOnWebSync: "Skip Saving Assets on Web Sync",
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
-        moduleScope: {
-            info: 'Global applies a module to every chat, Character to every chat with this character, and Chat to this chat only.',
-            global: 'Global',
-            character: 'Character',
-            chat: 'Chat',
-            noMatch: 'No modules match the search.',
-        },
         appLock: {
             title: 'App lock',
             enable: 'Use app lock',
@@ -2133,6 +2113,16 @@ export const languageEnglish = {
             notice: 'Opened this chat with Modify Display turned off.',
             turnBackOn: 'Turn back on',
         },
+        receiveConflict: {
+            title: 'Unsaved chat changes',
+            unsaved: 'Changes to this chat have not been saved. Choose how to handle them before closing the app.',
+            archived: 'This character is archived. Changes to the open chat have not been saved. Choose how to handle them before closing the app.',
+            copyHelp: 'Save the unsaved chat as a new character and chat.',
+            saveCopy: 'Save as new character',
+            discard: 'Discard unsaved changes',
+            discardConfirm: 'Discard these unsaved chat changes and load the current data?',
+            failed: 'The action could not finish. Choose an action to try again.',
+        },
         localSaveFailure: {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
@@ -2170,8 +2160,8 @@ export const languageEnglish = {
             confirmApplicationHelp: 'The operation may still be running or may have applied only part of the data, so editing is paused. Checking again checks or resumes the same operation.',
             confirmApplication: 'Check the same operation again',
             confirmApplicationFailed: 'The result is still unconfirmed. Check your connection and available storage, then retry.',
-            refreshTitle: 'Saved changes need a screen refresh',
-            refreshHelp: 'Your changes are saved. Editing is paused until the saved data can be read back into the screen.',
+            refreshTitle: 'Editing is paused',
+            refreshHelp: 'Editing is paused. Reload the stored data to continue.',
             refresh: 'Refresh screen',
             refreshFailed: 'The saved data could not be displayed. You can retry refreshing or restart the app.',
         },
@@ -2317,10 +2307,6 @@ export const languageEnglish = {
             unsupportedApiVersionLoad:
                 'These plugins use an unsupported Plugin API version and did not run. Install versions updated to API 3.0.\n\n{plugins}',
 
-            installViaPlugin: 'The plugin "{source}" is trying to install the plugin "{plugin}". Do you want to install it?',
-            replaceViaPlugin: 'The plugin "{source}" is trying to replace the code of the plugin "{plugin}". If you replace it, the new code uses the data saved by "{plugin}". Do you want to replace it?',
-            replaceSelfViaPlugin: 'The plugin "{plugin}" is trying to replace its own code. Do you want to replace it?',
-
             "removeTitle": "Remove this plugin?",
             "removeDescription": "Deleting plugin data also removes its settings and saved content, even if you reinstall the plugin. Keeping plugin data lets you use it again after reinstalling.",
             "removeDataOption": "Also delete plugin data",
@@ -2404,7 +2390,6 @@ export const languageEnglish = {
         },
         startup: {
             storage: 'Opening storage',
-            compacting: 'Compacting database {0}%',
             data: 'Preparing chat data',
             compatibility: 'Preparing plugin compatibility data',
             plugins: 'Preparing plugins',
@@ -2531,7 +2516,7 @@ export const languageEnglish = {
             registrationRequired: 'New registration code required',
             blocked: 'Automatic sync stopped',
             failed: 'Sync failed',
-            offlineNotice: 'The sync server is unavailable. Sync will retry automatically while the app is open.',
+            offlineNotice: 'The Sync server is unavailable. Sync will retry automatically while the app is open.',
             errorHelp:
                 'Sync could not finish. Your edits on this device are unchanged. Try again.',
             "connectRowHelpScan": 'Paste the registration code from the server or scan its QR code. Each device needs its own registration code.',
@@ -2642,6 +2627,9 @@ export const languageEnglish = {
             pluginOutputCurrentChatOnly: 'Send only the current chat to plugins',
             pluginOutputCurrentChatOnlyHelp:
                 "When a response is generated, plugins receive only the current chat without this character's other chats, which reduces memory use. Plugins that read other chats may not work correctly.",
+            nativeOllamaGeneration: 'Generate Ollama replies in the app',
+            nativeOllamaGenerationHelp:
+                'Ollama replies are generated in the app. When a setting is not supported, sending a message fails.',
         },
         ui: {
             title: 'UI',
@@ -2653,7 +2641,7 @@ export const languageEnglish = {
             scrollNavigation: 'Scroll navigation',
             scrollNavigationHelp: 'Shows buttons for moving between chat messages in the bottom-right corner when scrolling.',
             syncStatusUi: 'Show sync UI',
-            syncStatusUiHelp: 'Shows the sync status icon, and a notice when sync stops, the sync server is unavailable, or plugins are waiting for sync.',
+            syncStatusUiHelp: 'Shows the sync status icon, and a notice when sync stops or plugins are waiting for sync.',
         },
         textEditor: {
             open: 'Edit in popup',
@@ -2776,12 +2764,6 @@ export const languageEnglish = {
             counts: '{0} characters · {1} chats · {2} messages',
             subMetrics:
                 'Chat attachments {0} (included in images & media) · Plugin data {1}',
-            automaticSnapshots: 'Automatic snapshots',
-            automaticSnapshotsHelp:
-                'Creates a new snapshot once 24 hours have passed since the last one.',
-            snapshotKeepCount: 'Snapshots to keep',
-            snapshotKeepCountHelp:
-                'Creating a snapshot beyond this number deletes the oldest automatic snapshots first. Up to {0} snapshots can be kept.',
             createSnapshotTitle: 'Create a snapshot',
             createSnapshotHelp:
                 'Saves the current state so you can return to it later.',
@@ -2808,20 +2790,6 @@ export const languageEnglish = {
             gcResult: 'Removable: {0} items ({1})',
             gcDeletedResult: 'Deleted: {0} items ({1})',
             gcConfirm: 'This will delete {0} unused files ({1}). Continue?',
-            compactTitle: 'Database compaction',
-            compactHelp: 'Clears unused space in the database to make its files smaller, and restarts the app.',
-            compactReclaimable: '{0} reclaimable',
-            compact: 'Compact',
-            compactConfirm:
-                'The app restarts to compact the database, and the start may take longer than usual. Continue?',
-            compactNoSpace: 'Not enough storage space to compact. Free up at least {0} and try again.',
-            compactRestartFailed: "Couldn't restart the app. The database is compacted the next time the app starts.",
-            compactOffer:
-                'Compacting the database frees {0}. Compacting restarts the app, and the start may take longer than usual. Compact now?',
-            compacted: 'Compacted the database and freed {0}.',
-            compactStartNoSpace:
-                "Not enough storage space to compact the database. Free up at least {0} and try again.",
-            compactFailed: "Couldn't compact the database. Try again.",
             deleteSnapshotConfirm:
                 "Delete this snapshot? You won't be able to restore to this point.",
             deleteConflictBackupConfirm:
@@ -3065,8 +3033,6 @@ export const languageEnglish = {
             currentItem: 'Current: {0}',
             itemsOf: '{0} / {1}',
             itemsCount: '{0} items',
-            batchFile: 'File {0} of {1}',
-            batchFiles: '{0} files',
             countCharacters: 'Characters',
             countPresets: 'Presets',
             countAssets: 'Assets',
@@ -3086,9 +3052,6 @@ export const languageEnglish = {
             resultCancelledPartial:
                 'Import cancelled. Some attachments that were already saved may remain.',
             resultFailed: 'Import failed. Your existing data is unchanged.',
-            resultBatchFailed: 'Could not import {0} of {1} files.',
-            resultBatchCancelled: 'Import cancelled. {0} of {1} files were imported.',
-            resultBatchPartial: '{0} of {1} files were imported.',
             resultFailedAfterCommit:
                 'The data was imported, but the screen could not be refreshed. Select Refresh screen before making more changes.',
             resultActivationUnresolved: 'The restore result could not be confirmed. Select Refresh screen to check it before making more changes.',
@@ -3110,9 +3073,6 @@ export const languageEnglish = {
             reasonExportTooLarge: '{0} is too large to export.',
             reasonCompatibleDatabaseTooLarge: 'The data is too large to export as a compatible backup. Use a RisuNest backup.',
             reasonCompatibleUnsupportedValue: 'The data contains a value the target app does not support, so it could not be exported as a compatible backup. Use a RisuNest backup.',
-            failureOwners: {
-                character: 'Character: {0}', chat: 'Chat: {1} of {0}', preset: 'Preset: {0}', module: 'Module: {0}', persona: 'Persona: {0}',
-            },
             tooLargeItems: {
                 root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
                 record: 'A data item', backup: 'Backup data', 'backup-entry': 'A backup entry', card: 'The character card', module: 'The module', content: 'The card or module', 'owner-manifest': 'The additional asset list', 'compatible-database': 'The data',
@@ -3174,7 +3134,6 @@ export const languageEnglish = {
             "warningProviderNotAtomic": 'If saving is interrupted, an incomplete file may remain at the selected location.',
             "warningSafUnavailable": 'The file picker is unavailable. Try again when it is available.',
             "warningFollowupFailed": 'The data was imported and the screen refreshed, but plugins could not be reloaded. Reload the plugins.',
-            "warningPluginValuesSkipped": '{0} plugin values could not be restored. Update the app and restore again.',
             "resultBackgroundExpired": 'Work stopped after switching apps or locking the screen. Try again.',
             "resultBackgroundExpiredPartial": 'Work stopped after switching apps or locking the screen. Some changes may already have been saved. Check the result before trying again.',
         },
@@ -3402,17 +3361,6 @@ export const languageEnglish = {
         registrationUsed: "This registration code was already used, so this device cannot connect with it. Register a new device on the sync server, then enter the new registration code.",
         registrationUsedOnboarding: "This registration code was already used, so this device cannot connect with it. Register a new device on the sync server, then enter the new registration code.",
         bindingIncomplete: "The connection was not completed. Press Connect and sync to finish it.",
-        formatSwitchRequired: "Data format switch required",
-        formatSwitchRequiredHelp: "Sync on this device is paused until you switch. Update every other device to the latest version, then switch the data format.",
-        formatSwitch: "Switch",
-        formatSwitchTitle: "Switch the data format?",
-        formatSwitchDescription: "Switching resumes sync on this device, and devices that use an earlier app version cannot sync until they are updated. You cannot undo the switch.",
-        formatSwitchAcknowledge: "I understand that sync stops on earlier app versions.",
-        formatSwitchFailed: "The data format could not be switched. Try again.",
-        appUpdateRequired: "App update required",
-        appUpdateRequiredHelp: "Update the app to continue this sync.",
-        serverUpdateRequired: "Sync server update required",
-        serverUpdateRequiredHelp: "Update the Sync server to the latest version. Sync on this device is paused until it is updated.",
     },
     characterSelectionFailed: "The character could not be selected. Please try again.",
     navigationBlockedWhileEditingPaused: "Editing is paused, so a character cannot be selected.",

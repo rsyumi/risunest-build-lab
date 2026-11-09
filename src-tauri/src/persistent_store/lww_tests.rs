@@ -19,9 +19,6 @@ pub(super) fn whole_library_changes(
     let mut after = projection::capture_all(db, staging_id, true)?;
     let mut overrides = BTreeSet::new();
     for (key, value) in source.into_iter().flatten() {
-        if risunest_sync_wire::library_format::is_key(key) {
-            continue;
-        }
         if after.get(key) != Some(value) {
             overrides.insert(key.clone());
         }
@@ -1227,8 +1224,8 @@ fn receive_progress_moves_only_after_durable_apply_and_exact_finish() {
 
 #[test]
 fn independent_fields_converge_in_both_delivery_orders() {
-    let (_, mut a) = store();
-    let (_, mut b) = store();
+    let (_a_directory, mut a) = store();
+    let (_b_directory, mut b) = store();
     let one = change(&["root", "language"], 10, serde_json::json!("ko"));
     let two = change(&["root", "username"], 20, serde_json::json!("synthetic"));
     receive(&mut a, "one", vec![one.clone()], vec![]);
@@ -1355,7 +1352,7 @@ fn copy_objects(source: &PersistentStore, target: &PersistentStore) {
 fn incremental_message_receive_staging_and_generation_deferral_reuse_after_restart() {
     use crate::persistent_store::hash_work::{reset_hash_work,take_hash_work,DomainWork};
     for generating in [false,true] {
-        let (_,mut sender) = store(); let (directory,mut target) = store();
+        let (_sender_directory,mut sender) = store(); let (directory,mut target) = store();
         create_conversation(&mut sender,"char","chat"); create_conversation(&mut target,"char","chat");
         let messages = (0..1024).map(|i| serde_json::json!({"chatId":format!("m-{i}"),"data":format!("synthetic-{i}")})).collect::<Vec<_>>();
         let replace = |store: &mut PersistentStore,start,delete_count,messages| {
@@ -1444,7 +1441,7 @@ fn incremental_message_receive_staging_and_generation_deferral_reuse_after_resta
 
 #[test]
 fn every_generating_message_list_is_deferred_but_metadata_applies() {
-    let (_, mut sender) = store();
+    let (_sender_directory, mut sender) = store();
     let (dir, mut target) = store();
     for conv in ["one", "two"] {
         create_conversation(&mut sender, "char", conv);
@@ -1546,7 +1543,7 @@ fn every_generating_message_list_is_deferred_but_metadata_applies() {
 
 #[test]
 fn order_preserves_folders_filters_retired_ids_and_appends_concurrent_additions() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     let changes = vec![
         change(
             &["exists", "character", "a"],
@@ -1596,7 +1593,7 @@ fn character_order(store: &PersistentStore) -> Value {
 
 #[test]
 fn trashed_characters_stay_out_of_the_character_order() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     save(&mut store, vec![
         mutation(&["exists", "character", "a"], serde_json::json!({"type":"character"})),
         mutation(&["exists", "character", "b"], serde_json::json!({"type":"character"})),
@@ -1627,7 +1624,7 @@ fn trashed_characters_stay_out_of_the_character_order() {
 
 #[test]
 fn a_received_trash_leaves_the_character_order() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     receive(&mut store, "library", vec![
         change(&["exists", "character", "a"], 1, serde_json::json!({"type":"character"})),
         change(&["exists", "character", "b"], 2, serde_json::json!({"type":"character"})),
@@ -1648,7 +1645,7 @@ fn a_received_trash_leaves_the_character_order() {
 
 #[test]
 fn local_and_opaque_fields_persist_without_publication() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     create_conversation(&mut store, "char", "conv");
     save(
         &mut store,
@@ -1717,7 +1714,7 @@ fn realm_block_loadout_and_onboarding_fields_publish_and_apply_on_a_peer() {
 
 #[test]
 fn plugin_record_deletion_is_reusable_and_generic_record_deletion_is_permanent() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     receive(
         &mut store,
         "plugin",
@@ -1794,7 +1791,7 @@ fn plugin_record_deletion_is_reusable_and_generic_record_deletion_is_permanent()
 #[test]
 fn plugin_local_participation_filters_and_one_batch_shares_stamp() {
     use super::super::device_store::{plugin_values::PluginDeviceMutation, Section};
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     store
         .device_store_mut()
         .unwrap()
@@ -1862,7 +1859,7 @@ fn plugin_local_participation_filters_and_one_batch_shares_stamp() {
 
 #[test]
 fn unpublished_future_clock_repair_requires_native_proof_and_preserves_accepted_clock() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     let future = stamp(device_store::now_ms().unwrap() as u64 + 1_000_000);
     let accepted = stamp(1);
     store
@@ -1905,7 +1902,7 @@ fn unpublished_future_clock_repair_requires_native_proof_and_preserves_accepted_
         )
         .unwrap();
     let before = store.lww_clock_state().unwrap().accepted;
-    assert_eq!(before, Some(accepted));
+    assert_eq!(before, Some(accepted.clone()));
     store
         .lww_retry_unpublished(&header, "proof", corrected)
         .unwrap();
@@ -1921,6 +1918,69 @@ fn unpublished_future_clock_repair_requires_native_proof_and_preserves_accepted_
         store.lww_read_outbox(0.into(), 100).unwrap().entries,
         repaired
     );
+
+    for phase in ["reserved", "library"] {
+        let (directory, mut repairing) = self::store();
+        repairing.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+        clear_outbox(&mut repairing);
+        let future = stamp(device_store::now_ms().unwrap() as u64 + 1_000_000);
+        repairing.device_store().unwrap().connection().execute(
+            "UPDATE lww_clock SET issued=?1,accepted=?2", params![serde_json::to_string(&future).unwrap(), serde_json::to_string(&accepted).unwrap()]).unwrap();
+        save(&mut repairing, vec![mutation(&["root", "language"], serde_json::json!("repair-both"))]);
+        repairing.device_store_mut().unwrap().write_plugin_device_values("repair", &[
+            device_store::plugin_values::PluginDeviceMutation::Set { space: "string".into(), key: "key".into(), value: "device-value".into() },
+        ]).unwrap();
+        let entries = repairing.lww_read_outbox(0.into(), 100).unwrap().entries;
+        assert_eq!(entries.iter().map(|entry| entry.key.clone()).collect::<BTreeSet<_>>(),
+            BTreeSet::from([unit_key(&["root", "language"]).unwrap(), unit_key(&["plugin-local", "repair", "string", "key"]).unwrap()]));
+        assert_eq!(repairing.read_root(None).unwrap().value["language"], "repair-both");
+        assert_eq!(repairing.device_store().unwrap().read_plugin_device_value("repair", "string", "key").unwrap().as_deref(), Some("device-value"));
+        let header = Header { binding_authority: 0.into(), request_id: format!("repair-{phase}") };
+        repairing.lww_record_unpublished_proof(&header, "both-proof", &entries.iter().map(|entry| AckEntry {
+            key: entry.key.clone(), version: entry.version.clone(), stamp: entry.stamp.clone(), value_identity: entry.value.identity().unwrap(),
+        }).collect::<Vec<_>>()).unwrap();
+        let mut peer = PersistentStore::open(directory.path()).unwrap();
+        let request = header.request_id.clone();
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let copy = captured.clone();
+        let callback: Box<dyn FnOnce()> = Box::new(move || {
+            assert!(matches!(peer.lww_recover_intents(), Err(StoreError::CommitBusy)));
+            assert_admission_begin_busy(&mut peer);
+            let frozen = admission_intent_state(&peer, &request).unwrap();
+            assert_eq!(peer.device_store().unwrap().connection().query_row(
+                "SELECT count(*) FROM lww_intent_failures WHERE request_id=?1", [&request], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            *copy.borrow_mut() = Some(frozen);
+            panic!("synthetic Repair interruption after {phase}");
+        });
+        if phase == "reserved" { AFTER_REPAIR_RESERVATION.with(|hook| *hook.borrow_mut() = Some(callback)); }
+        else { AFTER_REPAIR_LIBRARY.with(|hook| *hook.borrow_mut() = Some(callback)); }
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            repairing.lww_retry_unpublished(&header, "both-proof", corrected)
+        }));
+        assert!(stopped.is_err());
+        assert_eq!(admission_intent_state(&repairing, &header.request_id), *captured.borrow());
+        let issued = repairing.lww_clock_state().unwrap().issued.unwrap();
+        assert_eq!(repairing.lww_clock_state().unwrap().accepted, Some(accepted.clone()));
+        assert!(!repairing.lww_request_recorded(&header.request_id).unwrap());
+        drop(repairing);
+        let mut reopened = PersistentStore::open(directory.path()).unwrap();
+        let after = reopened.lww_read_outbox(0.into(), 100).unwrap().entries;
+        assert_eq!(after.len(), entries.len());
+        for original in &entries {
+            let actual = after.iter().find(|entry| entry.key == original.key).unwrap();
+            assert_eq!(actual.value, original.value);
+            assert_eq!(actual.version, header.request_id);
+            assert_eq!(actual.stamp, issued);
+        }
+        assert_eq!(reopened.lww_clock_state().unwrap().accepted, Some(accepted.clone()));
+        assert_eq!(reopened.lww_clock_state().unwrap().issued, Some(issued));
+        assert!(!reopened.lww_request_recorded(&header.request_id).unwrap());
+        assert!(reopened.device_store().unwrap().connection().query_row(
+            "SELECT complete FROM lww_intents WHERE request_id=?1", [&header.request_id], |row| row.get::<_, bool>(0)).unwrap());
+        reopened.lww_retry_unpublished(&header, "both-proof", corrected).unwrap();
+        assert_eq!(reopened.lww_read_outbox(0.into(), 100).unwrap().entries, after);
+        assert!(reopened.lww_quarantined_intents().unwrap().is_empty());
+    }
 }
 
 fn clear_outbox(store: &mut PersistentStore) {
@@ -1948,7 +2008,7 @@ fn clear_outbox(store: &mut PersistentStore) {
 }
 #[test]
 fn same_batch_parent_creation_precedes_message_range_and_local_statics_never_publish() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     store
         .commit(&WorkingSetCommit {
             expected_revision: 0,
@@ -2186,7 +2246,7 @@ fn received_archive_retains_local_fields_and_holds_children_until_restore() {
 }
 #[test]
 fn plugin_local_received_while_disabled_activates_on_enable_without_publication() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     use device_store::Section;
     store
         .device_store_mut()
@@ -2383,8 +2443,8 @@ fn detach_for_new_authority(store: &mut PersistentStore) -> DecimalU64 {
 }
 #[test]
 fn default_binding_sends_nothing_then_changed_child_initializes_only_its_owners() {
-    let (_, mut source) = store();
-    let (_, mut target) = store();
+    let (_source_directory, mut source) = store();
+    let (_target_directory, mut target) = store();
     create_conversation(&mut source, "char", "chat");
     create_conversation(&mut source, "unrelated", "other");
     save(
@@ -2496,8 +2556,8 @@ fn default_binding_sends_nothing_then_changed_child_initializes_only_its_owners(
 }
 #[test]
 fn first_message_edit_initializes_default_parents_and_control_values_without_restamping() {
-    let (_, mut source) = store();
-    let (_, mut target) = store();
+    let (_source_directory, mut source) = store();
+    let (_target_directory, mut target) = store();
     create_conversation(&mut source, "char", "chat");
     save(
         &mut source,
@@ -2560,7 +2620,7 @@ fn first_message_edit_initializes_default_parents_and_control_values_without_res
 }
 #[test]
 fn explicit_nondefault_initialization_pages_existing_state_without_new_stamps() {
-    let (_, mut source) = store();
+    let (_source_directory, mut source) = store();
     create_conversation(&mut source, "char", "chat");
     save(
         &mut source,
@@ -2610,8 +2670,8 @@ fn explicit_nondefault_initialization_pages_existing_state_without_new_stamps() 
 
 #[test]
 fn future_clock_admission_blocks_transport_but_local_messages_keep_committing() {
-    let (_, mut source) = store();
-    let (_, mut target) = store();
+    let (_source_directory, mut source) = store();
+    let (_target_directory, mut target) = store();
     create_conversation(&mut source, "char", "chat");
     let future = stamp(device_store::now_ms().unwrap() as u64 + 1_000_000);
     source
@@ -2706,7 +2766,7 @@ fn new_device_stage(store: &mut PersistentStore) -> (Header, String, Vec<Change>
 }
 #[test]
 fn adopting_a_fresh_writer_keeps_the_clock_unsent_versions_and_receive_progress() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     save(&mut store, vec![mutation(&["root", "language"], serde_json::json!("ko"))]);
     let authority = store.lww_binding_authority().unwrap();
     store
@@ -2762,7 +2822,7 @@ fn adopting_a_fresh_writer_keeps_the_clock_unsent_versions_and_receive_progress(
 #[test]
 fn explicit_new_device_replaces_before_identity_reset_and_completed_retry_preserves_later_edits() {
     use super::super::device_store::plugin_values::PluginDeviceMutation;
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     save(
         &mut store,
         vec![mutation(&["root", "language"], serde_json::json!("old"))],
@@ -2822,6 +2882,11 @@ fn explicit_new_device_replaces_before_identity_reset_and_completed_retry_preser
     store
         .authorize_lww_new_device(&preparation.authorization_id)
         .unwrap();
+    let guard = store.acquire_intent_admission().unwrap();
+    assert!(matches!(store.lww_replace_target_as_new_device(&header, &staging, &preparation.authorization_id), Err(StoreError::CommitBusy)));
+    assert!(store.lww_request_unreserved(&header.request_id).unwrap());
+    assert_eq!(store.lww_clock_state().unwrap().writer_id, before.writer_id);
+    drop(guard);
     let result = store
         .lww_replace_target_as_new_device(&header, &staging, &preparation.authorization_id)
         .unwrap();
@@ -2891,12 +2956,14 @@ fn explicit_new_device_replaces_before_identity_reset_and_completed_retry_preser
     );
     let current = store.lww_clock_state().unwrap();
     let revision = store.revision().unwrap();
+    let guard = store.acquire_intent_admission().unwrap();
     assert_eq!(
         store
             .lww_replace_target_as_new_device(&header, &staging, &preparation.authorization_id)
             .unwrap(),
         result
     );
+    drop(guard);
     assert_eq!(store.revision().unwrap(), revision);
     assert_eq!(store.lww_clock_state().unwrap().issued, current.issued);
     assert_eq!(store.read_root(None).unwrap().value["language"], "later");
@@ -2925,6 +2992,8 @@ fn explicit_new_device_recovery_finishes_after_library_activation_without_exposi
         vec![mutation(&["root", "language"], serde_json::json!("old"))],
     );
     let (header, staging, changes) = new_device_stage(&mut store);
+    let mut delayed = PersistentStore::open(directory.path()).unwrap();
+    let mut receiving = PersistentStore::open(directory.path()).unwrap();
     let preparation = store.prepare_lww_new_device(&header, &staging).unwrap();
     store
         .authorize_lww_new_device(&preparation.authorization_id)
@@ -2961,6 +3030,13 @@ fn explicit_new_device_recovery_finishes_after_library_activation_without_exposi
             ],
         )
         .unwrap();
+    let captured: (String, String, String, String) = store.device_store().unwrap().connection().query_row(
+        "SELECT authority,stamp,body,digest FROM lww_intents WHERE request_id=?1", [&header.request_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+    let guard = store.acquire_intent_admission().unwrap();
+    assert!(matches!(delayed.lww_recover_intents(), Err(StoreError::CommitBusy)));
+    assert_admission_begin_busy(&mut receiving);
+    drop(guard);
     let activation = commit::replace_commit_lww(
         &mut store.connection,
         &store.repository_root,
@@ -2992,10 +3068,47 @@ fn explicit_new_device_recovery_finishes_after_library_activation_without_exposi
         .unwrap()
         .entries
         .is_empty());
+
+    use crate::persistent_store::receive_batches as batches;
+    let page = StageReceive { header: Header { binding_authority: new_authority, request_id: "after-new-device".into() },
+        changes: vec![change(&["root", "language"], 20, serde_json::json!("later"))],
+        progress: Progress { kind: "server".into(), cursor: 9.into(), writer_id: None }, admitted_time_upper_ms: u64::MAX.into() };
+    receiving.lww_stage_receive(&page).unwrap();
+    let source = batches::Source::Staged { header: page.header.clone() };
+    let begin = batches::BeginRequest { candidate: receiving.prepare_native_receive(&source).unwrap(), source, native_baseline: None };
+    let admitted = serde_json::to_value(receiving.begin_local_native_receive(&begin).unwrap()).unwrap();
+    let rows = receiving.lww_receive_row_counts(&page.header.request_id).unwrap();
+    let root = receiving.read_root(None).unwrap();
+    let progress = serde_json::to_value(receiving.lww_receive_progress(new_authority).unwrap()).unwrap();
+    let proof = admission_intent_state(&receiving, &header.request_id);
+    for fault in ["none", "corrupt", "missing"] {
+        if fault == "corrupt" {
+            delayed.connection.execute("UPDATE lww_requests SET digest='synthetic-new-device-corruption' WHERE request_id=?1", [&header.request_id]).unwrap();
+        } else if fault == "missing" {
+            delayed.connection.execute("DELETE FROM lww_requests WHERE request_id=?1", [&header.request_id]).unwrap();
+        }
+        let result = delayed.recover_intent(header.binding_authority, &header.request_id,
+            captured.0.clone(), &captured.1, &captured.2, &captured.3);
+        if fault == "none" { result.unwrap(); }
+        else {
+            let expected = if fault == "missing" { "request-receipt-missing" } else { "request-id-integrity" };
+            assert!(matches!(result, Err(StoreError::Validation { message }) if message == expected));
+        }
+        assert_eq!(admission_intent_state(&receiving, &header.request_id), proof);
+        assert_eq!(receiving.lww_receive_row_counts(&page.header.request_id).unwrap(), rows);
+        assert_eq!(serde_json::to_value(receiving.begin_local_native_receive(&begin).unwrap()).unwrap()["state"], admitted["state"]);
+        assert_eq!(serde_json::to_value(receiving.lww_receive_progress(new_authority).unwrap()).unwrap(), progress);
+        assert_eq!(receiving.read_root(None).unwrap().value, root.value);
+        assert_eq!(receiving.revision().unwrap(), root.revision);
+        assert_eq!(receiving.lww_clock_state().unwrap().writer_id, writer_id);
+        assert_eq!(receiving.lww_binding_authority().unwrap(), new_authority);
+        assert!(receiving.lww_quarantined_intents().unwrap().is_empty());
+    }
 }
+
 #[test]
 fn explicit_new_device_rejects_mutated_or_unattested_stage_without_identity_change() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     let stage = store.replace_begin().unwrap().staging_id;
     store
         .replace_put_root(&stage, &serde_json::json!({}))
@@ -3033,7 +3146,7 @@ fn explicit_new_device_rejects_mutated_or_unattested_stage_without_identity_chan
 #[test]
 fn explicit_new_device_empty_target_activates_empty_stage_without_republishing_local_units() {
     use super::super::sync_selection::SyncTarget;
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     save(
         &mut store,
         vec![mutation(&["root", "language"], serde_json::json!("local"))],
@@ -3112,7 +3225,7 @@ fn an_intent_that_can_no_longer_apply_is_closed_and_later_writes_proceed() {
 
 #[test]
 fn a_character_field_edit_does_not_reproject_the_character_order() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     save(&mut store, vec![
         mutation(&["exists", "character", "a"], serde_json::json!({"type":"character"})),
         mutation(&["exists", "character", "b"], serde_json::json!({"type":"character"})),
@@ -3130,7 +3243,7 @@ fn a_character_field_edit_does_not_reproject_the_character_order() {
 
 #[test]
 fn a_drain_with_no_work_leaves_both_revisions_unchanged() {
-    let (_, mut store) = store();
+    let (_store_directory, mut store) = store();
     let result = receive(&mut store, "held", vec![change(&["conversation", "missing", "chat", "name"], 1, serde_json::json!("held"))], vec![]);
     assert_eq!(result.held_keys.len(), 1);
     let device_revision = |store: &PersistentStore| -> i64 {
@@ -3192,14 +3305,9 @@ fn ranges_for_one_conversation_in_one_commit_capture_once_from_their_pages() {
 }
 
 #[test]
-fn superseded_message_pages_are_collected_after_the_short_grace() {
-    let (grace, short, limit) = (
-        super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
-        super::super::SUPERSEDED_OBJECT_GRACE_MS,
-        super::super::MESSAGE_PAGE_SWEEP_LIMIT,
-    );
-    let library = super::super::MessageObjectStore::Library;
-    let clock = || super::super::commands::current_time_ms().unwrap();
+fn superseded_message_pages_are_collected_only_after_the_grace_period() {
+    let (_dir, mut store) = store();
+    create_conversation(&mut store, "char", "chat");
     let message = |i: usize| serde_json::json!({"chatId":format!("m-{i}"),"data":format!("synthetic-{i}")});
     let append = |store: &mut PersistentStore, start: usize, messages: Vec<Value>| {
         store.commit(&WorkingSetCommit {
@@ -3211,53 +3319,42 @@ fn superseded_message_pages_are_collected_after_the_short_grace() {
             ..Default::default()
         }).unwrap();
     };
-    let objects = |store: &PersistentStore| -> BTreeSet<String> {
-        store.connection.prepare("SELECT hash FROM message_page_objects").unwrap()
-            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<BTreeSet<_>, _>>().unwrap()
+    let referenced = |store: &PersistentStore| -> BTreeSet<String> {
+        let mut hashes = store.connection.prepare("SELECT hash FROM message_page_indexes").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<BTreeSet<_>, _>>().unwrap();
+        let body: Vec<u8> = store.connection.query_row("SELECT body FROM message_page_manifests", [], |row| row.get(0)).unwrap();
+        hashes.insert(risunest_sync_wire::hash(&body));
+        hashes
     };
-    let key = UnitKey::new(&["messages", "char", "chat"]).unwrap();
-    let value = |store: &PersistentStore| read_unit(&store.connection, &key).unwrap().unwrap().1;
-    let dependency_root = |store: &PersistentStore| match value(store) {
-        UnitValue::Object { descriptor, .. } => descriptor.dependency_root,
-        other => panic!("{other:?}"),
+    let present = |store: &PersistentStore, hash: &str| -> bool {
+        store.connection.query_row("SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)", [hash], |row| row.get(0)).unwrap()
     };
-    // A short conversation names its pages inline, a long one through a reference tree.
-    for (count, tree) in [(40, false), (4_000, true)] {
-        let (_dir, mut store) = store();
-        create_conversation(&mut store, "char", "chat");
-        append(&mut store, 0, (0..count).map(message).collect());
-        assert_eq!(dependency_root(&store).is_some(), tree, "{count} messages");
-        let settled = clock() + 2 * grace;
-        store.sweep_message_page_objects(library, settled, limit).unwrap();
-        store.sweep_message_page_objects(library, settled + grace, limit).unwrap();
-        let held = objects(&store);
-        let replaced_root = dependency_root(&store);
-
-        let before = clock();
-        append(&mut store, count, vec![message(count)]);
-        let after = clock();
-        store.sweep_message_page_objects(library, before + short - 60_000, limit).unwrap();
-        assert!(held.is_subset(&objects(&store)), "{count}: a replaced object went before its grace");
-        store.sweep_message_page_objects(library, after + short, limit).unwrap();
-        let collected = objects(&store);
-        assert!(!held.is_subset(&collected), "{count}: the write replaced nothing");
-        // The long path, which marks whatever no reference names, has nothing left to delete.
-        store.sweep_message_page_objects(library, after + short + grace, limit).unwrap();
-        store.sweep_message_page_objects(library, after + short + 2 * grace, limit).unwrap();
-        let lingering = collected.difference(&objects(&store)).cloned().collect::<Vec<_>>();
-        assert!(lingering.is_empty(), "{count}: replaced objects waited for the long grace: {lingering:?}");
-        if let Some(root) = replaced_root {
-            assert!(!collected.contains(&root), "the replaced reference tree outlived the short grace");
-        }
-        for hash in held.difference(&collected) {
-            let proofs: i64 = store.connection.query_row(
-                "SELECT (SELECT count(*) FROM message_page_proofs WHERE hash=?1)+(SELECT count(*) FROM message_page_verified_objects WHERE hash=?1)",
-                [hash], |row| row.get(0),
-            ).unwrap();
-            assert_eq!(proofs, 0);
-        }
-        super::super::message_pages::validate_manifest(&store.connection, &value(&store)).unwrap();
+    append(&mut store, 0, (0..40).map(message).collect());
+    let before = referenced(&store);
+    append(&mut store, 40, vec![message(40)]);
+    let after = referenced(&store);
+    let superseded = before.difference(&after).cloned().collect::<Vec<_>>();
+    assert!(!superseded.is_empty());
+    let now = 1_900_000_000_000i64;
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
+    assert!(superseded.iter().all(|hash| present(&store, hash)));
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS - 1, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
+    assert!(superseded.iter().all(|hash| present(&store, hash)));
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
+    for hash in &superseded {
+        assert!(!present(&store, hash), "superseded object {hash} survived maintenance");
+        let proofs: i64 = store.connection.query_row(
+            "SELECT (SELECT count(*) FROM message_page_proofs WHERE hash=?1)+(SELECT count(*) FROM message_page_verified_objects WHERE hash=?1)",
+            [hash], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(proofs, 0);
     }
+    assert!(after.iter().all(|hash| present(&store, hash)));
+    let key = UnitKey::new(&["messages", "char", "chat"]).unwrap();
+    let value = read_unit(&store.connection, &key).unwrap().unwrap().1;
+    let UnitValue::Object { descriptor_hash, descriptor } = &value else { panic!() };
+    assert!(present(&store, descriptor_hash) && present(&store, &descriptor.object_hash));
+    super::super::message_pages::validate_manifest(&store.connection, &value).unwrap();
 }
 
 #[test]
@@ -3560,4 +3657,1581 @@ fn released_reader_rejects_guarded_gallery_intents_without_changing_ordinary_com
             assert!(serde_json::from_str::<Intent>(&old_body).is_ok());
         }
     }
+}
+
+#[test]
+fn reconciled_archive_units_restore_on_a_peer_using_the_existing_receive_path() {
+    use crate::persistent_store::archive_reconcile::{ArchiveReconcileRequest, ArchiveReconcileResult};
+    let (_source_dir, mut source) = store();
+    let (_target_dir, mut target) = store();
+    create_conversation(&mut source, "char", "chat");
+    create_conversation(&mut target, "char", "chat");
+    save(&mut source, vec![mutation(&["character", "char", "privateOwn"], serde_json::json!("source-only"))]);
+    save(&mut target, vec![mutation(&["character", "char", "privateOwn"], serde_json::json!("target-only"))]);
+    let lease = source.acquire_revision(source.revision().unwrap()).unwrap().lease;
+    let histories = source.archive_reconcile_histories(&lease, "char", &["chat".into()]).unwrap();
+    source.release_revision(&lease).unwrap();
+    source.archive_character("char", source.revision().unwrap(), 10).unwrap();
+    target.archive_character("char", target.revision().unwrap(), 10).unwrap();
+    clear_outbox(&mut source);
+    let binding = source.lww_binding_state().unwrap();
+    let request = ArchiveReconcileRequest {
+        header: Header { binding_authority: binding.target_authority, request_id: "peer-archive-reconcile".into() },
+        expected_revision: source.revision().unwrap(), selection_epoch: binding.selection_epoch,
+        character_id: "char".into(), histories,
+        unit_mutations: vec![mutation(&["character", "char", "name"], serde_json::json!("shared edit")),
+            mutation(&["character", "char", "privateOwn"], serde_json::json!("source-edited"))],
+        conversations: vec![crate::persistent_store::ConversationMutation::ReplaceRange {
+            character_id: "char".into(), conversation_id: "chat".into(), start: 0, delete_count: 0,
+            messages: vec![serde_json::json!({"chatId":"saved-output","role":"char","data":"saved generation output","futureField":{"keep":true}})],
+            conversation: None, configured_index: None,
+        }], asset_owner_heads: vec![],
+    };
+    assert!(matches!(source.reconcile_archived_character(&request, &|| false).unwrap(), ArchiveReconcileResult::Committed { .. }));
+    let changes = source.lww_read_outbox(binding.target_authority, 100).unwrap().entries.into_iter()
+        .map(|entry| Change { key: entry.key, stamp: entry.stamp, value: entry.value }).collect::<Vec<_>>();
+    assert!(changes.iter().any(|change| change.key.components()[0] == "archive"));
+    assert!(changes.iter().any(|change| change.key.components()[0] == "messages"));
+    assert!(!changes.iter().any(|change| change.key.components().last().is_some_and(|field| field == "privateOwn")));
+    copy_objects(&source, &target);
+    let received = receive(&mut target, "peer-reconciled-units", changes, vec![]);
+    assert!(received.held_keys.contains(&unit_key(&["messages", "char", "chat"]).unwrap()));
+    assert!(target.read_character("char", None).is_err());
+    target.restore_character("char", target.revision().unwrap()).unwrap();
+    let drained = target.lww_drain_deferred(&ApplyReceive {
+        header: Header { binding_authority: target.lww_binding_authority().unwrap(), request_id: "peer-reconciled-drain".into() },
+        generating: vec![],
+    }).unwrap();
+    assert!(drained.affected_keys.contains(&unit_key(&["messages", "char", "chat"]).unwrap()));
+    let detail = target.read_character("char", None).unwrap().unwrap().value;
+    assert_eq!(detail["name"], "shared edit");
+    assert_eq!(detail["privateOwn"], "target-only");
+    let chat = target.read_conversation("char", "chat", None).unwrap().unwrap().value;
+    assert_eq!(chat["message"], serde_json::json!([{"chatId":"saved-output","role":"char","data":"saved generation output","futureField":{"keep":true}}]));
+}
+
+
+#[test]
+fn recorded_receive_recovers_both_partitions_and_released_held_keys_after_interruption() {
+    let (dir, mut store) = store();
+    let held = change(&["character", "missing", "name"], 10, serde_json::json!("held remote name"));
+    assert_eq!(receive(&mut store, "older-held-page", vec![held.clone()], vec![]).held_keys, vec![held.key.clone()]);
+    let header = Header { binding_authority: 0.into(), request_id: "recorded-partitions".into() };
+    let changes = vec![
+        change(&["exists", "character", "missing"], 11, serde_json::json!({"type":"character"})),
+        change(&["plugin", "synthetic", "setting"], 11, serde_json::json!("library value")),
+        change(&["plugin-local", "synthetic", "string", "setting"], 11, serde_json::json!("device value")),
+    ];
+    store.lww_stage_receive(&StageReceive { header: header.clone(), changes, progress: Progress { kind: "server".into(), cursor: 2.into(), writer_id: None }, admitted_time_upper_ms: 100.into() }).unwrap();
+    let request = ApplyReceive { header: header.clone(), generating: vec![] };
+    store.device_store().unwrap().connection().execute_batch("CREATE TEMP TRIGGER fail_receive_receipt BEFORE INSERT ON device_settings WHEN NEW.key='native-server-receive-receipt.v1' BEGIN SELECT RAISE(ABORT,'synthetic partition interruption'); END").unwrap();
+    assert!(store.lww_apply_receive_recorded(&request).is_err());
+    let committed_revision = store.revision().unwrap();
+    assert_eq!(store.read_character("missing", None).unwrap().unwrap().value["name"], "held remote name");
+    drop(store);
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let result = store.lww_apply_receive_recorded(&request).unwrap();
+    assert_eq!(result.revision, committed_revision);
+    assert!(result.affected_keys.contains(&held.key));
+    assert!(result.affected_keys.contains(&unit_key(&["plugin-local", "synthetic", "string", "setting"]).unwrap()));
+    assert_eq!(result.plugin_storage_changed_keys, vec![unit_key(&["plugin", "synthetic", "setting"]).unwrap()]);
+    assert!(result.held_keys.is_empty());
+    store.lww_finish_receive(&header).unwrap();
+    drop(store);
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    assert_eq!(serde_json::to_value(store.lww_apply_receive_recorded(&request).unwrap()).unwrap(), serde_json::to_value(&result).unwrap());
+    assert_eq!(store.revision().unwrap(), committed_revision);
+    let wrong = Header { request_id: "other-page".into(), ..header.clone() };
+    store.clear_native_receive_receipt(&wrong).unwrap();
+    assert!(read_native_receive_receipt(&store.connection, false, &header).unwrap().is_some());
+    store.device_store().unwrap().connection().execute("DELETE FROM device_settings WHERE key=?1", [NATIVE_RECEIVE_RECEIPT_SETTING]).unwrap();
+    let partial = store.lww_apply_receive_recorded(&request).unwrap();
+    assert!(partial.current_state_recovery_required);
+    assert_eq!(partial.revision, committed_revision);
+    store.clear_native_receive_receipt(&header).unwrap();
+    assert!(read_native_receive_receipt(&store.connection, false, &header).unwrap().is_none());
+    assert!(read_native_receive_receipt(store.device_store().unwrap().connection(), true, &header).unwrap().is_none());
+    let recovered = store.lww_apply_receive_recorded(&request).unwrap();
+    assert!(recovered.current_state_recovery_required);
+    assert_eq!(recovered.revision, committed_revision);
+    assert!(recovered.affected_keys.is_empty());
+    assert_eq!(store.read_character("missing", None).unwrap().unwrap().value["name"], "held remote name");
+}
+
+#[test]
+fn recorded_receive_noop_keeps_revisions_and_preserves_deferred_result_on_retry() {
+    let (_dir, mut store) = store();
+    create_conversation(&mut store, "char", "chat");
+    let time = store.lww_clock_state().unwrap().issued.unwrap().physical_ms.0 + 1;
+    let messages = Change { key: unit_key(&["messages", "char", "chat"]).unwrap(), stamp: stamp(time), value: incoming_message_value(&store, "char", "chat", "deferred recorded message") };
+    let header = Header { binding_authority: 0.into(), request_id: "recorded-deferred".into() };
+    store.lww_stage_receive(&StageReceive { header: header.clone(), changes: vec![messages.clone()], progress: Progress { kind: "server".into(), cursor: 1.into(), writer_id: None }, admitted_time_upper_ms: u64::MAX.into() }).unwrap();
+    let revision = store.revision().unwrap();
+    let request = ApplyReceive { header: header.clone(), generating: vec![MessageLocator { character_id: "char".into(), conversation_id: "chat".into(), start: None }] };
+    let result = store.lww_apply_receive_recorded(&request).unwrap();
+    assert_eq!(result.revision, revision);
+    assert_eq!(result.deferred_keys, vec![messages.key]);
+    assert!(result.affected_keys.is_empty());
+    let retry = store.lww_apply_receive_recorded(&ApplyReceive { header: header.clone(), generating: vec![] }).unwrap();
+    let mut replay = result.clone();
+    replay.current_state_recovery_required = true;
+    assert_eq!(serde_json::to_value(retry).unwrap(), serde_json::to_value(replay).unwrap());
+    assert_eq!(store.revision().unwrap(), revision);
+    store.lww_finish_receive(&header).unwrap();
+    let drained = store.lww_drain_deferred(&ApplyReceive { header: Header { request_id: "drain-recorded".into(), ..header }, generating: vec![] }).unwrap();
+    assert!(!drained.affected_keys.is_empty());
+    assert!(drained.deferred_keys.is_empty());
+}
+
+
+#[test]
+fn recorded_receive_recovers_archive_effect_after_its_separate_commit() {
+    let (_source_directory, mut source) = store();
+    let (directory, mut target) = store();
+    create_conversation(&mut source, "char", "chat");
+    create_conversation(&mut target, "char", "chat");
+    clear_outbox(&mut source);
+    source.archive_character("char", source.revision().unwrap(), 10).unwrap();
+    copy_objects(&source, &target);
+    let archive = source.lww_read_outbox(0.into(), 100).unwrap().entries.remove(0);
+    let time = device_store::now_ms().unwrap() as u64 + 100_000;
+    receive(&mut target, "before-recorded-restore", vec![Change { key: archive.key.clone(), stamp: stamp(time), value: archive.value }], vec![]);
+    let header = Header { binding_authority: 0.into(), request_id: "recorded-restore".into() };
+    target.lww_stage_receive(&StageReceive { header: header.clone(), changes: vec![Change { key: archive.key.clone(), stamp: stamp(time + 1), value: UnitValue::Deleted }], progress: Progress { kind: "server".into(), cursor: 2.into(), writer_id: None }, admitted_time_upper_ms: u64::MAX.into() }).unwrap();
+    target.connection.execute_batch("CREATE TEMP TRIGGER fail_library_receive_receipt BEFORE UPDATE ON app_kv WHEN NEW.key='native-server-receive-receipt.v1' AND json_type(NEW.value,'$.result')='object' BEGIN SELECT RAISE(ABORT,'synthetic post-archive interruption'); END").unwrap();
+    let request = ApplyReceive { header, generating: vec![] };
+    assert!(target.lww_apply_receive_recorded(&request).is_err());
+    assert!(target.read_conversation("char", "chat", None).unwrap().is_some());
+    let revision = target.revision().unwrap();
+    drop(target);
+    let mut target = PersistentStore::open(directory.path()).unwrap();
+    let result = target.lww_apply_receive_recorded(&request).unwrap();
+    assert_eq!(result.revision, revision);
+    assert_eq!(result.affected_keys, vec![archive.key]);
+    let mut replay = result.clone();
+    replay.current_state_recovery_required = true;
+    assert_eq!(serde_json::to_value(target.lww_apply_receive_recorded(&request).unwrap()).unwrap(), serde_json::to_value(replay).unwrap());
+}
+
+#[test]
+fn recorded_receive_provenance_distinguishes_own_changes_from_unrelated_native_writes() {
+    for intervening in ["none", "library", "device", "hypa", "old-evidence"] {
+        let (_dir, mut store) = store();
+        store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+        let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+        let mut baseline = store.read_native_receive_evidence(&lease).unwrap();
+        if intervening == "old-evidence" { baseline.device_revision = None; }
+        if intervening == "library" {
+            receive(&mut store, "native-library-write", vec![change(&["plugin", "unrelated", "key"], 10, serde_json::json!("native"))], vec![]);
+        } else if intervening == "device" {
+            receive(&mut store, "native-device-write", vec![change(&["plugin-local", "unrelated", "string", "key"], 10, serde_json::json!("native"))], vec![]);
+            assert_eq!(store.device_store().unwrap().read_plugin_device_value("unrelated", "string", "key").unwrap().as_deref(), Some("native"));
+        }
+        if intervening == "hypa" {
+            store.device_store_mut().unwrap().write_hypa_embeddings(&[device_store::hypa::HypaEmbeddingWrite {
+                cache_key: "a".repeat(64), producer: "synthetic".into(), model: "synthetic".into(), endpoint: None,
+                preprocess_version: 1, dimensions: 1, vector: 1.0f32.to_le_bytes().to_vec(), metadata: None,
+            }]).unwrap();
+            assert_eq!(store.device_store().unwrap().read_hypa_embeddings(&["a".repeat(64)]).unwrap()[0].vector,
+                Some(1.0f32.to_le_bytes().to_vec()));
+            assert_eq!(crate::persistent_store::receive_evidence::device_fence(store.device_store().unwrap().connection()).unwrap(), baseline.device_plugins);
+        }
+        let own = change(&["plugin", "page", "key"], 11, serde_json::json!("received"));
+        let own_device = change(&["plugin-local", "page", "string", "key"], 11, serde_json::json!("received-device"));
+        let header = Header { binding_authority: 0.into(), request_id: "observed-page".into() };
+        store.lww_stage_receive(&StageReceive { header: header.clone(), changes: vec![own.clone(), own_device.clone()],
+            progress: Progress { kind: "server".into(), cursor: 1.into(), writer_id: None }, admitted_time_upper_ms: 100.into() }).unwrap();
+        let result = store.lww_apply_receive_recorded_with_baseline(&ApplyReceive { header, generating: vec![] }, Some(&baseline)).unwrap();
+        assert_eq!(result.current_state_recovery_required, intervening != "none", "{intervening}");
+        assert_eq!(result.plugin_storage_changed_keys, vec![own.key, own_device.key]);
+        assert_eq!(store.read_plugin_storage("page", "key", None).unwrap().unwrap().value, serde_json::json!("received"));
+        assert_eq!(store.device_store().unwrap().read_plugin_device_value("page", "string", "key").unwrap().as_deref(), Some("received-device"));
+        assert_ne!(result.native_device_plugin_fence.as_ref(), Some(&baseline.device_plugins));
+        let current = store.acquire_revision(result.revision).unwrap().lease;
+        assert_eq!(result.native_device_plugin_fence, Some(store.read_native_receive_evidence(&current).unwrap().device_plugins));
+        store.release_revision(&current).unwrap();
+        store.release_revision(&lease).unwrap();
+    }
+}
+
+#[test]
+fn receive_evidence_keeps_decimal_device_revision_and_rejects_stale_or_released_library_lease() {
+    let (_dir, mut store) = store();
+    store.device_store().unwrap().connection().execute("UPDATE plugin_gc_state SET revision=9007199254740993 WHERE singleton=1", []).unwrap();
+    store.device_store().unwrap().connection().execute("UPDATE device_meta SET revision=9007199254740995 WHERE singleton=1", []).unwrap();
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+    let evidence = store.read_native_receive_evidence(&lease).unwrap();
+    assert_eq!(serde_json::to_value(&evidence).unwrap()["devicePlugins"]["revision"], "9007199254740993");
+    assert_eq!(serde_json::to_value(&evidence).unwrap()["deviceRevision"], "9007199254740995");
+    receive(&mut store, "evidence-library-write", vec![change(&["plugin", "native", "key"], 10, serde_json::json!("new"))], vec![]);
+    assert!(matches!(store.read_native_receive_evidence(&lease), Err(StoreError::RevisionConflict { .. })));
+    store.release_revision(&lease).unwrap();
+    assert!(matches!(store.read_native_receive_evidence(&lease), Err(StoreError::SnapshotReleased)));
+}
+
+#[test]
+fn recorded_receive_detects_device_write_after_its_partition_commits() {
+    let (directory, mut store) = store();
+    store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    let mut peer = PersistentStore::open(directory.path()).unwrap();
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+    let baseline = store.read_native_receive_evidence(&lease).unwrap();
+    let header = Header { binding_authority: 0.into(), request_id: "device-gap-page".into() };
+    store.lww_stage_receive(&StageReceive { header: header.clone(), changes: vec![change(&["plugin", "page", "key"], 11, serde_json::json!("received"))],
+        progress: Progress { kind: "server".into(), cursor: 1.into(), writer_id: None }, admitted_time_upper_ms: 100.into() }).unwrap();
+    crate::persistent_store::receive_evidence::test_hooks::set_after_device(move || {
+        peer.device_store_mut().unwrap().write_plugin_device_values("other", &[
+            device_store::plugin_values::PluginDeviceMutation::Set { space: "string".into(), key: "key".into(), value: "native".into() },
+        ]).unwrap();
+    });
+    let result = store.lww_apply_receive_recorded_with_baseline(&ApplyReceive { header, generating: vec![] }, Some(&baseline)).unwrap();
+    assert!(result.current_state_recovery_required);
+    assert_ne!(result.native_device_plugin_fence, Some(baseline.device_plugins));
+    assert_eq!(store.read_plugin_storage("page", "key", None).unwrap().unwrap().value, serde_json::json!("received"));
+    assert_eq!(store.device_store().unwrap().read_plugin_device_value("other", "string", "key").unwrap().as_deref(), Some("native"));
+    store.release_revision(&lease).unwrap();
+}
+
+#[test]
+fn recorded_receive_archive_revision_chain_rejects_a_foreign_commit_between_steps() {
+    for intervening in [false, true] {
+        let (_source_directory, mut source) = store();
+        let (directory, mut target) = store();
+        for owner in ["first", "second"] {
+            create_conversation(&mut source, owner, "chat");
+            create_conversation(&mut target, owner, "chat");
+        }
+        clear_outbox(&mut source);
+        for owner in ["first", "second"] {
+            source.archive_character(owner, source.revision().unwrap(), 10).unwrap();
+        }
+        copy_objects(&source, &target);
+        let archives = source.lww_read_outbox(0.into(), 100).unwrap().entries;
+        assert_eq!(archives.len(), 2);
+        let time = device_store::now_ms().unwrap() as u64 + 100_000;
+        let peer = intervening.then(|| PersistentStore::open(directory.path()).unwrap());
+        let lease = target.acquire_revision(target.revision().unwrap()).unwrap().lease;
+        let baseline = target.read_native_receive_evidence(&lease).unwrap();
+        let header = Header { binding_authority: 0.into(), request_id: "archive-provenance-page".into() };
+        target.lww_stage_receive(&StageReceive { header: header.clone(), changes: archives.iter().map(|archive| Change { key: archive.key.clone(), stamp: stamp(time), value: archive.value.clone() }).collect(),
+            progress: Progress { kind: "server".into(), cursor: 1.into(), writer_id: None }, admitted_time_upper_ms: u64::MAX.into() }).unwrap();
+        if let Some(mut peer) = peer {
+            crate::persistent_store::receive_evidence::test_hooks::set_after_archive(move || {
+                // A foreign writer does not participate in the new admission File protocol.
+                let header = Header { binding_authority: peer.lww_binding_authority().unwrap(), request_id: "foreign-library-write".into() };
+                let input = WorkingSetCommit { expected_revision: peer.revision().unwrap(), request_id: Some(header.request_id.clone()),
+                    unit_mutations: Some(vec![mutation(&["plugin", "other", "key"], serde_json::json!("native"))]), ..Default::default() };
+                let stamp = peer.reserve_commit_only_stamp(&header).unwrap();
+                let digest = commit_intent_digest(&input).unwrap();
+                commit::commit_lww(&mut peer.connection, &input, &[], &header, &stamp, &digest).unwrap();
+            });
+        }
+        let result = target.lww_apply_receive_recorded_with_baseline(&ApplyReceive { header, generating: vec![] }, Some(&baseline)).unwrap();
+        assert_eq!(result.current_state_recovery_required, intervening);
+        for archive in &archives { assert!(result.affected_keys.contains(&archive.key)); }
+        for owner in ["first", "second"] { assert!(target.archive_preview(owner, None).unwrap().archived); }
+        if intervening { assert_eq!(target.read_plugin_storage("other", "key", None).unwrap().unwrap().value, serde_json::json!("native")); }
+        target.release_revision(&lease).unwrap();
+    }
+}
+
+
+fn admission_intent_state(store: &PersistentStore, request: &str) -> Option<String> {
+    store.device_store().unwrap().connection().query_row(
+        "SELECT json_array(authority,stamp,body,digest,complete,
+            (SELECT identity FROM lww_intent_proofs WHERE request_id=i.request_id),
+            (SELECT json_array(failures,error,quarantined) FROM lww_intent_failures WHERE request_id=i.request_id),
+            (SELECT json_group_array(json_array(ordinal,key,stamp,value,source_override)) FROM
+                (SELECT * FROM lww_intent_rows WHERE request_id=i.request_id ORDER BY ordinal)))
+         FROM lww_intents i WHERE request_id=?1", [request], |row| row.get(0)).optional().unwrap()
+}
+
+fn assert_admission_begin_busy(store: &mut PersistentStore) {
+    use crate::persistent_store::receive_batches as batches;
+    let source = batches::Source::Drain { binding_authority: store.lww_binding_authority().unwrap() };
+    let request = batches::BeginRequest { candidate: store.prepare_native_receive(&source).unwrap(), source, native_baseline: None };
+    assert!(matches!(store.begin_local_native_receive(&request), Err(StoreError::CommitBusy)));
+}
+
+fn quarantined_commit(store: &mut PersistentStore, request: &str) -> QuarantinedIntent {
+    let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: request.into() };
+    let input = WorkingSetCommit { expected_revision: store.revision().unwrap(), request_id: Some(request.into()),
+        unit_mutations: Some(vec![mutation(&["root", "language"], serde_json::json!("uncommitted"))]), ..Default::default() };
+    store.reserve_intent(&header, &Intent::for_commit(&input, &[])).unwrap();
+    for _ in 0..3 { store.record_intent_failure(request, &error("synthetic-quarantined-input")).unwrap(); }
+    store.lww_quarantined_intents().unwrap().into_iter().find(|entry| entry.request_id == request).unwrap()
+}
+
+#[test]
+fn intent_admission_contends_across_handles_and_preserves_pending_phase_failure() {
+    let (directory, mut owner) = store();
+    let mut peer = PersistentStore::open(directory.path()).unwrap();
+    let (_independent_directory, mut independent) = store();
+    let revision = owner.revision().unwrap();
+    let guard = owner.acquire_intent_admission().unwrap();
+    assert!(matches!(peer.lww_recover_intents(), Err(StoreError::CommitBusy)));
+    assert!(!peer.lww_recover_intents_at_open().unwrap());
+    let input = WorkingSetCommit { expected_revision: revision, request_id: Some("guarded-live".into()),
+        unit_mutations: Some(vec![mutation(&["root", "language"], serde_json::json!("received"))]), ..Default::default() };
+    assert!(matches!(peer.commit(&input), Err(StoreError::CommitBusy)));
+    assert!(peer.lww_request_unreserved("guarded-live").unwrap());
+    save(&mut independent, vec![mutation(&["root", "language"], serde_json::json!("independent"))]);
+    drop(guard);
+
+    let mut active_peer = PersistentStore::open(directory.path()).unwrap();
+    BEFORE_HELD_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        assert!(matches!(active_peer.lww_recover_intents(), Err(StoreError::CommitBusy)));
+        assert!(!active_peer.lww_request_unreserved("guarded-live").unwrap());
+        FAIL_ADMISSION_PHASE.with(|failure| failure.set(true));
+    })));
+    let failure = owner.commit(&input).unwrap_err();
+    assert!(matches!(failure, StoreError::Validation { ref message } if message == "intent-admission-synthetic-phase"));
+    assert_eq!(owner.revision().unwrap(), revision);
+    assert!(!owner.lww_request_recorded("guarded-live").unwrap());
+    let db = owner.device_store().unwrap().connection();
+    let pending: (bool, i64, i64) = db.query_row(
+        "SELECT complete,(SELECT count(*) FROM lww_intent_proofs WHERE request_id=i.request_id),
+            (SELECT count(*) FROM lww_intent_failures WHERE request_id=i.request_id)
+            FROM lww_intents i WHERE request_id=?1", ["guarded-live"],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    assert_eq!(pending, (false, 1, 0));
+    let frozen = admission_intent_state(&owner, "guarded-live");
+    BEFORE_REPLAY_PHASE.with(|hook| *hook.borrow_mut() = Some(Box::new(|| {
+        FAIL_ADMISSION_PHASE.with(|failure| failure.set(true));
+    })));
+    assert!(matches!(peer.lww_recover_intents(), Err(StoreError::Validation { message }) if message == "intent-admission-synthetic-phase"));
+    assert_eq!(admission_intent_state(&peer, "guarded-live"), frozen);
+    assert_eq!(peer.revision().unwrap(), revision);
+    assert!(!peer.lww_request_recorded("guarded-live").unwrap());
+    assert!(peer.lww_quarantined_intents().unwrap().is_empty());
+    peer.lww_recover_intents().unwrap();
+    assert_eq!(peer.read_root(None).unwrap().value["language"], "received");
+    assert_eq!(peer.commit(&input).unwrap().revision, revision + 1);
+    assert_eq!(peer.revision().unwrap(), revision + 1);
+}
+
+#[test]
+fn stale_switch_replay_cannot_erase_a_new_receive_after_another_handle_completed_it() {
+    use crate::persistent_store::{receive_batches as batches, sync_selection::{SwitchBindingRequest, SyncTarget}};
+    let (directory, mut delayed) = store();
+    let mut completing = PersistentStore::open(directory.path()).unwrap();
+    let mut receiving = PersistentStore::open(directory.path()).unwrap();
+    let binding = delayed.lww_binding_state().unwrap();
+    let target = SyncTarget::External("serialization-target".into());
+    let inspection = delayed.register_lww_binding_inspection(binding.target_authority, &target,
+        "serialization-target-id", "serialization-library-id").unwrap();
+    let request = SwitchBindingRequest { initial_publication: false,
+        header: Header { binding_authority: binding.target_authority, request_id: "serialization-switch".into() },
+        expected_selection_epoch: binding.selection_epoch, target, inspection_id: Some(inspection) };
+    delayed.stop_next_switch_after_library_commit();
+    assert!(delayed.switch_lww_binding(&request).is_err());
+    let captured: (String, String, String, String) = delayed.device_store().unwrap().connection().query_row(
+        "SELECT authority,stamp,body,digest FROM lww_intents WHERE request_id=?1", [&request.header.request_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+    let old_source = batches::Source::Drain { binding_authority: request.header.binding_authority };
+    let old_candidate = receiving.prepare_native_receive(&old_source).unwrap();
+    let guard = delayed.acquire_intent_admission().unwrap();
+    assert!(matches!(completing.lww_recover_intents(), Err(StoreError::CommitBusy)));
+    assert!(matches!(receiving.begin_local_native_receive(&batches::BeginRequest {
+        candidate: old_candidate, source: old_source, native_baseline: None }), Err(StoreError::CommitBusy)));
+    assert_eq!(receiving.lww_binding_authority().unwrap(), request.header.binding_authority);
+    drop(guard);
+    completing.lww_recover_intents().unwrap();
+    let current = receiving.lww_binding_authority().unwrap();
+    assert_eq!(current.0, request.header.binding_authority.0 + 1);
+    let page = StageReceive { header: Header { binding_authority: current, request_id: "after-completed-switch".into() },
+        changes: vec![change(&["root", "language"], 10, serde_json::json!("after"))],
+        progress: Progress { kind: "server".into(), cursor: 8.into(), writer_id: None }, admitted_time_upper_ms: u64::MAX.into() };
+    receiving.lww_stage_receive(&page).unwrap();
+    let source = batches::Source::Staged { header: page.header.clone() };
+    let begin = batches::BeginRequest { candidate: receiving.prepare_native_receive(&source).unwrap(), source, native_baseline: None };
+    let first = receiving.begin_local_native_receive(&begin).unwrap();
+    let before = serde_json::to_value(&first).unwrap();
+    let rows = receiving.lww_receive_row_counts(&page.header.request_id).unwrap();
+    assert_eq!(rows, (1, 0));
+    delayed.recover_intent(request.header.binding_authority, &request.header.request_id,
+        captured.0.clone(), &captured.1, &captured.2, &captured.3).unwrap();
+    assert_eq!(receiving.lww_receive_row_counts(&page.header.request_id).unwrap(), rows);
+    let retry = serde_json::to_value(receiving.begin_local_native_receive(&begin).unwrap()).unwrap();
+    assert_eq!(retry["state"], before["state"]);
+    assert_eq!(receiving.lww_binding_authority().unwrap(), current);
+    assert!(receiving.device_store().unwrap().connection().query_row(
+        "SELECT EXISTS(SELECT 1 FROM lww_receive WHERE request_id=?1)", [&page.header.request_id], |row| row.get::<_, bool>(0)).unwrap());
+    for missing in [false, true] {
+        if missing {
+            delayed.connection.execute("DELETE FROM lww_requests WHERE request_id=?1", [&request.header.request_id]).unwrap();
+        } else {
+            delayed.connection.execute("UPDATE lww_requests SET digest='synthetic-corrupt-receipt' WHERE request_id=?1", [&request.header.request_id]).unwrap();
+        }
+        let failure = delayed.recover_intent(request.header.binding_authority, &request.header.request_id,
+            captured.0.clone(), &captured.1, &captured.2, &captured.3).unwrap_err();
+        let expected = if missing { "request-receipt-missing" } else { "request-id-integrity" };
+        assert!(matches!(failure, StoreError::Validation { message } if message == expected));
+        assert_eq!(receiving.lww_receive_row_counts(&page.header.request_id).unwrap(), rows);
+        assert_eq!(serde_json::to_value(receiving.begin_local_native_receive(&begin).unwrap()).unwrap()["state"], before["state"]);
+        assert_eq!(receiving.lww_binding_authority().unwrap(), current);
+    }
+
+}
+
+#[test]
+fn direct_quarantine_completion_and_discard_cannot_pass_a_live_admission_guard() {
+    use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
+    let (directory, mut owner) = store();
+    let mut peer = PersistentStore::open(directory.path()).unwrap();
+    save(&mut owner, vec![mutation(&["root", "language"], serde_json::json!("retained"))]);
+    let binding = owner.lww_binding_state().unwrap();
+    let target = SyncTarget::External("quarantine-admission-target".into());
+    let inspection = owner.register_lww_binding_inspection(binding.target_authority, &target,
+        "quarantine-admission-target-id", "quarantine-admission-library-id").unwrap();
+    let request = SwitchBindingRequest { initial_publication: false,
+        header: Header { binding_authority: binding.target_authority, request_id: "guarded-quarantine".into() },
+        expected_selection_epoch: binding.selection_epoch, target, inspection_id: Some(inspection) };
+    owner.stop_next_switch_after_library_commit();
+    assert!(owner.switch_lww_binding(&request).is_err());
+    for _ in 0..3 { owner.record_intent_failure(&request.header.request_id, &error("synthetic-cross-store-stop")).unwrap(); }
+    let selected = owner.lww_quarantined_intents().unwrap().into_iter().find(|item| item.request_id == request.header.request_id).unwrap();
+    assert!(selected.recoverable && !selected.discardable);
+    let guard = owner.acquire_intent_admission().unwrap();
+    let revision = owner.revision().unwrap();
+    assert!(matches!(peer.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision), Err(StoreError::CommitBusy)));
+    assert!(matches!(peer.lww_discard_quarantined_intent(&selected.request_id, &selected.token, revision), Err(StoreError::CommitBusy)));
+    assert_eq!(peer.device_store().unwrap().connection().query_row(
+        "SELECT failures FROM lww_intent_failures WHERE request_id=?1", [&request.header.request_id], |row| row.get::<_, i64>(0)).unwrap(), 3);
+    assert_eq!(peer.lww_binding_authority().unwrap(), request.header.binding_authority);
+    drop(guard);
+    assert!(peer.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap());
+    assert_eq!(peer.read_root(None).unwrap().value["language"], "retained");
+    assert_eq!(peer.revision().unwrap(), revision);
+    assert_eq!(peer.lww_binding_authority().unwrap().0, request.header.binding_authority.0 + 1);
+    assert!(peer.lww_quarantined_intents().unwrap().is_empty());
+
+    let selected = quarantined_commit(&mut owner, "discardable-commit");
+    assert!(selected.discardable && !selected.recoverable);
+    let other = quarantined_commit(&mut owner, "retained-quarantine");
+    let frozen = admission_intent_state(&owner, &selected.request_id);
+    let unrelated = admission_intent_state(&owner, &other.request_id);
+    let root = owner.read_root(None).unwrap();
+    assert!(!owner.lww_request_recorded(&selected.request_id).unwrap());
+    let guard = owner.acquire_intent_admission().unwrap();
+    assert!(matches!(peer.lww_discard_quarantined_intent(&selected.request_id, &selected.token, root.revision), Err(StoreError::CommitBusy)));
+    assert_eq!(admission_intent_state(&peer, &selected.request_id), frozen);
+    assert_eq!(admission_intent_state(&peer, &other.request_id), unrelated);
+    drop(guard);
+    assert!(peer.lww_discard_quarantined_intent(&selected.request_id, &selected.token, root.revision).unwrap());
+    assert_eq!(admission_intent_state(&peer, &selected.request_id), None);
+    for table in ["lww_intent_proofs", "lww_intent_rows", "lww_intent_failures"] {
+        assert_eq!(peer.device_store().unwrap().connection().query_row(
+            &format!("SELECT count(*) FROM {table} WHERE request_id=?1"), [&selected.request_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+    assert_eq!(admission_intent_state(&peer, &other.request_id), unrelated);
+    assert_eq!(peer.read_root(None).unwrap().value, root.value);
+    assert_eq!(peer.revision().unwrap(), root.revision);
+}
+
+
+#[test]
+fn intent_admission_aliases_share_one_lock_and_invalid_leaf_fails_closed() {
+    let (_owner_directory, owner) = store();
+    let device = owner.device_store().unwrap().connection();
+    let device_path = std::path::Path::new(device.path().unwrap());
+    let alias = Connection::open(device_path.parent().unwrap().join(".").join(device_store::DEVICE_DATABASE_FILE)).unwrap();
+    let guard = owner.acquire_intent_admission().unwrap();
+    assert!(matches!(IntentAdmissionGuard::acquire(&alias, &owner.connection), Err(StoreError::CommitBusy)));
+    let lock_path = guard.path.clone();
+    #[cfg(windows)]
+    {
+        let parent = device_path.parent().unwrap().to_string_lossy().to_uppercase();
+        let alias = Connection::open_with_flags(std::path::Path::new(&parent).join(device_store::DEVICE_DATABASE_FILE), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert!(matches!(IntentAdmissionGuard::acquire(&alias, &owner.connection), Err(StoreError::CommitBusy)));
+    }
+    #[cfg(unix)]
+    {
+        let aliases = tempfile::tempdir().unwrap();
+        let directory = aliases.path().join("directory");
+        std::os::unix::fs::symlink(device_path.parent().unwrap(), &directory).unwrap();
+        let file_directory = aliases.path().join("file");
+        std::fs::create_dir(&file_directory).unwrap();
+        let file = file_directory.join(device_store::DEVICE_DATABASE_FILE);
+        std::os::unix::fs::symlink(device_path, &file).unwrap();
+        for path in [directory.join(device_store::DEVICE_DATABASE_FILE), file] {
+            let alias = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert!(matches!(IntentAdmissionGuard::acquire(&alias, &owner.connection), Err(StoreError::CommitBusy)));
+        }
+    }
+    drop(guard);
+    let alias_guard = IntentAdmissionGuard::acquire(&alias, &owner.connection).unwrap();
+    assert_eq!(alias_guard.path, lock_path);
+    drop(alias_guard);
+    let revision = owner.revision().unwrap();
+    let issued = owner.lww_clock_state().unwrap().issued;
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::create_dir(&lock_path).unwrap();
+    assert!(matches!(owner.acquire_intent_admission(), Err(failure) if admission_failure(&failure)));
+    std::fs::remove_dir(&lock_path).unwrap();
+    #[cfg(unix)]
+    {
+        let target = lock_path.with_extension("synthetic-target");
+        std::fs::write(&target, b"retained synthetic target").unwrap();
+        std::os::unix::fs::symlink(&target, &lock_path).unwrap();
+        assert!(matches!(owner.acquire_intent_admission(), Err(failure) if admission_failure(&failure)));
+        assert_eq!(std::fs::read(&target).unwrap(), b"retained synthetic target");
+        std::fs::remove_file(&lock_path).unwrap();
+    }
+    assert_eq!(owner.revision().unwrap(), revision);
+    assert_eq!(owner.lww_clock_state().unwrap().issued, issued);
+    std::fs::write(&lock_path, b"invalid synthetic lock contents").unwrap();
+    assert!(matches!(owner.acquire_intent_admission(), Err(StoreError::Validation { message }) if message == "intent-admission-file-integrity"));
+    assert_eq!(std::fs::read(&lock_path).unwrap(), b"invalid synthetic lock contents");
+}
+
+#[test]
+fn intent_admission_child_process() {
+    let Some(root) = std::env::var_os("RISUNEST_TEST_INTENT_ADMISSION_ROOT") else { return };
+    let store = PersistentStore::open(std::path::Path::new(&root)).unwrap();
+    let _guard = store.acquire_intent_admission().unwrap();
+    std::fs::write(std::path::Path::new(&root).join("intent-admission-ready"), b"ready").unwrap();
+    let mut byte = [0u8; 1];
+    std::io::Read::read_exact(&mut std::io::stdin(), &mut byte).unwrap();
+}
+
+#[test]
+fn intent_admission_process_exit_releases_only_its_owned_os_lock() {
+    use std::{process::{Command, Stdio}, time::{Duration, Instant}};
+    struct OwnedChild(std::process::Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    for terminate in [false, true] {
+        let (directory, owner) = store();
+        let mut child = OwnedChild(Command::new(std::env::current_exe().unwrap())
+            .arg("persistent_store::lww::tests::intent_admission_child_process").arg("--exact").arg("--nocapture")
+            .env("RISUNEST_TEST_INTENT_ADMISSION_ROOT", directory.path())
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !directory.path().join("intent-admission-ready").exists() {
+            assert!(child.0.try_wait().unwrap().is_none(), "owned lock child exited before readiness");
+            assert!(Instant::now() < deadline, "owned lock child did not report readiness");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(owner.acquire_intent_admission(), Err(StoreError::CommitBusy)));
+        if terminate { child.0.kill().unwrap(); }
+        else { std::io::Write::write_all(child.0.stdin.as_mut().unwrap(), b"x").unwrap(); }
+        let exit = loop {
+            if let Some(exit) = child.0.try_wait().unwrap() { break exit; }
+            assert!(Instant::now() < deadline, "owned lock child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if !terminate { assert!(exit.success()); }
+        let guard = owner.acquire_intent_admission().unwrap();
+        assert_eq!(std::fs::metadata(&guard.path).unwrap().len(), 0);
+    }
+}
+
+
+#[test]
+fn generation_checkpoint_admission_busy_preserves_attempt_until_retry_or_cancel() {
+    use crate::native_generation::operation::{Checkpoint, Phase, Start, Target};
+    for cancel in [false, true] {
+        let (directory, mut generating) = store();
+        create_conversation(&mut generating, "generation-owner", "generation-chat");
+        let locker = PersistentStore::open(directory.path()).unwrap();
+        let revision = generating.revision().unwrap();
+        let ticket = generating.generation_reserve(Target { character_id: "generation-owner".into(),
+            conversation_id: "generation-chat".into(), expected_revision: revision,
+            library_identity: generating.library_identity().unwrap(), binding_authority: generating.lww_binding_authority().unwrap() }).unwrap();
+        let Start::Started { owner, .. } = generating.generation_start(&ticket).unwrap() else { panic!("owner not started") };
+        let guard = locker.acquire_intent_admission().unwrap();
+        let checkpoint = Checkpoint { sequence: 1, text: "synthetic output".into() };
+        assert!(matches!(generating.generation_checkpoint(&owner, &checkpoint), Err(StoreError::CommitBusy)));
+        let pending = generating.generation_status(&ticket).unwrap();
+        assert!(pending.pending_commit);
+        assert_eq!(pending.checkpoint.0, 0);
+        assert_eq!(generating.revision().unwrap(), revision);
+        assert!(matches!(generating.generation_finish(&owner, cancel), Err(StoreError::CommitBusy)));
+        assert!(generating.generation_status(&ticket).unwrap().pending_commit);
+        drop(guard);
+        if cancel {
+            let status = generating.generation_finish(&owner, true).unwrap();
+            assert_eq!(status.phase, Phase::Cancelled);
+            assert!(!status.pending_commit);
+            assert_eq!(generating.revision().unwrap(), revision);
+        } else {
+            let status = generating.generation_checkpoint(&owner, &checkpoint).unwrap();
+            assert_eq!(status.checkpoint.0, 1);
+            assert!(!status.pending_commit);
+            assert_eq!(status.committed_revision, Some(revision + 1));
+            let chat = generating.read_conversation("generation-owner", "generation-chat", None).unwrap().unwrap().value;
+            assert_eq!(chat["message"].as_array().unwrap().len(), 1);
+            assert_eq!(chat["message"][0]["data"], "synthetic output");
+            assert_eq!(generating.generation_finish(&owner, false).unwrap().phase, Phase::Completed);
+        }
+    }
+}
+
+
+#[test]
+fn switch_reservation_refreshes_device_revision_after_admission() {
+    let (directory, mut store) = store();
+    let mut peer = PersistentStore::open(directory.path()).unwrap();
+    let selection = crate::persistent_store::sync_selection::read(&store.connection).unwrap();
+    let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: "switch-after-peer-write".into() };
+    let change = crate::persistent_store::sync_selection::BindingSelectionChange { initial_publication: false,
+        expected_epoch: selection.epoch, new_epoch: Uuid::new_v4().to_string(),
+        target: crate::persistent_store::sync_selection::SyncTarget::None,
+        library_id: None, target_id: None, inspection_id: None };
+    let before = device_revision(store.device_store().unwrap().connection()).unwrap();
+    let observed = std::rc::Rc::new(std::cell::Cell::new(before));
+    let callback_observed = observed.clone();
+    BEFORE_SWITCH_ADMISSION.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        peer.device_store_mut().unwrap().write_plugin_device_values("peer", &[
+            device_store::plugin_values::PluginDeviceMutation::Set { space: "string".into(), key: "admission".into(), value: "retained-peer-write".into() },
+        ]).unwrap();
+        callback_observed.set(device_revision(peer.device_store().unwrap().connection()).unwrap());
+    })));
+    let current = store.lww_switch_target(&header, &change).unwrap();
+    assert!(observed.get() > before);
+    assert_eq!(current.0, header.binding_authority.0 + 1);
+    let (body, complete): (String, bool) = store.device_store().unwrap().connection().query_row(
+        "SELECT body,complete FROM lww_intents WHERE request_id=?1", [&header.request_id],
+        |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    let Intent::Switch { device_revision, .. } = serde_json::from_str(&body).unwrap() else { panic!("switch intent missing") };
+    assert_eq!(device_revision, observed.get());
+    assert!(complete);
+    assert_eq!(store.device_store().unwrap().read_plugin_device_value("peer", "string", "admission").unwrap().as_deref(), Some("retained-peer-write"));
+    assert!(store.lww_request_recorded(&header.request_id).unwrap());
+    assert_eq!(store.lww_switch_target(&header, &change).unwrap(), current);
+    assert_eq!(store.device_store().unwrap().connection().query_row(
+        "SELECT count(*) FROM lww_intent_failures WHERE request_id=?1", [&header.request_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn generation_normalization_admission_busy_preserves_frozen_ids_until_retry_or_cancel() {
+    use crate::native_generation::{inputs::OllamaIntent, operation::{Phase, Start, Target}, service::{self, GenerationError, PreparedGeneration}};
+    for cancel in [false, true] {
+        let (directory, mut owner) = store();
+        let fixture: Value = serde_json::from_str(include_str!("../../../tests/fixtures/native-generation/ollama-text.json")).unwrap();
+        let mut character = fixture["character"].clone();
+        let mut conversation = fixture["conversation"].clone();
+        conversation["message"] = fixture["effectMessages"].clone();
+        character["chats"] = serde_json::json!([conversation]);
+        let stage = owner.replace_begin().unwrap();
+        owner.replace_put_root(&stage.staging_id, &fixture["root"]).unwrap();
+        owner.replace_put_presets(&stage.staging_id, &[fixture["preset"].clone()]).unwrap();
+        owner.replace_add_characters(&stage.staging_id, &[character]).unwrap();
+        owner.replace_commit(&stage.staging_id, Some(0)).unwrap();
+        let revision = owner.revision().unwrap();
+        let intent = OllamaIntent { effective_preset_id: "preset-a".into(), host: None, target: Target {
+            character_id: "character".into(), conversation_id: "conversation".into(), expected_revision: revision,
+            library_identity: owner.library_identity().unwrap(), binding_authority: owner.lww_binding_authority().unwrap(),
+        }};
+        let locker = std::rc::Rc::new(PersistentStore::open(directory.path()).unwrap());
+        let ticket = service::reserve_ollama(&mut owner, &intent).unwrap();
+        let Start::Started { owner: generation, .. } = owner.generation_start_preparation(&ticket).unwrap() else { panic!("preparation not started") };
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(None::<WorkingSetCommit>));
+        let held = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let (copy, hold, lock) = (captured.clone(), held.clone(), locker.clone());
+        // The interaction effect commits first, so admission is taken only before the normalization commit.
+        BEFORE_COMMIT_ADMISSION.with(|hook| *hook.borrow_mut() = Some(Box::new(move |input| {
+            assert!(input.conversations.is_none() && input.unit_mutations.is_some());
+            BEFORE_COMMIT_ADMISSION.with(|hook| *hook.borrow_mut() = Some(Box::new(move |input| {
+                *copy.borrow_mut() = Some(input.clone());
+                *hold.borrow_mut() = Some(lock.acquire_intent_admission().unwrap());
+            })));
+        })));
+        assert!(matches!(owner.generation_ensure_history_ids(&generation), Err(GenerationError::Store(StoreError::CommitBusy))));
+        assert!(owner.generation_status(&ticket).unwrap().pending_commit);
+        assert!(matches!(owner.generation_finish(&generation, cancel), Err(StoreError::CommitBusy)));
+        assert!(owner.generation_status(&ticket).unwrap().pending_commit);
+        assert_eq!(owner.revision().unwrap(), revision + 1);
+        assert_eq!(owner.read_conversation("character", "conversation", None).unwrap().unwrap().value, conversation);
+        let submitted = captured.borrow().as_ref().unwrap().clone();
+        let ranges = submitted.conversations.as_ref().expect("normalization input was captured");
+        assert!(!ranges.is_empty() && ranges.iter().all(|range| matches!(range, crate::persistent_store::ConversationMutation::ReplaceRange { .. })));
+        assert!(held.borrow_mut().take().is_some());
+        if cancel {
+            let status = owner.generation_finish(&generation, true).unwrap();
+            assert_eq!(status.phase, Phase::Cancelled);
+            assert!(!status.pending_commit);
+            assert_eq!(owner.revision().unwrap(), revision + 1);
+            assert_eq!(owner.read_conversation("character", "conversation", None).unwrap().unwrap().value, conversation);
+            continue;
+        }
+        let expected_ranges = serde_json::to_value(&submitted.conversations).unwrap();
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = observed.clone();
+        BEFORE_COMMIT_ADMISSION.with(|hook| *hook.borrow_mut() = Some(Box::new(move |input| {
+            assert_eq!(serde_json::to_value(&input.conversations).unwrap(), expected_ranges);
+            seen.set(true);
+        })));
+        let status = owner.generation_ensure_history_ids(&generation).unwrap();
+        assert!(observed.get());
+        assert!(!status.pending_commit && !status.preparation_ready);
+        assert_eq!(status.committed_revision, Some(revision + 2));
+        let mut expected = conversation.clone();
+        for range in submitted.conversations.as_ref().unwrap() {
+            let crate::persistent_store::ConversationMutation::ReplaceRange { start, delete_count, messages, .. } = range else { panic!("normalization used a different mutation") };
+            let start = usize::try_from(*start).unwrap();
+            assert_eq!(usize::try_from(*delete_count).unwrap(), messages.len());
+            for (offset, row) in messages.iter().enumerate() {
+                let before = &conversation["message"][start + offset];
+                assert!(before["chatId"].is_null());
+                let id = row["chatId"].as_str().unwrap();
+                assert_eq!(Uuid::parse_str(id).unwrap().to_string(), id);
+                let mut unchanged = before.clone(); unchanged["chatId"] = Value::String(id.into());
+                assert_eq!(*row, unchanged);
+                expected["message"][start + offset] = row.clone();
+            }
+        }
+        assert_eq!(owner.read_conversation("character", "conversation", None).unwrap().unwrap().value, expected);
+        assert!(matches!(service::prepare_reserved_ollama(&mut owner, &ticket).unwrap(), PreparedGeneration::Ready { status, .. } if status.preparation_ready));
+        assert_eq!(owner.generation_finish(&generation, false).unwrap().phase, Phase::Completed);
+        assert_eq!(owner.revision().unwrap(), revision + 2);
+        assert_eq!(owner.read_conversation("character", "conversation", None).unwrap().unwrap().value, expected);
+    }
+}
+
+fn admission_input_rows(store: &PersistentStore, request: &str) -> String {
+    store.device_store().unwrap().connection().query_row(
+        "SELECT json_group_array(json_array(ordinal,key,stamp,value,source_override)) FROM
+            (SELECT * FROM lww_intent_rows WHERE request_id=?1 ORDER BY ordinal)", [request], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn replacement_input_rows_are_owned_before_reservation_and_retry_after_interruption() {
+    for target in [false, true] {
+        for interrupt in [false, true] {
+            let (directory, mut owner) = store();
+            let mut peer = PersistentStore::open(directory.path()).unwrap();
+            let inspecting = PersistentStore::open(directory.path()).unwrap();
+            let (header, staging, changes) = if target { new_device_stage(&mut owner) }
+                else { (Header { binding_authority: 0.into(), request_id: "replacement-input-owner".into() }, restore_stage(&mut owner, "replacement"), vec![]) };
+            let unrelated = Header { binding_authority: 0.into(), request_id: "quarantined-input-owner".into() };
+            let unrelated_stage = restore_stage(&mut owner, "quarantined");
+            let row = intent_rows::target_row(&change(&["root", "language"], 7, serde_json::json!("quarantined")));
+            let rows = intent_rows::write(&mut owner.device_store_mut().unwrap().connection, &unrelated.request_id, "target", std::iter::once(row)).unwrap();
+            let intent = Intent::Target { device_revision: device_revision(owner.device_store().unwrap().connection()).unwrap(), staging_id: unrelated_stage, changes: rows };
+            owner.reserve_intent(&unrelated, &intent).unwrap();
+            for _ in 0..3 { owner.record_intent_failure(&unrelated.request_id, &error("synthetic-held-input")).unwrap(); }
+            let retained = admission_intent_state(&owner, &unrelated.request_id);
+            let root = owner.read_root(None).unwrap();
+            let clock = owner.lww_clock_state().unwrap().issued;
+            let request = header.request_id.clone();
+            let observed = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let copy = observed.clone();
+            let retained_in_hook = retained.clone();
+            AFTER_REPLACEMENT_INPUT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+                let rows = admission_input_rows(&peer, &request);
+                assert_ne!(rows, "[]");
+                assert!(peer.lww_request_unreserved(&request).unwrap());
+                assert!(matches!(peer.lww_recover_intents(), Err(StoreError::CommitBusy)));
+                assert_admission_begin_busy(&mut peer);
+                assert_eq!(admission_input_rows(&peer, &request), rows);
+                assert_eq!(admission_intent_state(&peer, "quarantined-input-owner"), retained_in_hook);
+                assert_eq!(peer.lww_clock_state().unwrap().issued, clock);
+                assert_eq!(peer.revision().unwrap(), root.revision);
+                *copy.borrow_mut() = Some(rows);
+                if interrupt { panic!("synthetic input-before-reservation interruption"); }
+            })));
+            let invoke = |store: &mut PersistentStore| if target {
+                store.lww_replace_target(&header, &staging, &changes)
+            } else { store.lww_commit_replacement(&header, &staging) };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| invoke(&mut owner)));
+            assert!(observed.borrow().is_some());
+            let committed = if interrupt {
+                assert!(result.is_err());
+                assert_eq!(owner.revision().unwrap(), root.revision);
+                assert!(owner.lww_request_unreserved(&header.request_id).unwrap());
+                owner.lww_recover_intents().unwrap();
+                assert_eq!(admission_input_rows(&owner, &header.request_id), "[]");
+                assert_eq!(admission_intent_state(&owner, &unrelated.request_id), retained);
+                let expected = observed.borrow().clone().unwrap();
+                let request = header.request_id.clone();
+                AFTER_REPLACEMENT_INPUT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+                    assert_eq!(admission_input_rows(&inspecting, &request), expected);
+                })));
+                invoke(&mut owner).unwrap()
+            } else { result.unwrap().unwrap() };
+            assert_eq!(committed.revision, root.revision + 1);
+            let expected = if target { "en" } else { "replacement" };
+            assert_eq!(owner.read_root(None).unwrap().value["language"], expected);
+            assert!(owner.lww_request_recorded(&header.request_id).unwrap());
+            assert_eq!(admission_intent_state(&owner, &unrelated.request_id), retained);
+            assert_eq!(admission_input_rows(&owner, &header.request_id), "[]");
+            let outbox = owner.lww_read_outbox(0.into(), 100).unwrap().entries;
+            assert_eq!(invoke(&mut owner).unwrap().revision, committed.revision);
+            assert_eq!(owner.lww_read_outbox(0.into(), 100).unwrap().entries, outbox);
+            assert_eq!(owner.revision().unwrap(), committed.revision);
+        }
+    }
+}
+
+#[test]
+fn intent_admission_replacement_is_denied_or_detected_before_phase_write() {
+    let (directory, mut owner) = store();
+    let peer = PersistentStore::open(directory.path()).unwrap();
+    let path = IntentAdmissionGuard::path(owner.device_store().unwrap().connection()).unwrap();
+    let retired = path.with_extension("synthetic-retired");
+    let hook_path = path.clone();
+    let hook_retired = retired.clone();
+    let revision = owner.revision().unwrap();
+    let input = WorkingSetCommit { expected_revision: revision, request_id: Some("sidecar-phase".into()),
+        unit_mutations: Some(vec![mutation(&["root", "language"], serde_json::json!("sidecar-retained"))]), ..Default::default() };
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let copy = captured.clone();
+    BEFORE_HELD_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        *copy.borrow_mut() = admission_intent_state(&peer, "sidecar-phase");
+        #[cfg(windows)]
+        {
+            assert!(std::fs::rename(&hook_path, &hook_retired).is_err());
+            assert!(std::fs::remove_file(&hook_path).is_err());
+            assert!(!hook_retired.exists());
+            assert!(matches!(peer.acquire_intent_admission(), Err(StoreError::CommitBusy)));
+        }
+        #[cfg(unix)]
+        {
+            std::fs::rename(&hook_path, &hook_retired).unwrap();
+            std::fs::write(&hook_path, b"").unwrap();
+        }
+    })));
+    let result = owner.commit(&input);
+    assert!(captured.borrow().is_some());
+    #[cfg(windows)]
+    {
+        assert_eq!(result.unwrap().revision, revision + 1);
+        assert!(!retired.exists());
+    }
+    #[cfg(unix)]
+    {
+        assert!(matches!(result, Err(failure) if admission_failure(&failure)));
+        assert_eq!(owner.revision().unwrap(), revision);
+        assert_eq!(admission_intent_state(&owner, "sidecar-phase"), *captured.borrow());
+        assert!(!owner.lww_request_recorded("sidecar-phase").unwrap());
+        assert!(owner.lww_quarantined_intents().unwrap().is_empty());
+        let stamp = owner.lww_clock_state().unwrap().issued;
+        owner.lww_recover_intents().unwrap();
+        assert_eq!(owner.lww_clock_state().unwrap().issued, stamp);
+        assert_eq!(owner.revision().unwrap(), revision + 1);
+        std::fs::remove_file(&retired).unwrap();
+    }
+    assert_eq!(owner.read_root(None).unwrap().value["language"], "sidecar-retained");
+    let root = owner.read_root(None).unwrap();
+    let issued = owner.lww_clock_state().unwrap().issued;
+    drop(owner);
+    std::fs::remove_file(&path).unwrap();
+    let reopened = PersistentStore::open(directory.path()).unwrap();
+    let guard = reopened.acquire_intent_admission().unwrap();
+    assert_eq!(std::fs::metadata(&guard.path).unwrap().len(), 0);
+    assert_eq!(reopened.read_root(None).unwrap().value, root.value);
+    assert_eq!(reopened.revision().unwrap(), root.revision);
+    assert_eq!(reopened.lww_clock_state().unwrap().issued, issued);
+}
+
+fn stage_kernel_rows(store: &mut PersistentStore, id: &str, changes: Vec<Change>) -> Header {
+    let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: id.into() };
+    store.lww_stage_receive(&StageReceive { header: header.clone(), changes,
+        progress: Progress { kind: "server".into(), cursor: 1.into(), writer_id: None }, admitted_time_upper_ms: u64::MAX.into() }).unwrap();
+    header
+}
+fn begin_kernel(store: &mut PersistentStore) -> crate::persistent_store::receive_batches::Capability {
+    let source = crate::persistent_store::receive_batches::Source::Drain { binding_authority: store.lww_binding_authority().unwrap() };
+    begin_kernel_from(store, source)
+}
+fn begin_kernel_from(store: &mut PersistentStore, source: crate::persistent_store::receive_batches::Source)
+    -> crate::persistent_store::receive_batches::Capability {
+    use crate::persistent_store::receive_batches::{BeginRequest, BeginResult};
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+    let baseline = store.read_native_receive_evidence(&lease).unwrap();
+    store.release_revision(&lease).unwrap();
+    let candidate = store.prepare_native_receive(&source).unwrap();
+    let BeginResult::Admitted { state } = store.begin_local_native_receive(&BeginRequest { candidate, source, native_baseline: Some(baseline) }).unwrap()
+        else { panic!("fresh kernel admission expected") };
+    state.capability
+}
+fn step_kernel(store: &PersistentStore, cap: &crate::persistent_store::receive_batches::Capability)
+    -> StoreResult<crate::persistent_store::receive_batches::AdvanceResult> {
+    use crate::persistent_store::receive_batches::AdvanceRequest;
+    let state = store.read_native_receive_state(cap)?;
+    store.advance_local_native_receive(&AdvanceRequest { capability: cap.clone(), expected_progress_token: state.progress_token, generating: vec![] })
+}
+fn kernel_manifest(store: &PersistentStore, cap: &crate::persistent_store::receive_batches::Capability,
+    partition: crate::persistent_store::receive_batches::Partition) -> crate::persistent_store::receive_batches::Manifest {
+    use crate::persistent_store::receive_batches::{read_manifest, Partition};
+    read_manifest(match partition { Partition::Library => &store.connection, Partition::Device => store.device_store().unwrap().connection() }, partition, cap).unwrap().unwrap()
+}
+/// Steps the real settlement path until both partitions seal, so local writes are admitted again
+/// and a test can restore what a receive installed.
+fn seal_kernel(store: &PersistentStore, cap: &crate::persistent_store::receive_batches::Capability)
+    -> crate::persistent_store::receive_batches::Outcome {
+    use crate::persistent_store::receive_batches::Phase;
+    for _ in 0..1000 {
+        let state = store.read_native_receive_state(cap).unwrap();
+        if state.phase == Phase::Sealed { return state.outcome.unwrap(); }
+        step_kernel(store, cap).unwrap();
+    }
+    panic!("the receive must seal");
+}
+fn kernel_ready_for_settlement(store: &PersistentStore, cap: &crate::persistent_store::receive_batches::Capability) -> bool {
+    use crate::persistent_store::receive_batches::{Partition, ScanPhase};
+    [Partition::Library, Partition::Device].into_iter().all(|partition| {
+        let manifest = kernel_manifest(store, cap, partition);
+        manifest.ticket.is_none() && manifest.cursor.phase == ScanPhase::Dispositions
+    })
+}
+
+#[test]
+fn bounded_receive_kernel_preserves_every_effect_and_repeated_device_fence() {
+    use crate::persistent_store::receive_batches::{self as batches, AdvanceResult, Partition, Phase};
+    let (_directory, mut store) = store();
+    store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    let first = "k".repeat(risunest_sync_wire::unit::MAX_UNIT_KEY_BYTES - 256);
+    let second = "m".repeat(risunest_sync_wire::unit::MAX_UNIT_KEY_BYTES - 256);
+    let time = device_store::now_ms().unwrap() as u64 + 100_000;
+    stage_kernel_rows(&mut store, "kernel-large", vec![change(&["plugin", "bounded", &first], time, serde_json::json!("first")),
+        change(&["plugin", "bounded", &second], time, serde_json::json!("second"))]);
+    stage_kernel_rows(&mut store, "kernel-device-first", vec![change(&["plugin-local", "bounded", "string", "key"], time, serde_json::json!("one"))]);
+    stage_kernel_rows(&mut store, "kernel-device-next", vec![change(&["plugin-local", "bounded", "string", "key"], time + 1, serde_json::json!("two"))]);
+    let cap = begin_kernel(&mut store);
+    let _limits = batches::kernel_test::Limits::set(128, 100_000);
+    let mut library_count = 0;
+    let mut device_fences = 0;
+    let mut device_limit = None;
+    for _ in 0..100 {
+        let AdvanceResult::Advanced { state, fence } = step_kernel(&store, &cap).unwrap() else { panic!("current token was stale") };
+        assert_eq!(state.phase, Phase::Producing);
+        assert!(state.outcome.is_none());
+        assert!(!fence.unknown_library && !fence.unknown_device, "known own-only progress must not request broad invalidation");
+        let count = kernel_manifest(&store, &cap, Partition::Library).affected_count;
+        assert!(count - library_count <= 1, "the encoded byte bound must split these large keys");
+        library_count = count;
+        let changed_device = fence.keys.iter().filter(|key| key.components()[0] == "plugin-local").count();
+        assert!(changed_device <= 1, "each device step exposes its own fence after an intervening read");
+        if changed_device != 0 {
+            let observed = store.device_store().unwrap().read_plugin_device_value("bounded", "string", "key").unwrap();
+            assert_eq!(observed.as_deref(), Some(if device_fences == 0 { "one" } else { "two" }));
+        }
+        device_fences += changed_device;
+        if device_limit.is_none() && kernel_manifest(&store, &cap, Partition::Library).cursor.phase == batches::ScanPhase::Dispositions {
+            device_limit = Some(batches::kernel_test::Limits::set(1, 100_000));
+        }
+        if kernel_ready_for_settlement(&store, &cap) { break; }
+    }
+    assert!(kernel_ready_for_settlement(&store, &cap));
+    assert_eq!(library_count, 2);
+    assert_eq!(device_fences, 2, "historical dedupe must not suppress the second invalidation");
+    let device = kernel_manifest(&store, &cap, Partition::Device);
+    assert_eq!((device.affected_count, device.plugin_changed_count), (1, 1));
+    assert_eq!(store.read_plugin_storage("bounded", &first, None).unwrap().unwrap().value, "first");
+    assert_eq!(store.read_plugin_storage("bounded", &second, None).unwrap().unwrap().value, "second");
+    assert_eq!(store.device_store().unwrap().read_plugin_device_value("bounded", "string", "key").unwrap().as_deref(), Some("two"));
+    let before = (store.revision().unwrap(), device_revision(store.device_store().unwrap().connection()).unwrap());
+    let AdvanceResult::Advanced { fence, .. } = step_kernel(&store, &cap).unwrap() else { panic!("current suspension token") };
+    assert!(!fence.unknown_library && !fence.unknown_device);
+    assert_eq!((store.revision().unwrap(), device_revision(store.device_store().unwrap().connection()).unwrap()), before);
+}
+
+#[test]
+fn receive_kernel_clock_survives_library_commit_source_removal_and_stale_retry() {
+    use crate::persistent_store::receive_batches::{self as batches, AdvanceRequest, AdvanceResult, Partition};
+    for interrupt in [1, 2] {
+        let (directory, mut store) = store();
+        let time = device_store::now_ms().unwrap() as u64 + 100_000;
+        let mut changes = vec![change(&["root", "language"], time, serde_json::json!("kernel-language")),
+            change(&["root", "additionalPrompt"], time, serde_json::json!("kernel-prompt"))];
+        for change in &mut changes { change.stamp.logical = 7; }
+        changes[1].stamp.writer_id = "00000000-0000-4000-8000-000000000002".into();
+        let maximum = changes[1].stamp.clone();
+        let header = stage_kernel_rows(&mut store, "kernel-clock", changes);
+        let cap = begin_kernel(&mut store);
+        let original = store.read_native_receive_state(&cap).unwrap();
+        let before_clock = store.lww_clock_state().unwrap();
+        let before_library = serde_json::to_value(kernel_manifest(&store, &cap, Partition::Library)).unwrap();
+        let before_device = serde_json::to_value(kernel_manifest(&store, &cap, Partition::Device)).unwrap();
+        let AdvanceResult::Stale { fence, .. } = store.advance_local_native_receive(&AdvanceRequest { capability: cap.clone(),
+            expected_progress_token: "obsolete".into(), generating: vec![] }).unwrap() else { panic!("stale token accepted") };
+        assert!(fence.unknown_library && fence.unknown_device);
+        assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), serde_json::to_value(before_clock).unwrap());
+        assert_eq!(serde_json::to_value(kernel_manifest(&store, &cap, Partition::Library)).unwrap(), before_library);
+        assert_eq!(serde_json::to_value(kernel_manifest(&store, &cap, Partition::Device)).unwrap(), before_device);
+        let revision = store.revision().unwrap();
+        batches::kernel_test::hook(interrupt, || {});
+        let mut interrupted = false;
+        for _ in 0..50 {
+            match step_kernel(&store, &cap) {
+                Err(StoreError::Validation { message }) if message == "synthetic-kernel-interruption" => { interrupted = true; break; }
+                Ok(_) => {}, other => panic!("unexpected kernel outcome: {other:?}"),
+            }
+        }
+        assert!(interrupted);
+        assert_eq!(store.lww_clock_state().unwrap().accepted, Some(maximum.clone()));
+        assert_eq!(store.revision().unwrap(), revision + i64::from(interrupt == 2));
+        if interrupt == 2 {
+            assert_eq!(store.read_root(None).unwrap().value["language"], "kernel-language");
+            assert_eq!(kernel_manifest(&store, &cap, Partition::Library).affected_count, 2);
+            // Inject foreign removal, independent of the not-yet-implemented released APPLY route.
+            store.connection.execute("DELETE FROM lww_receive_rows WHERE request_id=?1", [&header.request_id]).unwrap();
+            store.device_store().unwrap().connection().execute("DELETE FROM lww_receive WHERE request_id=?1", [&header.request_id]).unwrap();
+        }
+        drop(store);
+        let store = PersistentStore::open(directory.path()).unwrap();
+        let AdvanceResult::Stale { fence, .. } = store.advance_local_native_receive(&AdvanceRequest { capability: cap.clone(),
+            expected_progress_token: original.progress_token, generating: vec![] }).unwrap() else { panic!("old progress token mutated reopened operation") };
+        assert!(fence.unknown_library && fence.unknown_device);
+        for _ in 0..100 { if kernel_ready_for_settlement(&store, &cap) { break; } step_kernel(&store, &cap).unwrap(); }
+        assert!(kernel_ready_for_settlement(&store, &cap));
+        assert_eq!(store.lww_clock_state().unwrap().accepted, Some(maximum.clone()));
+        assert_eq!(kernel_manifest(&store, &cap, Partition::Library).affected_count, 2);
+        assert_eq!(store.read_root(None).unwrap().value["additionalPrompt"], "kernel-prompt");
+        let tx = Transaction::new_unchecked(store.device_store().unwrap().connection(), TransactionBehavior::Immediate).unwrap();
+        assert!(reserve_stamp(&tx).unwrap() > maximum);
+        tx.commit().unwrap();
+    }
+    {
+        let (directory, mut store) = store();
+        store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+        let received = change(&["plugin-local", "rollback", "string", "key"], device_store::now_ms().unwrap() as u64 + 100_000, serde_json::json!("device-value"));
+        stage_kernel_rows(&mut store, "kernel-device-rollback", vec![received.clone()]);
+        let cap = begin_kernel(&mut store);
+        let before = (store.revision().unwrap(), device_revision(store.device_store().unwrap().connection()).unwrap());
+        batches::kernel_test::hook(2, || {});
+        let mut interrupted = false;
+        for _ in 0..50 {
+            match step_kernel(&store, &cap) {
+                Err(StoreError::Validation { message }) if message == "synthetic-kernel-interruption" => { interrupted = true; break; }
+                Ok(_) => {}, other => panic!("unexpected device outcome: {other:?}"),
+            }
+        }
+        assert!(interrupted);
+        assert_eq!(store.lww_clock_state().unwrap().accepted, Some(received.stamp.clone()));
+        assert_eq!((store.revision().unwrap(), device_revision(store.device_store().unwrap().connection()).unwrap()), before);
+        assert!(store.device_store().unwrap().read_plugin_device_value("rollback", "string", "key").unwrap().is_none());
+        assert!(read_unit(store.device_store().unwrap().connection(), &received.key).unwrap().is_none());
+        assert_eq!(kernel_manifest(&store, &cap, Partition::Device).affected_count, 0);
+        assert_eq!(store.device_store().unwrap().connection().query_row("SELECT status FROM lww_receive_rows WHERE key=?1", [received.key.as_str()], |r| r.get::<_,String>(0)).unwrap(), "staged");
+        drop(store);
+        let store = PersistentStore::open(directory.path()).unwrap();
+        for _ in 0..100 { if kernel_ready_for_settlement(&store, &cap) { break; } step_kernel(&store, &cap).unwrap(); }
+        assert!(kernel_ready_for_settlement(&store, &cap));
+        assert_eq!(store.device_store().unwrap().read_plugin_device_value("rollback", "string", "key").unwrap().as_deref(), Some("device-value"));
+        assert_eq!(kernel_manifest(&store, &cap, Partition::Device).affected_count, 1);
+        assert_eq!(store.revision().unwrap(), before.0);
+        assert_eq!(device_revision(store.device_store().unwrap().connection()).unwrap(), before.1 + 1);
+    }
+    for remove_row in [false, true] {
+        let (directory, mut store) = store();
+        let mut peer = PersistentStore::open(directory.path()).unwrap();
+        let received = change(&["root", "language"], device_store::now_ms().unwrap() as u64 + 100_000, serde_json::json!("after-drift"));
+        let header = stage_kernel_rows(&mut store, "kernel-observe-drift", vec![received.clone()]);
+        let cap = begin_kernel(&mut store);
+        let before = store.revision().unwrap();
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let callback_observed = observed.clone();
+        batches::kernel_test::inspect(1, move || {
+            // This is a real independent local commit, not an old-binary APPLY simulation.
+            let foreign = Header { binding_authority: peer.lww_binding_authority().unwrap(), request_id: "kernel-foreign-commit".into() };
+            let input = WorkingSetCommit { expected_revision: peer.revision().unwrap(), request_id: Some(foreign.request_id.clone()),
+                unit_mutations: Some(vec![mutation(&["root", "additionalPrompt"], serde_json::json!("foreign-value"))]), ..Default::default() };
+            let stamp = peer.reserve_commit_only_stamp(&foreign).unwrap();
+            let digest = commit_intent_digest(&input).unwrap();
+            commit::commit_lww(&mut peer.connection, &input, &[], &foreign, &stamp, &digest).unwrap();
+            if remove_row { peer.connection.execute("DELETE FROM lww_receive_rows WHERE request_id=?1", [&header.request_id]).unwrap(); }
+            callback_observed.set(true);
+        });
+        for _ in 0..50 {
+            let result = step_kernel(&store, &cap).unwrap();
+            if observed.get() {
+                let AdvanceResult::Advanced { fence, .. } = result else { panic!("observation outcome incorrectly classified precommit") };
+                assert!(fence.unknown_library && fence.unknown_device);
+                break;
+            }
+        }
+        assert!(observed.get());
+        assert_eq!(store.revision().unwrap(), before + 1);
+        assert_eq!(store.read_root(None).unwrap().value["additionalPrompt"], "foreign-value");
+        assert!(read_unit(&store.connection, &received.key).unwrap().is_none());
+        assert_eq!(kernel_manifest(&store, &cap, Partition::Library).affected_count, 0);
+        assert_eq!(store.lww_clock_state().unwrap().accepted, Some(received.stamp));
+        for _ in 0..100 { if kernel_ready_for_settlement(&store, &cap) { break; } step_kernel(&store, &cap).unwrap(); }
+        assert!(kernel_ready_for_settlement(&store, &cap));
+        let AdvanceResult::Advanced { fence, .. } = step_kernel(&store, &cap).unwrap() else { panic!("current suspension token") };
+        assert!(fence.unknown_library && !fence.unknown_device, "suspension keeps only the real foreign library reason");
+        assert_eq!(kernel_manifest(&store, &cap, Partition::Library).affected_count, u64::from(!remove_row));
+        assert_eq!(store.read_root(None).unwrap().value["language"].as_str() == Some("after-drift"), !remove_row);
+        assert_eq!(store.read_root(None).unwrap().value["additionalPrompt"], "foreign-value");
+    }
+    for corrupt in [true, false] {
+        // A reset revalidates the sealed history one page per step before it scans again.
+        let (directory, mut store) = store();
+        let mut peer = PersistentStore::open(directory.path()).unwrap();
+        let time = device_store::now_ms().unwrap() as u64 + 100_000;
+        let keys: Vec<String> = (0..5).map(|index| format!("key-{index}")).collect();
+        stage_kernel_rows(&mut store, "kernel-revalidation", keys.iter()
+            .map(|key| change(&["plugin", "revalidated", key], time, serde_json::json!(key))).collect());
+        let cap = begin_kernel(&mut store);
+        let _limits = batches::kernel_test::Limits::set(1, 100_000);
+        for _ in 0..50 {
+            if kernel_manifest(&store, &cap, Partition::Library).effect_pages == 4 { break; }
+            step_kernel(&store, &cap).unwrap();
+        }
+        let sealed = kernel_manifest(&store, &cap, Partition::Library);
+        assert_eq!((sealed.effect_pages, sealed.cursor.phase), (4, batches::ScanPhase::Remaining));
+        let foreign = Header { binding_authority: peer.lww_binding_authority().unwrap(), request_id: "kernel-revalidation-foreign".into() };
+        let input = WorkingSetCommit { expected_revision: peer.revision().unwrap(), request_id: Some(foreign.request_id.clone()),
+            unit_mutations: Some(vec![mutation(&["root", "additionalPrompt"], serde_json::json!("foreign-value"))]), ..Default::default() };
+        let stamp = peer.reserve_commit_only_stamp(&foreign).unwrap();
+        let digest = commit_intent_digest(&input).unwrap();
+        commit::commit_lww(&mut peer.connection, &input, &[], &foreign, &stamp, &digest).unwrap();
+        fn row_statuses(store: &PersistentStore) -> Vec<(String, String)> {
+            store.connection.prepare("SELECT key,status FROM lww_receive_rows ORDER BY rowid").unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap()
+        }
+        let statuses = row_statuses(&store);
+        assert_eq!(statuses.iter().filter(|(_, status)| status == "staged").count(), 1);
+        let revision = store.revision().unwrap();
+        if corrupt {
+            let pages: Vec<(String, rusqlite::types::Value)> = [0u64, 1].into_iter().map(|ordinal| store.connection.query_row(
+                "SELECT key,value FROM app_kv WHERE key LIKE ?1", [format!("%effect:{ordinal:020}")], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()).collect();
+            store.connection.execute("UPDATE app_kv SET value=?2 WHERE key=?1", rusqlite::params![pages[0].0, pages[1].1]).unwrap();
+            store.connection.execute("UPDATE app_kv SET value=?2 WHERE key=?1", rusqlite::params![pages[1].0, pages[0].1]).unwrap();
+            for _ in 0..2 {
+                assert!(matches!(step_kernel(&store, &cap), Err(StoreError::Validation { message }) if message == "native-receive-effect-page-integrity"));
+            }
+            assert_eq!(row_statuses(&store), statuses);
+            assert_eq!(store.revision().unwrap(), revision);
+            continue;
+        }
+        for step in 1..=4u64 {
+            if step == 2 {
+                drop(store);
+                store = PersistentStore::open(directory.path()).unwrap();
+                assert_eq!(serde_json::to_value(kernel_manifest(&store, &cap, Partition::Library)).unwrap()["validation"]["effectOrdinal"], 1);
+            }
+            let AdvanceResult::Advanced { fence, .. } = step_kernel(&store, &cap).unwrap() else { panic!("current token was stale") };
+            let manifest = kernel_manifest(&store, &cap, Partition::Library);
+            assert!(manifest.foreign.library && !manifest.foreign.device);
+            if step < 4 {
+                assert!(fence.unknown_library && !fence.unknown_device && fence.keys.is_empty());
+                assert_eq!(manifest.cursor.epoch, sealed.cursor.epoch);
+                assert_eq!(serde_json::to_value(&manifest).unwrap()["validation"]["effectOrdinal"], step);
+            } else {
+                assert!(fence.unknown_library && fence.unknown_device);
+                assert_eq!(manifest.cursor.epoch, sealed.cursor.epoch + 1);
+                assert!(manifest.validation.is_none() && manifest.validated.is_some());
+            }
+            assert_eq!(store.revision().unwrap(), revision);
+            assert_eq!(row_statuses(&store), statuses);
+        }
+        for _ in 0..100 { if kernel_ready_for_settlement(&store, &cap) { break; } step_kernel(&store, &cap).unwrap(); }
+        assert!(kernel_ready_for_settlement(&store, &cap));
+        let settled = kernel_manifest(&store, &cap, Partition::Library);
+        assert_eq!((settled.effect_pages, settled.affected_count), (5, 5));
+        assert_eq!(store.revision().unwrap(), revision + 1);
+        assert!(row_statuses(&store).iter().all(|(_, status)| status == "done"));
+        for key in &keys { assert_eq!(store.read_plugin_storage("revalidated", key, None).unwrap().unwrap().value, key.as_str()); }
+    }
+    {
+        let (directory, mut store) = store();
+        let peer = std::rc::Rc::new(PersistentStore::open(directory.path()).unwrap());
+        for connection in [&store.connection, store.device_store().unwrap().connection(), &peer.connection, peer.device_store().unwrap().connection()] {
+            connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+        }
+        let time = device_store::now_ms().unwrap() as u64 + 100_000;
+        let plugin = change(&["plugin", "guarded", "key"], time, serde_json::json!("guarded-plugin"));
+        stage_kernel_rows(&mut store, "kernel-guarded-commit", vec![change(&["root", "language"], time, serde_json::json!("guarded")), plugin.clone()]);
+        let cap = begin_kernel(&mut store);
+        let request = |store: &PersistentStore| AdvanceRequest { capability: cap.clone(),
+            expected_progress_token: store.read_native_receive_state(&cap).unwrap().progress_token, generating: vec![] };
+        // A peer write lock at either guard is retryable contention, before and after the clock observation.
+        for held in [peer.device_store().unwrap().connection(), &peer.connection] {
+            let request = request(&store);
+            held.execute_batch("BEGIN IMMEDIATE").unwrap();
+            assert!(matches!(store.advance_local_native_receive(&request), Err(StoreError::CommitBusy)));
+            held.execute_batch("ROLLBACK").unwrap();
+        }
+        let held = peer.clone();
+        batches::kernel_test::inspect(1, move || held.connection.execute_batch("BEGIN IMMEDIATE").unwrap());
+        assert!((0..50).any(|_| match store.advance_local_native_receive(&request(&store)) {
+            Err(StoreError::CommitBusy) => true, result => { result.unwrap(); false }
+        }));
+        peer.connection.execute_batch("ROLLBACK").unwrap();
+        let phases = std::rc::Rc::new(std::cell::Cell::new(0));
+        let callback_phases = phases.clone();
+        let callback_peer = peer.clone();
+        batches::kernel_test::inspect(3, move || {
+            let peer = callback_peer;
+            for connection in [&peer.connection, peer.device_store().unwrap().connection()] {
+                assert!(matches!(Transaction::new_unchecked(connection, TransactionBehavior::Immediate),
+                    Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::DatabaseBusy));
+            }
+            callback_phases.set(1);
+            batches::kernel_test::inspect(2, move || {
+                // The released library lock is taken and held past the device commit.
+                peer.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                assert!(matches!(Transaction::new_unchecked(peer.device_store().unwrap().connection(), TransactionBehavior::Immediate),
+                    Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::DatabaseBusy));
+                assert_eq!(peer.read_root(None).unwrap().value["language"], "guarded");
+                callback_phases.set(2);
+            });
+        });
+        let AdvanceResult::Advanced { state, fence } = store.advance_local_native_receive(&request(&store)).unwrap()
+            else { panic!("current token was stale") };
+        assert_eq!(phases.get(), 2);
+        assert_eq!(fence.keys, vec![plugin.key.clone()], "a committed step keeps its fence while a peer holds the library lock");
+        assert!(!fence.unknown_library && !fence.unknown_device);
+        peer.connection.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(state.progress_token, store.read_native_receive_state(&cap).unwrap().progress_token);
+        for _ in 0..100 { if kernel_ready_for_settlement(&store, &cap) { break; } step_kernel(&store, &cap).unwrap(); }
+        assert!(kernel_ready_for_settlement(&store, &cap));
+        assert_eq!(store.read_root(None).unwrap().value["language"], "guarded");
+        assert_eq!(store.read_plugin_storage("guarded", "key", None).unwrap().unwrap().value, "guarded-plugin");
+        assert_eq!(kernel_manifest(&store, &cap, Partition::Library).affected_count, 2);
+    }
+}
+
+#[test]
+fn receive_kernel_installs_both_archive_directions_through_commit_only_cas() {
+    use crate::asset_repository::{job_pins::durable_cas_job_ids, PayloadCas};
+    use crate::native_generation::operation::{Start, Target};
+    use crate::persistent_store::archive::{is_archived, read_archived_object};
+    use crate::persistent_store::receive_batches::{self as batches, AdvanceRequest, Partition, Source, TransitionDecision};
+    for mode in ["archive", "restore", "protected", "released", "same-state", "parent", "identical-archive", "identical-restore",
+        "cross", "missing-cas", "generation-blocked", "generation-raced", "renderer"] {
+        let identical = mode.starts_with("identical-");
+        let restore = matches!(mode, "restore" | "identical-restore" | "missing-cas");
+        let (_source_directory, mut source) = store();
+        let (directory, mut target) = store();
+        create_conversation(&mut source, "char", "chat");
+        if mode != "parent" {
+            create_conversation(&mut target, "char", "chat");
+            // Only this device's own archive payload carries these fields.
+            save(&mut target, vec![mutation(&["character", "char", "localFuture"], serde_json::json!("target-private")),
+                mutation(&["conversation", "char", "chat", "localFuture"], serde_json::json!("target-chat"))]);
+        }
+        clear_outbox(&mut source);
+        source.archive_character("char", source.revision().unwrap(), 10).unwrap();
+        copy_objects(&source, &target);
+        let archive = source.lww_read_outbox(0.into(), 100).unwrap().entries.into_iter().find(|entry| entry.key.components()[0] == "archive").unwrap();
+        let incoming = archive_metadata(&target.connection, &archive.value).unwrap();
+        let local_archive = if restore || mode == "same-state" {
+            target.archive_character("char", target.revision().unwrap(), 9).unwrap();
+            Some(read_archived_object(&target.connection, &active_generation(&target.connection).unwrap(), "char").unwrap().unwrap())
+        } else { None };
+        let cas = PayloadCas::new(target.repository_root()).unwrap();
+        let missing = (mode == "missing-cas").then(|| {
+            let hash = &local_archive.as_ref().unwrap().object_hash;
+            let bytes = cas.read_object(hash).unwrap().unwrap();
+            std::fs::remove_file(cas.object_path(hash).unwrap().unwrap()).unwrap();
+            bytes
+        });
+        let generation_target = |store: &PersistentStore| Target { character_id: "char".into(), conversation_id: "chat".into(),
+            expected_revision: store.revision().unwrap(), library_identity: store.library_identity().unwrap(),
+            binding_authority: store.lww_binding_authority().unwrap() };
+        let owner = if matches!(mode, "protected" | "released") {
+            let ticket = target.generation_reserve(generation_target(&target)).unwrap();
+            let Start::Started { owner, .. } = target.generation_start(&ticket).unwrap() else { panic!("generation start") };
+            Some(owner)
+        } else { None };
+        // A second handle starts the generation through its own device guard.
+        let peer = matches!(mode, "generation-blocked" | "generation-raced").then(|| {
+            let peer = PersistentStore::open(directory.path()).unwrap();
+            for connection in [&peer.connection, peer.device_store().unwrap().connection()] {
+                connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+            }
+            std::rc::Rc::new(std::cell::RefCell::new(peer))
+        });
+        let reserved = peer.as_ref().map(|peer| {
+            let generation = generation_target(&peer.borrow());
+            peer.borrow_mut().generation_reserve(generation).unwrap()
+        });
+        let time = device_store::now_ms().unwrap() as u64 + 100_000;
+        let mut changes = vec![Change { key: archive.key.clone(), stamp: stamp(time),
+            value: if restore { UnitValue::Deleted } else { archive.value.clone() } },
+            change(&["root", "language"], time, serde_json::json!("unrelated"))];
+        if mode == "parent" {
+            changes.push(change(&["exists", "character", "char"], time, serde_json::json!({"type":"character"})));
+            changes.push(change(&["exists", "conversation", "char", "chat"], time, serde_json::json!(true)));
+        }
+        if mode == "restore" {
+            // The restore installs before Exists, so a new conversation and its field are never held behind it.
+            changes.push(change(&["exists", "conversation", "char", "fresh"], time, serde_json::json!(true)));
+            changes.push(change(&["conversation", "char", "fresh", "name"], time, serde_json::json!("fresh-name")));
+        }
+        let request = if identical {
+            let local = target.lww_read_outbox(0.into(), 100).unwrap().entries.into_iter().next().unwrap();
+            assert!(target.lww_request_recorded(&local.version).unwrap());
+            let tx = Transaction::new_unchecked(&target.connection, TransactionBehavior::Immediate).unwrap();
+            // Restored held units can own local publication before residency catches up.
+            put_unit(&tx, &changes[0].key, &changes[0].stamp, &changes[0].value, &local.version, Some(target.lww_binding_authority().unwrap())).unwrap();
+            tx.commit().unwrap();
+            local.version
+        } else { format!("archive-{mode}") };
+        let header = stage_kernel_rows(&mut target, &request, changes);
+        if identical {
+            target.connection.execute("UPDATE lww_receive_rows SET status=?2 WHERE request_id=?1 AND key=?3",
+                params![header.request_id, if restore { "deferred" } else { "held" }, archive.key.as_str()]).unwrap();
+        }
+        let before_unit = read_unit(&target.connection, &archive.key).unwrap();
+        let before_outbox = serde_json::to_value(target.lww_read_outbox(0.into(), 100).unwrap()).unwrap();
+        let before_row: String = target.connection.query_row("SELECT json_array(request_id,key,stamp,value,status) FROM lww_receive_rows WHERE request_id=?1 AND key=?2",
+            params![header.request_id, archive.key.as_str()], |row| row.get(0)).unwrap();
+        let cap = if mode == "cross" {
+            // Another staged receive drives the archive row the first one left staged.
+            let trigger = stage_kernel_rows(&mut target, "archive-cross-trigger", vec![change(&["root", "additionalPrompt"], time, serde_json::json!("trigger"))]);
+            begin_kernel_from(&mut target, Source::Staged { header: trigger })
+        } else if matches!(mode, "archive" | "restore") {
+            let source = Source::Drain { binding_authority: target.lww_binding_authority().unwrap() };
+            let candidate = target.prepare_native_receive(&source).unwrap();
+            let batches::BeginResult::Admitted { state } = target.begin_local_native_receive(&batches::BeginRequest {
+                candidate, source, native_baseline: None }).unwrap() else { panic!("fresh kernel admission expected") };
+            assert!(state.foreign.scope);
+            state.capability
+        } else { begin_kernel(&mut target) };
+        let _limits = batches::kernel_test::Limits::set(1, 1024);
+        let started = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let blocked = std::rc::Rc::new(std::cell::Cell::new(false));
+        if let (Some(peer), Some(reserved)) = (peer.clone(), reserved.clone()) {
+            if mode == "generation-raced" {
+                let started = started.clone();
+                // The generation starts after staging and before the install takes its guards.
+                batches::kernel_test::inspect(4, move || {
+                    let Start::Started { owner, .. } = peer.borrow_mut().generation_start(&reserved).unwrap() else { panic!("generation start") };
+                    *started.borrow_mut() = Some(owner);
+                });
+            } else {
+                let blocked = blocked.clone();
+                // The install holds the device guard through its library commit.
+                batches::kernel_test::inspect(5, move || {
+                    assert!(peer.borrow_mut().generation_start(&reserved).is_err());
+                    blocked.set(true);
+                });
+            }
+        }
+        let mut parked = None;
+        let mut missing_failed = false;
+        let mut released = false;
+        let (mut renderer, mut renderer_deferred) = (false, false);
+        for _ in 0..100 {
+            // A renderer generation that starts after the flip parked keeps the row for a later phase.
+            let generating = if std::mem::take(&mut renderer) {
+                vec![MessageLocator { character_id: "char".into(), conversation_id: "chat".into(), start: None }]
+            } else { vec![] };
+            let rendering = !generating.is_empty();
+            let step = target.read_native_receive_state(&cap).and_then(|state| target.advance_local_native_receive(
+                &AdvanceRequest { capability: cap.clone(), expected_progress_token: state.progress_token, generating }));
+            match step {
+                Err(StoreError::Validation { message }) if message == "archive-object-missing" && missing.is_some() && !missing_failed => {
+                    // Nothing changes until the archive body is here again; the incoming stamp is already observed.
+                    missing_failed = true;
+                    assert_eq!(serde_json::to_value(&kernel_manifest(&target, &cap, Partition::Library).ticket).unwrap(), serde_json::to_value(&parked).unwrap());
+                    assert!(is_archived(&target.connection, &active_generation(&target.connection).unwrap(), "char").unwrap());
+                    assert_eq!(target.lww_clock_state().unwrap().accepted, Some(stamp(time)));
+                    cas.prepare_bytes(missing.as_ref().unwrap()).unwrap();
+                }
+                result => { result.unwrap(); }
+            }
+            let status: String = target.connection.query_row("SELECT status FROM lww_receive_rows WHERE request_id=?1 AND key=?2", params![header.request_id,archive.key.as_str()], |row| row.get(0)).unwrap();
+            if rendering {
+                assert_eq!(status, "deferred");
+                assert!(kernel_manifest(&target, &cap, Partition::Library).ticket.is_none());
+                assert_eq!(is_archived(&target.connection, &active_generation(&target.connection).unwrap(), "char").unwrap(), restore);
+                renderer_deferred = true;
+            }
+            if status == "deferred" && !released {
+                if mode == "released" { target.generation_finish(owner.as_ref().unwrap(), true).unwrap(); released = true; }
+                if let (Some(owner), Some(peer)) = (started.borrow_mut().take(), peer.as_ref()) {
+                    peer.borrow_mut().generation_finish(&owner, true).unwrap();
+                    released = true;
+                }
+            }
+            let manifest = kernel_manifest(&target, &cap, Partition::Library);
+            if let (None, Some(ticket)) = (&parked, &manifest.ticket) {
+                // A parked flip changes nothing before its install.
+                assert_eq!(is_archived(&target.connection, &active_generation(&target.connection).unwrap(), "char").unwrap(), restore);
+                if identical {
+                    assert_eq!(read_unit(&target.connection, &archive.key).unwrap(), before_unit);
+                    assert_eq!(serde_json::to_value(target.lww_read_outbox(0.into(), 100).unwrap()).unwrap(), before_outbox);
+                    assert_eq!(target.connection.query_row("SELECT json_array(request_id,key,stamp,value,status) FROM lww_receive_rows WHERE request_id=?1 AND key=?2",
+                        params![header.request_id, archive.key.as_str()], |row| row.get::<_,String>(0)).unwrap(), before_row);
+                }
+                if mode == "parent" { assert!(target.read_conversation("char", "chat", None).unwrap().is_some()); }
+                renderer = mode == "renderer";
+                parked = Some(ticket.clone());
+            }
+            if kernel_ready_for_settlement(&target, &cap) { break; }
+        }
+        assert!(kernel_ready_for_settlement(&target, &cap));
+        assert_eq!(missing_failed, mode == "missing-cas");
+        assert_eq!(released, matches!(mode, "released" | "generation-raced"));
+        assert_eq!(blocked.get(), mode == "generation-blocked");
+        assert_eq!(renderer_deferred, mode == "renderer");
+        let manifest = kernel_manifest(&target, &cap, Partition::Library);
+        let generation = active_generation(&target.connection).unwrap();
+        let status: String = target.connection.query_row("SELECT status FROM lww_receive_rows WHERE request_id=?1 AND key=?2", params![header.request_id,archive.key.as_str()], |row| row.get(0)).unwrap();
+        // The receipt keeps the identity of the receive that staged the row, whichever operation installs it.
+        let receipt = format!("archive-transition:{}:{}", header.request_id, risunest_sync_wire::hash(archive.key.as_str().as_bytes()));
+        let receipted: bool = target.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [&receipt], |row| row.get(0)).unwrap();
+        assert!(durable_cas_job_ids(directory.path()).unwrap().is_empty());
+        assert_eq!(target.read_root(None).unwrap().value["language"], "unrelated");
+        if matches!(mode, "protected" | "same-state") {
+            assert!(parked.is_none() && !receipted);
+            if mode == "protected" {
+                assert_eq!(status, "deferred");
+                assert!(target.read_conversation("char", "chat", None).unwrap().is_some());
+                assert_eq!(manifest.affected_count, 1);
+            } else {
+                // The local payload stays; only the shared descriptor follows the incoming archive.
+                let current = read_archived_object(&target.connection, &generation, "char").unwrap().unwrap();
+                let local = local_archive.as_ref().unwrap();
+                assert_eq!((&current.object_hash, &current.asset_hashes), (&local.object_hash, &local.asset_hashes));
+                assert_eq!((&current.shared_object_hash, current.archived_at), (&incoming.shared_object_hash, incoming.archived_at));
+                assert_eq!(manifest.affected_count, 2);
+            }
+        } else {
+            let ticket = parked.expect("unsafe archive flip must park before its install");
+            assert_eq!(ticket.restore, restore);
+            assert_eq!(ticket.decision, if identical { TransitionDecision::Identical } else { TransitionDecision::ApplyRemote });
+            assert_eq!(ticket.archive_key, archive.key.as_str());
+            assert!(manifest.ticket.is_none() && manifest.outcome.is_none());
+            assert_eq!(status, "done");
+            assert_eq!(is_archived(&target.connection, &generation, "char").unwrap(), !restore);
+            assert_eq!(receipted, !identical);
+            if identical {
+                assert_eq!(read_unit(&target.connection, &archive.key).unwrap(), before_unit);
+                // The page revision follows the install commits; every local entry stays exact.
+                assert_eq!(serde_json::to_value(target.lww_read_outbox(0.into(), 100).unwrap()).unwrap()["entries"], before_outbox["entries"]);
+            } else {
+                assert_eq!(read_unit(&target.connection, &archive.key).unwrap(),
+                    Some((stamp(time), if restore { UnitValue::Deleted } else { archive.value.clone() })));
+            }
+            assert_eq!(manifest.affected_count, match mode { "restore" | "parent" => 4, "cross" => 3, _ => 2 });
+            if !restore {
+                // This device's own payload is published and cataloged with the archive pointer.
+                let archived = read_archived_object(&target.connection, &generation, "char").unwrap().unwrap();
+                assert!(cas.stat_object(&archived.object_hash).unwrap().is_some());
+                assert_eq!(target.connection.query_row("SELECT count(*) FROM asset_objects WHERE object_hash=?1", [&archived.object_hash], |row| row.get::<_, i64>(0)).unwrap(), 1);
+                assert_ne!(archived.object_hash, archived.shared_object_hash);
+                assert_eq!((&archived.shared_object_hash, archived.archived_at), (&incoming.object_hash, incoming.archived_at));
+            }
+        }
+        if let (Some(peer), Some(reserved)) = (peer.as_ref(), reserved.as_ref()) {
+            if mode == "generation-blocked" {
+                assert!(!matches!(peer.borrow_mut().generation_start(reserved), Ok(Start::Started { .. })), "a generation must not start on the installed archive");
+            }
+        }
+        if mode == "cross" { assert_eq!(target.read_root(None).unwrap().value["additionalPrompt"], "trigger"); }
+        if mode == "restore" { assert_eq!(target.read_conversation("char", "fresh", None).unwrap().unwrap().value["name"], "fresh-name"); }
+        assert_eq!(seal_kernel(&target, &cap), crate::persistent_store::receive_batches::Outcome::Processed);
+        if is_archived(&target.connection, &generation, "char").unwrap() {
+            target.restore_character("char", target.revision().unwrap()).unwrap();
+        }
+        assert!(target.read_conversation("char", "chat", None).unwrap().is_some());
+        if mode != "parent" {
+            assert_eq!(target.read_character("char", None).unwrap().unwrap().value["localFuture"], "target-private");
+            assert_eq!(target.read_conversation("char", "chat", None).unwrap().unwrap().value["localFuture"], "target-chat");
+        }
+    }
+}
+
+#[test]
+fn receive_kernel_resumes_an_interrupted_first_archive_after_reopen_in_both_directions() {
+    use crate::asset_repository::{job_pins::durable_cas_job_ids, PayloadCas};
+    use crate::persistent_store::archive::{is_archived, read_archived_object};
+    use crate::persistent_store::receive_batches::{self as batches, BeginRequest, BeginResult, Partition, Source};
+    let owners = ["first", "second"];
+    for restore in [false, true] {
+        // 5 fails after the first payload is published and before its library commit; 6 fails after that commit.
+        for interrupt in [5u8, 6] {
+            let (_source_directory, mut source) = store();
+            let (directory, mut target) = store();
+            for owner in owners {
+                create_conversation(&mut source, owner, "chat");
+                create_conversation(&mut target, owner, "chat");
+                save(&mut target, vec![mutation(&["character", owner, "localFuture"], serde_json::json!(format!("{owner}-private"))),
+                    mutation(&["conversation", owner, "chat", "localFuture"], serde_json::json!(format!("{owner}-chat")))]);
+            }
+            clear_outbox(&mut source);
+            for owner in owners { source.archive_character(owner, source.revision().unwrap(), 10).unwrap(); }
+            copy_objects(&source, &target);
+            if restore {
+                for owner in owners { target.archive_character(owner, target.revision().unwrap(), 9).unwrap(); }
+            }
+            let entries = source.lww_read_outbox(0.into(), 100).unwrap().entries;
+            let time = device_store::now_ms().unwrap() as u64 + 100_000;
+            stage_kernel_rows(&mut target, "interrupted-archives", owners.iter().map(|owner| {
+                let entry = entries.iter().find(|entry| entry.key.components() == ["archive", owner]).unwrap();
+                Change { key: entry.key.clone(), stamp: stamp(time), value: if restore { UnitValue::Deleted } else { entry.value.clone() } }
+            }).collect());
+            let cap = begin_kernel(&mut target);
+            let revision = target.revision().unwrap();
+            batches::kernel_test::hook(interrupt, || {});
+            let mut interrupted = false;
+            for _ in 0..20 {
+                match step_kernel(&target, &cap) {
+                    Err(StoreError::Validation { message }) if message == "synthetic-kernel-interruption" => { interrupted = true; break; }
+                    result => { result.unwrap(); }
+                }
+            }
+            assert!(interrupted);
+            let generation = active_generation(&target.connection).unwrap();
+            let flipped = |store: &PersistentStore, owner: &str| is_archived(&store.connection, &generation, owner).unwrap() != restore;
+            assert_eq!(flipped(&target, "first"), interrupt == 6);
+            assert!(!flipped(&target, "second"));
+            assert_eq!(target.revision().unwrap(), revision + i64::from(interrupt == 6));
+            let library = kernel_manifest(&target, &cap, Partition::Library);
+            assert_eq!((library.ticket.is_some(), library.affected_count), (interrupt == 5, u64::from(interrupt == 6)));
+            // The pre-install observation is durable, and an aborted publication leaves no live journal.
+            assert_eq!(target.lww_clock_state().unwrap().accepted, Some(stamp(time)));
+            assert!(durable_cas_job_ids(directory.path()).unwrap().is_empty());
+            drop(target);
+            let mut target = PersistentStore::open(directory.path()).unwrap();
+            assert_eq!(target.lww_clock_state().unwrap().accepted, Some(stamp(time)));
+            // A startup drain helps the existing operation instead of projecting its rows raw.
+            let drain = Source::Drain { binding_authority: target.lww_binding_authority().unwrap() };
+            let candidate = target.prepare_native_receive(&drain).unwrap();
+            let BeginResult::Recovery { state } = target.begin_local_native_receive(&BeginRequest { candidate, source: drain, native_baseline: None }).unwrap()
+                else { panic!("the interrupted operation must stay the producer") };
+            assert_eq!(state.capability, cap);
+            for _ in 0..100 { if kernel_ready_for_settlement(&target, &cap) { break; } step_kernel(&target, &cap).unwrap(); }
+            assert!(kernel_ready_for_settlement(&target, &cap));
+            assert_eq!(kernel_manifest(&target, &cap, Partition::Library).affected_count, 2);
+            assert_eq!(target.revision().unwrap(), revision + 2);
+            assert!(durable_cas_job_ids(directory.path()).unwrap().is_empty());
+            assert_eq!(seal_kernel(&target, &cap), crate::persistent_store::receive_batches::Outcome::Processed);
+            let cas = PayloadCas::new(target.repository_root()).unwrap();
+            for owner in owners {
+                assert!(flipped(&target, owner));
+                if !restore {
+                    let archived = read_archived_object(&target.connection, &generation, owner).unwrap().unwrap();
+                    assert!(cas.stat_object(&archived.object_hash).unwrap().is_some());
+                    target.restore_character(owner, target.revision().unwrap()).unwrap();
+                }
+                assert_eq!(target.read_character(owner, None).unwrap().unwrap().value["localFuture"], format!("{owner}-private"));
+                assert_eq!(target.read_conversation(owner, "chat", None).unwrap().unwrap().value["localFuture"], format!("{owner}-chat"));
+            }
+        }
+    }
+}
+
+#[test]
+fn receive_kernel_identical_local_pending_and_retired_children_keep_their_exact_contract() {
+    use crate::persistent_store::receive_batches::Partition;
+    let (_directory, mut store) = store();
+    create_conversation(&mut store, "retired", "chat");
+    save(&mut store, vec![mutation(&["root", "language"], serde_json::json!("local"))]);
+    let local = store.lww_read_outbox(0.into(), 100).unwrap().entries.into_iter().find(|entry| entry.key == unit_key(&["root", "language"]).unwrap()).unwrap();
+    stage_kernel_rows(&mut store, &local.version, vec![Change { key: local.key.clone(), stamp: local.stamp.clone(), value: local.value.clone() }]);
+    store.connection.execute("UPDATE lww_receive_rows SET status='held' WHERE request_id=?1", [&local.version]).unwrap();
+    stage_kernel_rows(&mut store, "kernel-old-delete", vec![Change { key: unit_key(&["exists", "character", "retired"]).unwrap(), stamp: stamp(1), value: UnitValue::Deleted },
+        change(&["conversation", "retired", "chat", "note"], 2, serde_json::json!("must-not-project"))]);
+    let original_unit: (String, String, String) = store.connection.query_row("SELECT stamp,value,version FROM lww_units WHERE key=?1", [local.key.as_str()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    let cap = begin_kernel(&mut store);
+    for _ in 0..100 { if kernel_ready_for_settlement(&store, &cap) { break; } step_kernel(&store, &cap).unwrap(); }
+    assert!(kernel_ready_for_settlement(&store, &cap));
+    assert_eq!(store.read_root(None).unwrap().value["language"], "local");
+    assert_eq!(store.connection.query_row("SELECT stamp,value,version FROM lww_units WHERE key=?1", [local.key.as_str()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).unwrap(), original_unit);
+    assert!(store.lww_read_outbox(0.into(), 100).unwrap().entries.iter().any(|entry| entry.key == local.key && entry.version == local.version && entry.stamp == local.stamp && entry.value == local.value));
+    assert!(store.read_character("retired", None).unwrap().is_none());
+    assert!(matches!(read_unit(&store.connection, &unit_key(&["exists", "character", "retired"]).unwrap()).unwrap(), Some((_, UnitValue::Deleted))));
+    assert!(read_unit(&store.connection, &unit_key(&["conversation", "retired", "chat", "note"]).unwrap()).unwrap().is_none());
+    assert_eq!(kernel_manifest(&store, &cap, Partition::Library).affected_count, 2);
 }

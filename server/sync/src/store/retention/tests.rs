@@ -13,7 +13,6 @@ fn offline_custody_survives_expired_transfer_leases_and_reopen_until_release() {
     let store = Store::init(root.path()).unwrap();
     let device = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let identity = object(b"synthetic retained snapshot body");
     store
@@ -57,11 +56,9 @@ fn stale_or_other_device_release_cannot_remove_new_custody() {
     let store = Store::init(root.path()).unwrap();
     let device = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let other = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let identity = object(b"synthetic shared payload");
     store
@@ -126,7 +123,6 @@ fn retention_is_atomic_and_requires_matching_size_and_epoch() {
     let store = Store::init(root.path()).unwrap();
     let device = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let identity = object(b"synthetic atomic payload");
     store
@@ -164,7 +160,6 @@ fn revocation_and_restored_epoch_do_not_silently_discard_snapshot_custody() {
     let store = Store::init(root.path()).unwrap();
     let device = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let identity = object(b"synthetic historical snapshot");
     let digest = identity.hash.clone();
@@ -190,11 +185,9 @@ fn a_revoked_predecessor_stays_listed_until_its_custody_is_released() {
     let store = Store::init(root.path()).unwrap();
     let predecessor = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let successor = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let identity = object(b"synthetic resident payload");
     store

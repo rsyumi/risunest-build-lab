@@ -62,7 +62,7 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     withPausedPersistentWrites: f.paused,
     beginActivatedLibraryGuard: f.guard,
     refreshActivatedLibraryUnderPause: f.refresh,
-    applyPersistentLwwReceive: f.apply,
+    applyPersistentStoredLwwReceive: f.apply,
     flushPendingDataLocally: f.flush,
     getPersistentDataRuntime: () => f.runtime,
 }))
@@ -93,7 +93,7 @@ beforeEach(async () => {
     production = await import('./serverSyncProduction')
 })
 afterEach(() => { production.disposeNativeSyncBindings(); vi.useRealTimers(); vi.unstubAllGlobals() })
-const emptyReceive = () => ({ bindingAuthority: '0', requestId: 'empty', changes: [], progress: { kind: 'server', cursor: '0' }, admittedTimeUpperMs: '0' })
+const emptyReceive = () => ({ bindingAuthority: '0', requestId: 'empty', incomingKeys: [], receivedUnits: 0, progress: { kind: 'server', cursor: '0' }, more: false, hasBodyReferences: false, hasRepresentativeReferences: false })
 const bindingContext = () => ({ state: { target: { kind: 'server' as const, connectionId: 'server' }, targetAuthority: '0', selectionEpoch: '0', libraryId: 'library', progress: null }, signal: new AbortController().signal })
 const visible = (value: boolean) => { Object.defineProperty(document, 'visibilityState', { value: value ? 'visible' : 'hidden', configurable: true }); document.dispatchEvent(new Event('visibilitychange')) }
 const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
@@ -132,7 +132,7 @@ describe('production server LWW composition', () => {
         await expect(f.transport!.receiveAvailableChanges!(bindingContext())).rejects.toMatchObject({code: 'server-unreachable'})
         offline = false
         await f.transport!.receiveAvailableChanges!(bindingContext())
-        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '0'}}))
+        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '0'}}), expect.any(Function))
         expect(startup.starts()).toBe(1)
     })
     it.each([
@@ -202,7 +202,7 @@ describe('production server LWW composition', () => {
             return {...emptyReceive(), more: true, receiveFrontier: '2', progress: {kind: 'server', cursor: '1'}}
         })
         const startup = await pluginStartup()
-        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '1'}}))
+        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '1'}}), expect.any(Function))
         expect(startup.starts()).toBe(0)
         expect(startup.gate.refuse()).toBe(true)
     })
@@ -621,7 +621,7 @@ describe('production server LWW composition', () => {
         f.invoke.mockImplementation(async command => {
             if (command === 'server_sync_lww_hydrate') return new Promise<void>(resolve => { finish = resolve })
             if (command === 'server_sync_lww_pull') {
-                if (assetPage) { assetPage = false; return { ...emptyReceive(), requestId: 'asset-page', changes: [{ key: JSON.stringify(['asset', 'assets/new.png']), stamp: { physicalMs: '0', logical: '0', writerId: 'writer' }, value: { kind: 'inline', bytes: 'e30=' } }] } }
+                if (assetPage) { assetPage = false; return { ...emptyReceive(), requestId: 'asset-page', incomingKeys: [JSON.stringify(['asset', 'assets/new.png'])], receivedUnits: 1, hasBodyReferences: true, hasRepresentativeReferences: true } }
                 return emptyReceive()
             }
             return null
@@ -639,7 +639,7 @@ describe('production server LWW composition', () => {
         await production.receiveAvailableServerChanges(); await settle(); expect(hydrationCalls()).toHaveLength(0)
         let messagePage = true
         f.invoke.mockImplementation(async command => {
-            if (command === 'server_sync_lww_pull' && messagePage) { messagePage = false; return { ...emptyReceive(), requestId: 'messages', changes: [{ key: JSON.stringify(['messages', 'character', 'conversation']), stamp: { physicalMs: '0', logical: '0', writerId: 'writer' }, value: { kind: 'object', descriptorHash: 'control', descriptor: { dependencies: ['page-control'] } } }] } }
+            if (command === 'server_sync_lww_pull' && messagePage) { messagePage = false; return { ...emptyReceive(), requestId: 'messages', incomingKeys: [JSON.stringify(['messages', 'character', 'conversation'])], receivedUnits: 1 } }
             return command === 'server_sync_lww_pull' ? emptyReceive() : null
         })
         await production.receiveAvailableServerChanges(); await settle(); expect(hydrationCalls()).toHaveLength(0)
@@ -651,7 +651,7 @@ describe('production server LWW composition', () => {
         { key: ['archive', 'first'], value: { kind: 'deleted' } },
         { key: ['order', 'characters'], value: { kind: 'inline', bytes: btoa(JSON.stringify([{ id: 'folder', imgFile: 'assets/folder.png', data: [] }])) } },
     ]
-    const receiveUnder = async (assetPolicy: string, key: string[], value: unknown) => {
+    const receiveUnder = async (assetPolicy: string, key: string[]) => {
         const base = f.invoke.getMockImplementation()!
         f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
             ? { configured: true, writerId: 'writer', bindingAuthority: '0', assetPolicy } : base(command, args))
@@ -661,20 +661,20 @@ describe('production server LWW composition', () => {
         f.invoke.mockImplementation(async command => {
             if (command === 'server_sync_lww_pull' && page) {
                 page = false
-                return { ...emptyReceive(), changes: [{ key: JSON.stringify(key), value }] }
+                return { ...emptyReceive(), incomingKeys: [JSON.stringify(key)], receivedUnits: 1, hasRepresentativeReferences: true }
             }
             return command === 'server_sync_lww_pull' ? emptyReceive() : null
         })
         await production.receiveAvailableServerChanges(); await settle()
     }
-    it.each(representativeChanges)('refreshes representatives after receiving $key without downloading the full inventory', async ({ key, value }) => {
-        await receiveUnder('remote', key, value)
+    it.each(representativeChanges)('refreshes representatives after receiving $key without downloading the full inventory', async ({ key }) => {
+        await receiveUnder('remote', key)
         expect(hydrationCalls()).toEqual([['server_sync_lww_hydrate', {
             request: expect.objectContaining({ bindingAuthority: '0' }), selectedCharacterId: 'selected-stable-id', representativesOnly: true,
         }]])
     })
-    it.each(representativeChanges)('asks nothing of a device that keeps every asset after receiving $key', async ({ key, value }) => {
-        await receiveUnder('full', key, value)
+    it.each(representativeChanges)('asks nothing of a device that keeps every asset after receiving $key', async ({ key }) => {
+        await receiveUnder('full', key)
         expect(hydrationCalls()).toHaveLength(0)
     })
     it('sends updated list order to representative hydration without a library save', async () => {
@@ -782,55 +782,6 @@ describe('production server LWW composition', () => {
         visible(false); await settle(); visible(true); openConversation('third'); await settle()
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_retry')).toHaveLength(retries)
     })
-    it('rechecks a library format block through native code on open and resumes once it passes', async () => {
-        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        let current = false
-        f.invoke.mockImplementation(async command => {
-            if (!current && (command === 'server_sync_lww_pull' || command === 'server_sync_lww_check_format')) throw { code: 'library-format-switch-required', retryable: false }
-            return command === 'server_sync_lww_pull' ? emptyReceive() : null
-        })
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, blockedCode: 'library-format-switch-required', error: 'library-format-switch-required' })
-        openConversation('first'); await settle()
-        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_check_format', { request: { bindingAuthority: '0', requestId: expect.any(String) } })
-        expect(production.getServerSyncController().snapshot().paused).toBe(true)
-        current = true
-        openConversation('second'); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, blockedCode: '', error: '' })
-    })
-    it.each(['a receive', 'the initial publication'])('switches the library format stopped by %s on request and resumes sync with the retry that follows', async stoppedBy => {
-        const state = bindingContext().state
-        const stop = { code: 'library-format-switch-required', retryable: false }
-        let current = false
-        f.invoke.mockImplementation(async command => {
-            if (command === 'server_sync_status') return { configured: true, writerId: 'writer', bindingAuthority: '0' }
-            if (command === 'pds_lww_binding_state') return state
-            if (command === 'server_sync_lww_switch_format') { current = true; return null }
-            if (!current && (command === 'server_sync_lww_pull' || command === 'server_sync_lww_push')) throw stop
-            return command === 'server_sync_lww_pull' ? emptyReceive() : null
-        })
-        try {
-            production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-            f.resumeCurrent.mockImplementation(async () => { await f.transport!.resumeBinding(bindingContext()) })
-            visible(true)
-            if (stoppedBy === 'a receive') {
-                await f.transport!.resumeBinding(bindingContext()); await settle()
-                expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, blockedCode: 'library-format-switch-required' })
-            } else {
-                // The binding flow stops a binding whose first publication failed, outside the scheduler.
-                await expect(f.transport!.publishInitialSharedState(bindingContext())).rejects.toBe(stop)
-                await f.transport!.fenceOldJobs(bindingContext()); f.transport!.reportStopped!(stop)
-                await production.getServerSyncController().ensureStatus()
-                expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, blockedCode: '', error: 'library-format-switch-required' })
-            }
-            await production.switchServerSyncLibraryFormat()
-            expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_switch_format', { request: { bindingAuthority: '0', requestId: expect.any(String) } })
-            f.invoke.mockClear()
-            await production.retryServerSync(); await settle()
-            expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, blockedCode: '', error: '' })
-            expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_pull', expect.anything())
-        } finally { f.resumeCurrent.mockReset() }
-    })
     it('drains and clears the old hydration context before a binding fence permits foreground return', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         let stopped!: (error: unknown) => void
@@ -881,7 +832,7 @@ describe('production server LWW composition', () => {
         let complete!: () => void
         f.apply.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
         f.invoke.mockImplementation(async command => command === 'server_sync_lww_pull'
-            ? { bindingAuthority: '0', requestId: 'received-page', changes: [], progress: { kind: 'server', cursor: '0' }, admittedTimeUpperMs: '0' }
+            ? { bindingAuthority: '0', requestId: 'received-page', incomingKeys: [], receivedUnits: 0, progress: { kind: 'server', cursor: '0' }, more: false, hasBodyReferences: false, hasRepresentativeReferences: false }
             : null)
         const received = production.receiveAvailableServerChanges()
         await vi.advanceTimersByTimeAsync(0)
@@ -973,20 +924,20 @@ describe('production server LWW composition', () => {
         await vi.advanceTimersByTimeAsync(5000); await settle()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
-    it('automatically recovers when native publication settles as cancelled after its request failed', async () => {
+    it('automatically recovers when native publication settles as server-unreachable with a nonretryable 409', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         const fallback = f.invoke.getMockImplementation()!
         let cancelled = true
         f.invoke.mockImplementation(async (command, args) => {
             if (command === 'server_sync_lww_push' && cancelled) {
                 cancelled = false
-                throw { code: 'server-unreachable', status: 503, retryable: true }
+                throw { code: 'server-unreachable', status: 409, retryable: false }
             }
             return fallback(command, args)
         })
         visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: 'server-unreachable' })
-        await vi.advanceTimersByTimeAsync(5000); await settle()
+        await vi.advanceTimersByTimeAsync(1000); await settle()
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push')).toHaveLength(2)
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
@@ -1513,7 +1464,7 @@ describe('server sync progress', () => {
         Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
         const pages: Array<() => void> = []
         let served = 0, reads = 0
-        const page = (index: number) => ({ bindingAuthority: '0', requestId: `page-${index}`, changes: index < 3 ? [{ key: JSON.stringify(['root', `key-${index}`]), value: { kind: 'inline' } }] : [], progress: { kind: 'server', cursor: String(index) }, admittedTimeUpperMs: '0' })
+        const page = (index: number) => ({ bindingAuthority: '0', requestId: `page-${index}`, incomingKeys: index < 3 ? [JSON.stringify(['root', `key-${index}`])] : [], receivedUnits: index < 3 ? 1 : 0, progress: { kind: 'server', cursor: String(index) }, more: index < 3, hasBodyReferences: false, hasRepresentativeReferences: false })
         f.invoke.mockImplementation(async command => {
             if (command === 'server_sync_lww_pull') { const index = served++; return index < 3 ? new Promise(resolve => pages.push(() => resolve(page(index)))) : page(index) }
             // Each read reports more of a receive whose backlog is known.

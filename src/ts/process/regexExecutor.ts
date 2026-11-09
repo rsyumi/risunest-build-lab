@@ -8,8 +8,6 @@ import { DEFAULT_REGEX_WORKER_TIMEOUT_MS, getSharedRegexWorkerClient, isRegexWor
 import { createRegexTimeoutScope, type RegexTimeoutScope } from './regexTimeoutScope'
 
 export const DEFAULT_REGEX_INVOCATION_TIMEOUT_MS = 30_000
-// The most inputs a caller passes to one `testEach` call.
-export const REGEX_TEST_BATCH_SIZE = 64
 export class RegexRuleSkippedError extends Error {}
 
 // Hold the queue through isolation so other rows cannot retry the culprit first.
@@ -60,8 +58,6 @@ export interface RegexExecutorOptions {
     invocationTimeoutMs?: number
     onTimeout?: () => void
     memory?: RegexTimeoutMemory
-    // Display output may skip a rule that timed out on other text; stored messages may not.
-    skipTimedOutRules?: boolean
 }
 
 export function regexRuleKey(entry: RegexExecutionPlanEntry): string {
@@ -82,9 +78,8 @@ export class RegexExecutor {
     }
 
     private skipped(key: string, input: string): boolean {
-        const memory = this.options.memory ?? recentTimeouts
         return this.timedOutMs >= (this.options.invocationTimeoutMs ?? DEFAULT_REGEX_INVOCATION_TIMEOUT_MS)
-            || this.scope.skipped.has(key) || (this.options.skipTimedOutRules ? memory.hasRule(key) : memory.has(key, input))
+            || this.scope.skipped.has(key) || (this.options.memory ?? recentTimeouts).has(key, input)
     }
 
     private timeout(key: string, input: string): void {
@@ -147,34 +142,6 @@ export class RegexExecutor {
         }
     }
 
-    /**
-     * Tests inputs in order, as one `test` operation each would, under one lock acquisition and
-     * one Worker request, so other regex work waits at most one batch. A timeout keeps the
-     * earlier results and skips the rest.
-     */
-    async testEach(pattern: string, flags: string, inputs: readonly string[], key: string): Promise<boolean[]> {
-        if (inputs.length === 0) return []
-        return runExclusive(this.options.signal, async () => {
-            const sent = inputs.map((input) => !this.skipped(key, input))
-            const sentInputs = inputs.filter((_, index) => sent[index])
-            let matches: boolean[] = []
-            if (sentInputs.length > 0) {
-                try {
-                    matches = await this.request(
-                        (timeoutMs) => this.client.testEach(pattern, flags, sentInputs, { timeoutMs, signal: this.options.signal }),
-                        () => sentInputs.map((input) => executeRegexOperation({ kind: 'test', pattern, flags, input })),
-                    )
-                } catch (error) {
-                    if (!(error instanceof RegexExecutionTimeoutError)) throw error
-                    matches = error.matches ?? []
-                    if (matches.length < sentInputs.length) this.timeout(key, sentInputs[matches.length])
-                }
-            }
-            let next = 0
-            return inputs.map((_, index) => sent[index] && (matches[next++] ?? false))
-        })
-    }
-
     async scriptOperation<K extends keyof RegexOperationResults>(operation: RegexOperation<K>, key: string): Promise<RegexOperationResults[K]> {
         if (this.skipped(key, operation.input)) throw new RegexRuleSkippedError()
         const result = await this.operationUnlocked(operation, key)
@@ -187,7 +154,7 @@ export class RegexExecutor {
         return runExclusive(this.options.signal, async () => {
             let data = input
             let index = 0
-            const stuck = new Set<number>()
+            let isolateUntil = 0
             let compiledCbs = true
             const errors: RegexExecutionResult['errors'] = []
             const keys: string[] = []
@@ -202,11 +169,6 @@ export class RegexExecutor {
             try {
                 while (index < plan.entries.length) {
                     this.options.signal?.throwIfAborted()
-                    if (stuck.has(index)) {
-                        this.timeout(keyAt(index), data)
-                        index++
-                        continue
-                    }
                     const entry = plan.entries[index]
                     const needsSkipCheck = this.scope.skipped.size || memory.size
                         || this.timedOutMs >= (this.options.invocationTimeoutMs ?? DEFAULT_REGEX_INVOCATION_TIMEOUT_MS)
@@ -216,9 +178,9 @@ export class RegexExecutor {
                         index++
                         continue
                     }
-                    let end = plan.entries.length
+                    let end = index < isolateUntil ? index + 1 : plan.entries.length
                     for (const i of skipCandidates) {
-                        if (i > index && i < end) end = i
+                        if (i > index && i < end) { end = i; break }
                     }
                     let result: RegexExecutionResult
                     let cbsContext: DisplayCbsContext | undefined
@@ -233,11 +195,12 @@ export class RegexExecutor {
                         }, () => ({ data, errors: [], nextIndex: index, steps: [] }))
                     } catch (error) {
                         if (!(error instanceof RegexExecutionTimeoutError)) throw error
-                        // The Worker names each rule before running it. The rules before that
-                        // one finished, and run again because their output was lost with it.
-                        const culprit = error.ruleIndex ?? index
-                        stuck.add(culprit)
-                        skipCandidates.push(culprit)
+                        if (index < isolateUntil) {
+                            this.timeout(keyAt(index), data)
+                            index++
+                        } else {
+                            isolateUntil = end
+                        }
                         continue
                     }
                     this.options.signal?.throwIfAborted()

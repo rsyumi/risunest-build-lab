@@ -561,6 +561,7 @@ export async function hypaMemoryV2(
     // Construct the mainPrompt from mainChunks
     mainPrompt = "";
     let mainPromptTokens = 0;
+    await tokenizer.prefetch(data.mainChunks.map((chunk) => chunk.text));
     for (const chunk of data.mainChunks) {
         const chunkTokens = await tokenizer.tokenizeChat({
             role: "system",
@@ -603,6 +604,7 @@ export async function hypaMemoryV2(
     );
     let chunkResultPrompts = "";
     let chunkResultTokens = 0;
+    await tokenizer.prefetch(scoredArray.map(([text]) => text.substring(prefixLength)));
     while (
         allocatedTokens - mainPromptTokens - chunkResultTokens > 0 &&
         scoredArray.length > 0

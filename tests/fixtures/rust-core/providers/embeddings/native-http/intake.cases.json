@@ -1,0 +1,3409 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "custom-ipv4",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "http://127.0.0.1/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-ipv4-short",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "http://127.1/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-ipv4-octal",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "http://0177.0.0.1/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-ipv4-hex",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "http://0x7f.1/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-ipv6",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "http://[::1]/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-idna",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://münich.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-query-suffix",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1?synthetic=1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-fragment-suffix",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1#synthetic",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-exact-suffix",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1/embeddings",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-trailing-suffix-slash",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1/embeddings/",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-url-usv",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": {
+            "u": [
+              104,
+              116,
+              116,
+              112,
+              115,
+              58,
+              47,
+              47,
+              116,
+              114,
+              97,
+              110,
+              115,
+              112,
+              111,
+              114,
+              116,
+              46,
+              105,
+              110,
+              118,
+              97,
+              108,
+              105,
+              100,
+              47,
+              55296
+            ]
+          },
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "userinfo-user-password",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://synthetic:password@transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "userinfo-user-empty-password",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://synthetic:@transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "userinfo-empty-user-password",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://:password@transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "userinfo-both-empty",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://:@transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "userinfo-empty-authority",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://@transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "userinfo-noncanonical-slashes",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https:////synthetic:password@transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "userinfo-percent-encoded",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://%75:%70@transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-key-whitespace",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": " \t synthetic-token \t "
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-key-tab-inside",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": "synthetic\tkey"
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-key-newline",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": "synthetic\nkey"
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-key-null",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "u": [
+                115,
+                121,
+                110,
+                116,
+                104,
+                101,
+                116,
+                105,
+                99,
+                0,
+                107,
+                101,
+                121
+              ]
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-key-latin1",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": "synthetic-é"
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-key-outside-bytestring",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": "synthetic-Ā"
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-key-lone-surrogate",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "u": [
+                115,
+                121,
+                110,
+                116,
+                104,
+                101,
+                116,
+                105,
+                99,
+                55296
+              ]
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "openai-missing-fallback",
+      "input": {
+        "construct": {
+          "model": "ada",
+          "customUrl": {
+            "absent": true
+          },
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            },
+            "supaKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "openai-blank-fallback",
+      "input": {
+        "construct": {
+          "model": "ada",
+          "customUrl": {
+            "absent": true
+          },
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            },
+            "supaKey": ""
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-201",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 201,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-299",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 299,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-204",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 204,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-205",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 205,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-304",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 304,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-101",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 101,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-103",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 103,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-status-600",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 600,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-malformed-json",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-whole-remote-json",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 429,
+              "statusText": "",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  101,
+                  114,
+                  114,
+                  111,
+                  114,
+                  34,
+                  58,
+                  123,
+                  34,
+                  109,
+                  101,
+                  115,
+                  115,
+                  97,
+                  103,
+                  101,
+                  34,
+                  58,
+                  34,
+                  115,
+                  121,
+                  110,
+                  116,
+                  104,
+                  101,
+                  116,
+                  105,
+                  99,
+                  34,
+                  125,
+                  44,
+                  34,
+                  100,
+                  101,
+                  116,
+                  97,
+                  105,
+                  108,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  50,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-header-latin1",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ],
+                [
+                  "x-synthetic",
+                  "é"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "response-header-outside-bytestring",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ],
+                [
+                  "x-synthetic",
+                  "Ā"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "ipc-failure-fetch",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "ipc-error",
+              "at": "fetch",
+              "message": "synthetic fetch failure"
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "ipc-failure-send",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "ipc-error",
+              "at": "send",
+              "message": "synthetic send failure"
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "ipc-failure-read",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "ipc-error",
+              "at": "read",
+              "message": "synthetic read failure"
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "data-url-hypa",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "data:application/json,%7B%22data%22%3A%5B%7B%22embedding%22%3A%5B1%2C-0%5D%7D%5D%7D#/embeddings",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "current-call-settings-old-instance-url",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://instance.invalid/v1",
+          "settings": {
+            "customModel": "old-model",
+            "customKey": "old-synthetic-key"
+          }
+        },
+        "calls": [
+          {
+            "purpose": "document",
+            "input": {
+              "shape": "batch",
+              "texts": [
+                "synthetic document"
+              ]
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          },
+          {
+            "before": {
+              "customUrl": "https://new-setting.invalid/v2",
+              "customModel": "new-model",
+              "customKey": "new-synthetic-key"
+            },
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "custom-invalid-url",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "not an absolute URL",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": "synthetic query"
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "none",
+              "outcome": "failure"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-input-surrogate",
+      "input": {
+        "construct": {
+          "model": "custom",
+          "customUrl": "https://transport.invalid/v1",
+          "settings": {
+            "customModel": "synthetic",
+            "customKey": {
+              "absent": true
+            }
+          }
+        },
+        "calls": [
+          {
+            "purpose": "query",
+            "input": {
+              "shape": "scalar",
+              "text": {
+                "u": [
+                  115,
+                  55296,
+                  116
+                ]
+              }
+            },
+            "reply": {
+              "kind": "http",
+              "status": 200,
+              "statusText": "OK",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "chunks": [
+                [
+                  123,
+                  34,
+                  100,
+                  97,
+                  116,
+                  97,
+                  34,
+                  58,
+                  91,
+                  123,
+                  34,
+                  101,
+                  109,
+                  98,
+                  101,
+                  100,
+                  100,
+                  105,
+                  110,
+                  103,
+                  34,
+                  58,
+                  91,
+                  49,
+                  44,
+                  45,
+                  48,
+                  93,
+                  125,
+                  93,
+                  125
+                ]
+              ]
+            },
+            "expect": {
+              "ipc": "request",
+              "outcome": "vectors"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

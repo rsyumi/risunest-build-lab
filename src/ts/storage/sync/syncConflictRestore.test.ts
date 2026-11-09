@@ -1,9 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { language } from 'src/lang'
-// Transform the module graph while the file loads, outside the timed tests;
-// each test's import after vi.resetModules() then only re-evaluates it.
-import './syncConflictRestore'
 
 const mocks = vi.hoisted(() => ({
     backupStore: {

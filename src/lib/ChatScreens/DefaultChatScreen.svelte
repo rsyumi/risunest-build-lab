@@ -10,7 +10,7 @@
     import Suggestion from './Suggestion.svelte';
     import { createLiveChatParserIndirections, createLiveChatParserSource } from 'src/ts/liveDisplayParserLease';
     import { CameraIcon, ChevronDownIcon, ChevronUpIcon, ChevronsDownIcon, ChevronsUpIcon, DatabaseIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon, CompassIcon, ChevronRightIcon } from "@lucide/svelte";
-    import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore, onboardingModalStore, moduleScopeMenuOpen } from "../../ts/stores.svelte";
+    import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore, onboardingModalStore } from "../../ts/stores.svelte";
     import { onDestroy } from 'svelte';
     import { ChatComposerState, chatScreenState, type SubmittedChatComposer } from '../../ts/ui/chatScreenState.svelte';
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
@@ -115,6 +115,7 @@
     const loadPlaygroundMenu = () => import('../Playground/PlaygroundMenu.svelte').then(m => m.default);
     
     interface Props {
+        openModuleList?: boolean;
         openChatList?: boolean;
         customStyle?: string;
     }
@@ -130,7 +131,7 @@
     let showNewMessageButton = $state(false)
     let chatsInstance: ChatViewportHandle | undefined = $state()
     let isScrollingToMessage = $state(false)
-    let { openChatList = $bindable(false), customStyle = '' }: Props = $props();
+    let { openModuleList = $bindable(false), openChatList = $bindable(false), customStyle = '' }: Props = $props();
     const persistentRuntime = getPersistentDataRuntime()
     const selectedConversationOperations = createSelectedConversationOperations({
         captureSelectedConversationTarget: () =>
@@ -390,7 +391,7 @@
     function reserveChatGeneration(): ChatGeneration | null {
         const controller = new AbortController()
         const reservation = reserveGeneration(() => controller.abort())
-        return reservation ? { ...reservation, signal: controller.signal } : null
+        return reservation ? Object.assign(reservation, { signal: controller.signal }) : null
     }
 
     async function send(){
@@ -885,6 +886,7 @@
             completed = await captureGeneration(endRun, () => sendChat({
                 signal,
                 continue: continued,
+                nativeIntent: continued ? undefined : 'ordinary',
                 historyLimit,
             }, generation))()
         } catch (error) {
@@ -998,8 +1000,6 @@
             }
         } catch (error) {
             if (!chatScreenState.matchesComposer(snapshot)) return
-            if (reverse) snapshot.composer.text = input
-            else snapshot.composer.translation = input
             if (!inputTranslationFailed) alertError(error)
             inputTranslationFailed = true
         }
@@ -1101,7 +1101,7 @@
         source: character,
         chat: ChatRecord,
     ) {
-        const character = snapshotChatScreenshotCharacter(source, chat, DBState.db.authorNotePresets)
+        const character = snapshotChatScreenshotCharacter(source, chat)
         const database = {
             characters: [character],
             mainPrompt: DBState.db.mainPrompt,
@@ -1926,7 +1926,8 @@
 
 
                     <div class="flex items-center cursor-pointer hover:text-green-500 transition-colors" onclick={() => {
-                        moduleScopeMenuOpen.set(true)
+                        DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].modules ??= []
+                        openModuleList = true
                         openMenu = false
                     }}>
                         <PackageIcon />

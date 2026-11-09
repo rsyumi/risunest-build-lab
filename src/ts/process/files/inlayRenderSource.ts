@@ -42,6 +42,11 @@ export class DeferredInlayMarkerRegistry {
         return marker ? { ...marker, token: crypto.randomUUID() } : undefined
     }
 
+    /** The slot `register` hands out next, `null` once cleared. */
+    get nextSlot(): number | null {
+        return this.#disposed ? null : this.#nextSlot
+    }
+
     rememberAssetImage(source: BlobImageSource): void {
         if (!this.#disposed) this.#assetImages.set(source.url, source)
     }

@@ -1,7 +1,8 @@
 <script lang="ts">
     import { onDestroy } from 'svelte'
     import { language } from 'src/lang'
-    import { getDeviceSettings, subscribeDeviceSettings, updateDeviceSettings } from 'src/ts/storage/deviceSettings'
+    import { getDeviceSettings, getNativeOllamaGeneration, subscribeDeviceSettings, updateDeviceSettings, updateNativeOllamaGeneration } from 'src/ts/storage/deviceSettings'
+    import { isTauri } from 'src/ts/platform'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
@@ -16,12 +17,15 @@
     let storedHistoryLimitMultiplier = initialSettings.generationHistoryLimitMultiplier
     let historyLimitMultiplier = $state(initialSettings.generationHistoryLimitMultiplier)
     let pluginOutputCurrentChatOnly = $state(initialSettings.pluginOutputCurrentChatOnly)
+    let nativeOllamaGeneration = $state(isTauri && getNativeOllamaGeneration())
+    let nativeOllamaToggleKey = $state(0)
     const unsubscribe = subscribeDeviceSettings((settings) => {
         profile = settings.performanceProfile
         historyLimitEnabled = settings.generationHistoryLimitEnabled
         storedHistoryLimitMultiplier = settings.generationHistoryLimitMultiplier
         historyLimitMultiplier = settings.generationHistoryLimitMultiplier
         pluginOutputCurrentChatOnly = settings.pluginOutputCurrentChatOnly
+        nativeOllamaGeneration = isTauri && getNativeOllamaGeneration()
     })
 
     onDestroy(unsubscribe)
@@ -49,6 +53,16 @@
         if (next === pluginOutputCurrentChatOnly) return
         pluginOutputCurrentChatOnly = next
         updateDeviceSettings({ pluginOutputCurrentChatOnly: next })
+    }
+
+    function setNativeOllamaGeneration(next: boolean) {
+        if (next === nativeOllamaGeneration) return
+        if (updateNativeOllamaGeneration(next)) {
+            nativeOllamaGeneration = next
+        } else {
+            // The box already shows the new value, so it is rebuilt from the stored one.
+            nativeOllamaToggleKey++
+        }
     }
 
     function commitHistoryLimitMultiplier() {
@@ -87,4 +101,11 @@
     <SettingRow inline label={language.risuNest.perf.pluginOutputCurrentChatOnly} help={language.risuNest.perf.pluginOutputCurrentChatOnlyHelp}>
         <SettingToggle checked={pluginOutputCurrentChatOnly} onchange={setPluginOutputCurrentChatOnly} label={language.risuNest.perf.pluginOutputCurrentChatOnly} />
     </SettingRow>
+    {#if isTauri}
+        <SettingRow inline label={language.risuNest.perf.nativeOllamaGeneration} help={language.risuNest.perf.nativeOllamaGenerationHelp}>
+            {#key nativeOllamaToggleKey}
+                <SettingToggle checked={nativeOllamaGeneration} onchange={setNativeOllamaGeneration} label={language.risuNest.perf.nativeOllamaGeneration} />
+            {/key}
+        </SettingRow>
+    {/if}
 </SettingGroup>

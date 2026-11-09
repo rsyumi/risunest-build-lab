@@ -3,7 +3,6 @@
 
     let data = $state('first')
     let controller = $state(new AbortController())
-    let root = $state<HTMLElement>()
     export function refresh(value = data) {
         controller.abort()
         controller = new AbortController()
@@ -12,6 +11,4 @@
 
 </script>
 
-<div bind:this={root}>
-    <DeferredMarkdown {data} {root} signal={controller.signal} preservePendingContent />
-</div>
+<DeferredMarkdown {data} signal={controller.signal} preservePendingContent />

@@ -1,0 +1,1359 @@
+{
+  "schema": 1,
+  "phase": "source-draft-unexecuted-characterization",
+  "sdkVersion": "0.6.4",
+  "fetchReferencePolicy": "Emulator observations only. Actual Chromium plus SDK diagnostics require root review before Fetch gates become browser/native acceptance goldens.",
+  "request": {
+    "model": "synthetic-model",
+    "characterName": "Synthetic character",
+    "selectedUserName": "Selected user",
+    "boundUserName": "Bound user",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Synthetic system.",
+        "name": "System alias"
+      },
+      {
+        "role": "user",
+        "content": "Synthetic question.",
+        "name": "Prompt alias"
+      },
+      {
+        "role": "assistant",
+        "content": "Synthetic earlier answer."
+      },
+      {
+        "role": "function",
+        "content": "Filtered function result."
+      }
+    ],
+    "wireMessages": [
+      {
+        "role": "system",
+        "content": "Synthetic system."
+      },
+      {
+        "role": "user",
+        "content": "Synthetic question."
+      },
+      {
+        "role": "assistant",
+        "content": "Synthetic earlier answer."
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "buffered-thinking",
+      "thinkingMode": "on",
+      "expectedThink": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"thinking\":\"reason\",\"content\":\"reply\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "<Thoughts>\nreason\n</Thoughts>\n\nreply"
+      }
+    },
+    {
+      "id": "buffered-whitespace",
+      "thinkingMode": "off",
+      "expectedThink": false,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"  reply  \\n\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "  reply  \n"
+      }
+    },
+    {
+      "id": "buffered-system-marker",
+      "thinkingMode": "low",
+      "expectedThink": "low",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"  keep  system note: stop\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "keep"
+      }
+    },
+    {
+      "id": "buffered-character-marker",
+      "thinkingMode": "medium",
+      "expectedThink": "medium",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"keep Synthetic character： stop\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "keep"
+      }
+    },
+    {
+      "id": "buffered-selected-persona",
+      "thinkingMode": "high",
+      "expectedThink": "high",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"keep Selected user: stop\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "keep"
+      }
+    },
+    {
+      "id": "buffered-bound-persona",
+      "boundPersona": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"keep Bound user: stop\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "keep"
+      }
+    },
+    {
+      "id": "buffered-prepared-name",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"keep Prompt alias: stop\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "keep"
+      }
+    },
+    {
+      "id": "buffered-earliest-speaker",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"  prefix  Prompt alias: earliest system: later\"}}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": "prefix"
+      }
+    },
+    {
+      "id": "buffered-empty-object",
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": ""
+      }
+    },
+    {
+      "id": "buffered-error-object",
+      "body": [
+        {
+          "utf8": "{\"error\":\"ignored in buffered 2xx\"}"
+        }
+      ],
+      "expected": {
+        "outcome": "success",
+        "result": ""
+      }
+    },
+    {
+      "id": "buffered-empty-body",
+      "body": [],
+      "gate": "json-error-diagnostics"
+    },
+    {
+      "id": "buffered-invalid-json",
+      "body": [
+        {
+          "utf8": "not JSON"
+        }
+      ],
+      "gate": "json-error-diagnostics"
+    },
+    {
+      "id": "buffered-null",
+      "body": [
+        {
+          "utf8": "null"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "buffered-numeric-content",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":42}}"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "buffered-numeric-thinking",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"thinking\":42,\"content\":false}}"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "buffered-lone-surrogate",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"\\ud800\"}}"
+        }
+      ],
+      "gate": "utf16-representation"
+    },
+    {
+      "id": "buffered-trim-js-whitespace",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"\\ufeff keep \\u0085 system: stop\"}}"
+        }
+      ],
+      "gate": "js-trim"
+    },
+    {
+      "id": "stream-thinking-terminal",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"thinking\":\"reason\"}}\n{\"message\":{\"content\":\"reply\"},\"done\":true}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "<Thoughts>\nreason\n</Thoughts>\n\n",
+          "<Thoughts>\nreason\n</Thoughts>\n\nreply"
+        ]
+      }
+    },
+    {
+      "id": "stream-no-speaker-strip",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"  Selected user: retained  \"},\"done\":true}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "  Selected user: retained  "
+        ]
+      }
+    },
+    {
+      "id": "stream-empty-done",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"done\":true}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          ""
+        ]
+      }
+    },
+    {
+      "id": "stream-status-success",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"last\"},\"status\":\"success\"}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "last"
+        ]
+      }
+    },
+    {
+      "id": "stream-unterminated",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"last\"},\"done\":true}"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "last"
+        ]
+      }
+    },
+    {
+      "id": "stream-malformed-then-done",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "not JSON\n{\"message\":{\"content\":\"kept\"},\"done\":true}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "kept"
+        ]
+      }
+    },
+    {
+      "id": "stream-crlf",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"kept\"},\"done\":true}\r\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "kept"
+        ]
+      }
+    },
+    {
+      "id": "stream-fragmented-unicode",
+      "stream": true,
+      "fragmentBytes": 1,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"합성🐿️\"},\"done\":true}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "합성🐿️"
+        ]
+      }
+    },
+    {
+      "id": "stream-premature-eof",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"partial\"}}\n"
+        }
+      ],
+      "gate": "partial-output-error-order",
+      "expected": {
+        "outcome": "error",
+        "errorMessage": "Did not receive done or success response in stream."
+      }
+    },
+    {
+      "id": "stream-empty-body",
+      "stream": true,
+      "body": [],
+      "expected": {
+        "outcome": "error",
+        "snapshots": [],
+        "errorMessage": "Did not receive done or success response in stream."
+      }
+    },
+    {
+      "id": "stream-error-object",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"error\":\"synthetic failure\",\"done\":true}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "error",
+        "snapshots": [],
+        "errorMessage": "synthetic failure"
+      }
+    },
+    {
+      "id": "stream-error-false",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"error\":false,\"done\":true}\n"
+        }
+      ],
+      "gate": "js-error-coercion"
+    },
+    {
+      "id": "stream-error-null",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"error\":null,\"done\":true}\n"
+        }
+      ],
+      "gate": "js-error-coercion"
+    },
+    {
+      "id": "stream-primitive",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "42\n{\"done\":true}\n"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "stream-null",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "null\n{\"done\":true}\n"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "stream-array",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "[]\n{\"done\":true}\n"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "stream-array-done",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"last\"},\"done\":[]}\n"
+        }
+      ],
+      "gate": "js-truthiness"
+    },
+    {
+      "id": "stream-numeric-coercion",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":1e21,\"thinking\":0}}\n{\"message\":{\"content\":-0,\"thinking\":false},\"done\":true}\n"
+        }
+      ],
+      "gate": "js-number-string"
+    },
+    {
+      "id": "stream-object-array-coercion",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"thinking\":{},\"content\":[1,null,{\"x\":1}]},\"done\":true}\n"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "stream-shadowed-tostring",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":{\"toString\":null}},\"done\":true}\n"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "stream-lone-surrogate",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"\\ud800\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "utf16-representation"
+    },
+    {
+      "id": "http-json-error",
+      "status": 503,
+      "statusText": "Synthetic failure",
+      "body": [
+        {
+          "utf8": "{\"error\":\"synthetic http failure\"}"
+        }
+      ],
+      "expected": {
+        "outcome": "error",
+        "errorName": "ResponseError",
+        "errorMessage": "synthetic http failure",
+        "statusCode": 503,
+        "sdkError": "synthetic http failure"
+      }
+    },
+    {
+      "id": "http-text-error",
+      "status": 429,
+      "contentType": "text/plain",
+      "body": [
+        {
+          "utf8": "synthetic plain failure"
+        }
+      ],
+      "expected": {
+        "outcome": "error",
+        "errorName": "ResponseError",
+        "errorMessage": "synthetic plain failure",
+        "statusCode": 429,
+        "sdkError": "synthetic plain failure"
+      }
+    },
+    {
+      "id": "http-empty-error",
+      "status": 500,
+      "statusText": "Synthetic status",
+      "body": [],
+      "gate": "http-status-text"
+    },
+    {
+      "id": "http-invalid-json-error",
+      "status": 500,
+      "statusText": "Synthetic status",
+      "body": [
+        {
+          "utf8": "invalid"
+        }
+      ],
+      "gate": "http-status-text"
+    },
+    {
+      "id": "http-json-falsy-error",
+      "status": 500,
+      "body": [
+        {
+          "utf8": "{\"error\":false}"
+        }
+      ],
+      "gate": "http-status-text"
+    },
+    {
+      "id": "http-json-number-error",
+      "status": 500,
+      "body": [
+        {
+          "utf8": "{\"error\":42}"
+        }
+      ],
+      "gate": "js-error-coercion",
+      "expected": {
+        "outcome": "error",
+        "errorName": "ResponseError",
+        "errorMessage": "42",
+        "statusCode": 500,
+        "sdkError": 42
+      }
+    },
+    {
+      "id": "http-content-type-case",
+      "status": 500,
+      "contentType": "Application/JSON",
+      "body": [
+        {
+          "utf8": "{\"error\":\"plain by SDK\"}"
+        }
+      ],
+      "gate": "http-content-type"
+    },
+    {
+      "id": "stream-204",
+      "status": 204,
+      "stream": true,
+      "body": [],
+      "gate": "fetch-null-body"
+    },
+    {
+      "id": "stream-205",
+      "status": 205,
+      "stream": true,
+      "body": [],
+      "gate": "fetch-null-body"
+    },
+    {
+      "id": "buffered-204",
+      "status": 204,
+      "body": [],
+      "gate": "fetch-null-body"
+    },
+    {
+      "id": "buffered-bom",
+      "body": [
+        {
+          "hex": "efbbbf"
+        },
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "buffered-invalid-utf8",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\""
+        },
+        {
+          "hex": "ff"
+        },
+        {
+          "utf8": "\"}}"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "buffered-incomplete-utf8",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        },
+        {
+          "hex": "e282"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "buffered-charset",
+      "contentType": "application/json; charset=iso-8859-1",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\""
+        },
+        {
+          "hex": "e9"
+        },
+        {
+          "utf8": "\"}}"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-json-bom",
+      "status": 500,
+      "body": [
+        {
+          "hex": "efbbbf"
+        },
+        {
+          "utf8": "{\"error\":\"value\"}"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-json-invalid-utf8",
+      "status": 500,
+      "body": [
+        {
+          "utf8": "{\"error\":\""
+        },
+        {
+          "hex": "ff"
+        },
+        {
+          "utf8": "\"}"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-json-incomplete-utf8",
+      "status": 500,
+      "body": [
+        {
+          "utf8": "{\"error\":\"value\"}"
+        },
+        {
+          "hex": "e282"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-json-charset",
+      "status": 500,
+      "contentType": "application/json; charset=iso-8859-1",
+      "body": [
+        {
+          "utf8": "{\"error\":\""
+        },
+        {
+          "hex": "e9"
+        },
+        {
+          "utf8": "\"}"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-text-bom",
+      "status": 500,
+      "contentType": "text/plain",
+      "body": [
+        {
+          "hex": "efbbbf"
+        },
+        {
+          "utf8": "value"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-text-invalid-utf8",
+      "status": 500,
+      "contentType": "text/plain",
+      "body": [
+        {
+          "hex": "ff"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-text-incomplete-utf8",
+      "status": 500,
+      "contentType": "text/plain",
+      "body": [
+        {
+          "utf8": "value"
+        },
+        {
+          "hex": "e282"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "http-text-charset",
+      "status": 500,
+      "contentType": "text/plain; charset=iso-8859-1",
+      "body": [
+        {
+          "hex": "e9"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "stream-bom",
+      "stream": true,
+      "body": [
+        {
+          "hex": "efbbbf"
+        },
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "stream-invalid-utf8",
+      "stream": true,
+      "fragmentBytes": 1,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\""
+        },
+        {
+          "hex": "ff"
+        },
+        {
+          "utf8": "\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "stream-incomplete-utf8",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}\n"
+        },
+        {
+          "hex": "e282"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "stream-charset",
+      "stream": true,
+      "contentType": "application/json; charset=iso-8859-1",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\""
+        },
+        {
+          "hex": "e9"
+        },
+        {
+          "utf8": "\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "fetch-decoding"
+    },
+    {
+      "id": "buffered-gzip",
+      "encoding": "gzip",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "content-encoding"
+    },
+    {
+      "id": "stream-gzip",
+      "stream": true,
+      "encoding": "gzip",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "content-encoding"
+    },
+    {
+      "id": "http-gzip",
+      "status": 500,
+      "encoding": "gzip",
+      "body": [
+        {
+          "utf8": "{\"error\":\"value\"}"
+        }
+      ],
+      "gate": "content-encoding"
+    },
+    {
+      "id": "buffered-deflate",
+      "encoding": "deflate",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "content-encoding"
+    },
+    {
+      "id": "buffered-brotli",
+      "encoding": "br",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "content-encoding"
+    },
+    {
+      "id": "host-prefix",
+      "hostTemplate": "{origin}/prefix///?discard=1#discard",
+      "expectedPath": "/prefix///api/chat",
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-host-normalization"
+    },
+    {
+      "id": "host-port-shorthand",
+      "hostTemplate": ":{port}",
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-host-normalization"
+    },
+    {
+      "id": "host-implicit-protocol",
+      "hostTemplate": "127.0.0.1:{port}/prefix/",
+      "expectedPath": "/prefix/api/chat",
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-host-normalization"
+    },
+    {
+      "id": "host-userinfo",
+      "hostTemplate": "http://synthetic:synthetic@127.0.0.1:{port}",
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-userinfo"
+    },
+    {
+      "id": "redirect-302",
+      "redirect": 302,
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-redirect"
+    },
+    {
+      "id": "redirect-307",
+      "redirect": 307,
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-redirect"
+    },
+    {
+      "id": "pre-dispatch-abort",
+      "lifecycle": "pre-abort",
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "abort-diagnostics",
+      "expectedRequests": 0
+    },
+    {
+      "id": "pending-header-abort",
+      "lifecycle": "before-headers",
+      "stream": true,
+      "body": [],
+      "gate": "abort-diagnostics"
+    },
+    {
+      "id": "partial-body-abort",
+      "lifecycle": "caller-cancel",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"partial\"}}\n"
+        }
+      ],
+      "gate": "abort-diagnostics"
+    },
+    {
+      "id": "partial-consumer-cancel",
+      "lifecycle": "consumer-cancel",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"partial\"}}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "consumer-cancelled",
+        "snapshots": [
+          "partial"
+        ]
+      }
+    },
+    {
+      "id": "partial-body-failure",
+      "lifecycle": "body-failure",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"partial\"}}\n"
+        }
+      ],
+      "gate": "network-diagnostics"
+    },
+    {
+      "id": "terminal-before-http-eof",
+      "lifecycle": "terminal-open",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"terminal\"},\"done\":true}\n"
+        }
+      ],
+      "expected": {
+        "outcome": "stream-complete",
+        "snapshots": [
+          "terminal"
+        ]
+      }
+    },
+    {
+      "id": "coding-gzip-case",
+      "encoding": "gzip",
+      "contentEncoding": "GZip",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-header"
+    },
+    {
+      "id": "coding-gzip-ows",
+      "encoding": "gzip",
+      "contentEncoding": " gzip \t",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-header"
+    },
+    {
+      "id": "coding-stacked-gzip-br",
+      "encodings": [
+        "gzip",
+        "br"
+      ],
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-stack"
+    },
+    {
+      "id": "coding-repeated-fields",
+      "encodings": [
+        "gzip",
+        "br"
+      ],
+      "contentEncoding": [
+        "gzip",
+        "br"
+      ],
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-stack"
+    },
+    {
+      "id": "coding-identity",
+      "contentEncoding": "identity",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-header"
+    },
+    {
+      "id": "coding-unknown",
+      "contentEncoding": "synthetic-codec",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-header"
+    },
+    {
+      "id": "coding-raw-deflate",
+      "encodings": [
+        "deflate-raw"
+      ],
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-deflate"
+    },
+    {
+      "id": "coding-gzip-members",
+      "encoding": "gzip",
+      "gzipMemberSplitAt": 16,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-members"
+    },
+    {
+      "id": "coding-gzip-truncated",
+      "encoding": "gzip",
+      "truncateBytes": 8,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-error"
+    },
+    {
+      "id": "coding-gzip-crc",
+      "encoding": "gzip",
+      "corruptGzipCrc32": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-error"
+    },
+    {
+      "id": "coding-terminal-crc-corruption",
+      "stream": true,
+      "encoding": "gzip",
+      "corruptGzipCrc32": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"terminal\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "fetch-coding-error"
+    },
+    {
+      "id": "coding-no-header",
+      "encoding": "gzip",
+      "contentEncoding": null,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-header"
+    },
+    {
+      "id": "buffered-zstd",
+      "encoding": "zstd",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-zstd"
+    },
+    {
+      "id": "stream-zstd",
+      "stream": true,
+      "encoding": "zstd",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "fetch-coding-zstd"
+    },
+    {
+      "id": "http-zstd",
+      "status": 500,
+      "encoding": "zstd",
+      "body": [
+        {
+          "utf8": "{\"error\":\"value\"}"
+        }
+      ],
+      "gate": "fetch-coding-zstd"
+    },
+    {
+      "id": "zstd-window-frame",
+      "encoding": "zstd",
+      "zstdWindowLog": 23,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-zstd-window"
+    },
+    {
+      "id": "coding-unknown-stack",
+      "encoding": "gzip",
+      "contentEncoding": "gzip, synthetic-codec",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-stack"
+    },
+    {
+      "id": "coding-repeated-gzip",
+      "encodings": [
+        "gzip",
+        "gzip"
+      ],
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-stack"
+    },
+    {
+      "id": "redirect-303",
+      "redirect": 303,
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-redirect"
+    },
+    {
+      "id": "redirect-308",
+      "redirect": 308,
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-redirect"
+    },
+    {
+      "id": "redirect-loop-limit",
+      "redirect": 302,
+      "redirectLoop": true,
+      "body": [
+        {
+          "utf8": "{}"
+        }
+      ],
+      "gate": "fetch-redirect-limit"
+    },
+    {
+      "id": "buffered-array-content",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":[\"one\",null,2]}}"
+        }
+      ],
+      "gate": "js-buffered-result-shape"
+    },
+    {
+      "id": "buffered-array-marker",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":[\"Prompt alias:\",\"other\"]}}"
+        }
+      ],
+      "gate": "js-buffered-result-shape"
+    },
+    {
+      "id": "buffered-empty-array-thinking",
+      "body": [
+        {
+          "utf8": "{\"message\":{\"thinking\":[],\"content\":false}}"
+        }
+      ],
+      "gate": "js-value-semantics"
+    },
+    {
+      "id": "stream-surrogate-across-frames",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"\\ud800\"}}\n{\"message\":{\"content\":\"\\udc00\"},\"done\":true}\n"
+        }
+      ],
+      "gate": "utf16-representation"
+    },
+    {
+      "id": "stream-number-boundaries",
+      "stream": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":9007199254740993}}\n{\"message\":{\"content\":1e1000}}\n{\"message\":{\"content\":-0},\"done\":true}\n"
+        }
+      ],
+      "gate": "js-number-string"
+    },
+    {
+      "id": "http-shadowed-tostring",
+      "status": 500,
+      "body": [
+        {
+          "utf8": "{\"error\":{\"toString\":null}}"
+        }
+      ],
+      "gate": "js-error-coercion"
+    },
+    {
+      "id": "http-infinite-error",
+      "status": 500,
+      "body": [
+        {
+          "utf8": "{\"error\":1e1000}"
+        }
+      ],
+      "gate": "js-error-payload"
+    },
+    {
+      "id": "zstd-concatenated",
+      "encoding": "zstd",
+      "zstdMemberSplitAt": 16,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-zstd-members"
+    },
+    {
+      "id": "zstd-skippable-member",
+      "encoding": "zstd",
+      "zstdMemberSplitAt": 16,
+      "zstdSkippable": true,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-zstd-members"
+    },
+    {
+      "id": "zstd-later-window-member",
+      "encoding": "zstd",
+      "zstdMemberSplitAt": 16,
+      "zstdSecondWindowLog": 23,
+      "body": [
+        {
+          "utf8": "{\"message\":{\"content\":\"value\"}}"
+        }
+      ],
+      "gate": "fetch-coding-zstd-window",
+      "zstdSkippable": true
+    }
+  ]
+}

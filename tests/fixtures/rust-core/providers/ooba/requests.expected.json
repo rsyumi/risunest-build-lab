@@ -1,0 +1,2724 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-ooba.oracle.test.ts",
+  "fixtureSha256": "93fee1db9529aaf1f857c92cb1f727225f119d8a9a1f35eb093699cd439ddf53",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/process/templates/chatTemplate.ts": "d302dcdc22313a8f1961f96efe018e2fe3209daab5cf0bac6bd5fed5aca88ab7",
+    "src/ts/process/stringlize.ts": "f0877476b33d0e65ed41f320a626cf8a374986afc1dd215a21494fba5add9679",
+    "src/ts/process/prompt.ts": "fbe425be03027795a4602bce664b8c4355b8626fa866a92876d93b0a222c99c2",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/globalApi.svelte.ts": "153d6ecb403c35b61154860bb7bde49ddf891d4ee56400f995cec885d8b552d1",
+    "src/ts/model/modellist.ts": "1c4c97cf87d85b06d891531ef8ab65700a220840f116ba425173d0d8061033ae"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "ooba-basic",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-multi-turn",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nYou are a narrator.<|im_end|>\n<|im_start|>user\nOpen the door.<|im_end|>\n<|im_start|>assistant\nThe door creaks open.<|im_end|>\n<|im_start|>user\nWalk in.<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nYou are a narrator.<|im_end|>\\n<|im_start|>user\\nOpen the door.<|im_end|>\\n<|im_start|>assistant\\nThe door creaks open.<|im_end|>\\n<|im_start|>user\\nWalk in.<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nYou are a narrator.<|im_end|>\\n<|im_start|>user\\nOpen the door.<|im_end|>\\n<|im_start|>assistant\\nThe door creaks open.<|im_end|>\\n<|im_start|>user\\nWalk in.<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-unicode-and-escapes",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\n日本語 😀<|im_end|>\n<|im_start|>user\n\"quoted\" \\ back\nline  <|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\n日本語 😀<|im_end|>\\n<|im_start|>user\\n\\\"quoted\\\" \\\\ back\\nline  <|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\n日本語 😀<|im_end|>\\n<|im_start|>user\\n\\\"quoted\\\" \\\\ back\\nline  <|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-max-tokens-argument",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":77,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":77,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-temperature-zero",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-username-in-stop-strings",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Ren"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Ren:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Ren:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-user-prefix-duplicate",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### user\",\"Mina:\",\"user:\",\"<<user>>\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### user\",\"Mina:\",\"user:\",\"<<user>>\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-user-prefix-empty",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-user-prefix-missing",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",null,\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",null,\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-local-stop-strings-empty",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-local-stop-strings-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"STOP\\n\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"STOP\\n\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-additional-not-applied-without-flag",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-additional-number",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"seed\":7},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"seed\":7}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-additional-json",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"grammar\":{\"root\":\"x\"}},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"grammar\":{\"root\":\"x\"}}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-additional-removes-prompt",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-additional-header",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer synthetic\",\"X-Test\":\"on\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer synthetic"
+              ],
+              [
+                "X-Test",
+                "on"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-template-alpaca",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "You are a narrator.\n\n### Instruction:\nOpen the door.\n\n### Response:\nThe door creaks open.\n\n### Instruction:\nWalk in.\n\n### Response:\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"You are a narrator.\\n\\n### Instruction:\\nOpen the door.\\n\\n### Response:\\nThe door creaks open.\\n\\n### Instruction:\\nWalk in.\\n\\n### Response:\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"You are a narrator.\\n\\n### Instruction:\\nOpen the door.\\n\\n### Response:\\nThe door creaks open.\\n\\n### Instruction:\\nWalk in.\\n\\n### Response:\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-system-content-replacement",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-url-path-replaced",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://ooba.example.test:5000/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "http://ooba.example.test:5000/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-url-query-and-hash-kept",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://ooba.example.test/v1/completions?x=1#frag\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "http://ooba.example.test/v1/completions?x=1#frag",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-url-default-port",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-url-invalid-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"localhost:5000\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "localhost:5000",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-url-userinfo-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://a:b@ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "http://a:b@ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-penalties-zero-fall-back",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0,\"frequency_penalty\":0,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0,\"frequency_penalty\":0,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-penalties-disabled-value",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":-10,\"frequency_penalty\":-10,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":-10,\"frequency_penalty\":-10,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-copied",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"min_p\":0.1,\"top_k\":0,\"seed\":12,\"custom_token_bans\":\"1,2\",\"grammar_string\":\"\"},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"min_p\":0.1,\"top_k\":0,\"seed\":12,\"custom_token_bans\":\"1,2\",\"grammar_string\":\"\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-null-deletes-truthy",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"]},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"]}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-unknown-deletes-truthy",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"frequency_penalty\":0.2,\"max_tokens\":300,\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"frequency_penalty\":0.2,\"max_tokens\":300,\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-falsy-kept",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-array-value",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"do_sample\":false,\"mirostat_mode\":2},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"do_sample\":false,\"mirostat_mode\":2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-stream-flag-is-ignored",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "ooba",
+          "internalID": "ooba",
+          "format": 13,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "ooba-custom-model",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "xcustom:::ooba",
+          "internalID": "o",
+          "format": 13,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/v1/completions\",\"body\":{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"seed\":9},\"headers\":{}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/v1/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"logit_bias\":{},\"max_tokens\":300,\"stop\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"temperature\":0.8,\"top_p\":0.9,\"seed\":9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-basic",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-multi-turn",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nYou are a narrator.<|im_end|>\n<|im_start|>user\nOpen the door.<|im_end|>\n<|im_start|>assistant\nThe door creaks open.<|im_end|>\n<|im_start|>user\nWalk in.<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nYou are a narrator.<|im_end|>\\n<|im_start|>user\\nOpen the door.<|im_end|>\\n<|im_start|>assistant\\nThe door creaks open.<|im_end|>\\n<|im_start|>user\\nWalk in.<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nYou are a narrator.<|im_end|>\\n<|im_start|>user\\nOpen the door.<|im_end|>\\n<|im_start|>assistant\\nThe door creaks open.<|im_end|>\\n<|im_start|>user\\nWalk in.<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-unicode-and-escapes",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\n日本語 😀<|im_end|>\n<|im_start|>user\n\"quoted\" \\ back\nline  <|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\n日本語 😀<|im_end|>\\n<|im_start|>user\\n\\\"quoted\\\" \\\\ back\\nline  <|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\n日本語 😀<|im_end|>\\n<|im_start|>user\\n\\\"quoted\\\" \\\\ back\\nline  <|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-max-tokens-argument",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":77,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":77,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-temperature-zero",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-username-in-stop-strings",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Ren"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Ren:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Ren:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-user-prefix-duplicate",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### user\",\"Mina:\",\"user:\",\"<<user>>\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### user\",\"Mina:\",\"user:\",\"<<user>>\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-user-prefix-empty",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-user-prefix-missing",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",null,\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",null,\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-local-stop-strings-empty",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-local-stop-strings-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"STOP\\n\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"STOP\\n\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-additional-not-applied-without-flag",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-additional-number",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":7,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":7,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-additional-json",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"grammar\":{\"root\":\"x\"}},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"grammar\":{\"root\":\"x\"}}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-additional-removes-prompt",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-additional-header",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\",\"Authorization\":\"Bearer synthetic\",\"X-Test\":\"on\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ],
+              [
+                "Authorization",
+                "Bearer synthetic"
+              ],
+              [
+                "X-Test",
+                "on"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-template-alpaca",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "You are a narrator.\n\n### Instruction:\nOpen the door.\n\n### Response:\nThe door creaks open.\n\n### Instruction:\nWalk in.\n\n### Response:\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"You are a narrator.\\n\\n### Instruction:\\nOpen the door.\\n\\n### Response:\\nThe door creaks open.\\n\\n### Instruction:\\nWalk in.\\n\\n### Response:\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"You are a narrator.\\n\\n### Instruction:\\nOpen the door.\\n\\n### Response:\\nThe door creaks open.\\n\\n### Instruction:\\nWalk in.\\n\\n### Response:\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-system-content-replacement",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-url-api-suffix-replaced",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://mancer.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://mancer.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-url-no-api-kept",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://mancer.example.test/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://mancer.example.test/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-url-first-api-wins",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://mancer.example.test/x/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://mancer.example.test/x/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-url-invalid-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"mancer.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [],
+        "outcome": {
+          "type": "fail",
+          "result": "Error: error in request:\"TypeError: Invalid URL\""
+        }
+      }
+    },
+    {
+      "id": "legacy-mancer-header-empty",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                ""
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-ooba-settings",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":false,\"temperature\":0.8,\"top_p\":0.5,\"typical_p\":0.95,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":0,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":2,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":true,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":false,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":false,\"temperature\":0.8,\"top_p\":0.5,\"typical_p\":0.95,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":0,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":2,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":true,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":false,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-ooba-settings-missing-fields",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"temperature\":0.8,\"top_k\":3,\"early_stopping\":false,\"truncation_length\":300,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"temperature\":0.8,\"top_k\":3,\"early_stopping\":false,\"truncation_length\":300,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "legacy-stream-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "mancer",
+          "internalID": "mancer",
+          "format": 11,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":-1,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [],
+        "outcome": {
+          "type": "fail",
+          "result": "WebSocket connection failed to 'wss://ooba.example.test/api/v1/stream' failed!"
+        }
+      }
+    },
+    {
+      "id": "legacy-custom-model",
+      "result": {
+        "httpError": "Error: error in request:",
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "xcustom:::mancer",
+          "internalID": "m",
+          "format": 11,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://ooba.example.test/api/v1/generate\",\"body\":{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":9,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"},\"headers\":{\"X-API-KEY\":\"sk-synthetic-mancer\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://ooba.example.test/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "X-API-KEY",
+                "sk-synthetic-mancer"
+              ]
+            ],
+            "body": "{\"max_new_tokens\":300,\"do_sample\":true,\"temperature\":0.8,\"top_p\":0.9,\"typical_p\":1,\"repetition_penalty\":1.15,\"encoder_repetition_penalty\":1,\"top_k\":20,\"min_length\":0,\"no_repeat_ngram_size\":0,\"num_beams\":1,\"penalty_alpha\":0,\"length_penalty\":1,\"early_stopping\":false,\"truncation_length\":300,\"ban_eos_token\":false,\"stopping_strings\":[\"GPT4 User\",\"</s>\",\"<|end\",\"<|im_end\",\"### Input:\",\"Mina:\",\"user:\",\"<<user>>\",\"### user\",\"USER:\",\"<<USER>>\",\"### USER\",\"User:\",\"<<User>>\",\"### User\",\"human:\",\"<<human>>\",\"### human\",\"HUMAN:\",\"<<HUMAN>>\",\"### HUMAN\",\"Human:\",\"<<Human>>\",\"### Human\",\"input:\",\"<<input>>\",\"### input\",\"INPUT:\",\"<<INPUT>>\",\"### INPUT\",\"Input:\",\"<<Input>>\",\"### Input\",\"inst:\",\"<<inst>>\",\"### inst\",\"INST:\",\"<<INST>>\",\"### INST\",\"Inst:\",\"<<Inst>>\",\"### Inst\",\"instruction:\",\"<<instruction>>\",\"### instruction\",\"INSTRUCTION:\",\"<<INSTRUCTION>>\",\"### INSTRUCTION\",\"Instruction:\",\"<<Instruction>>\",\"### Instruction\"],\"seed\":9,\"add_bos_token\":true,\"topP\":0.9,\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\"}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    }
+  ]
+}

@@ -194,6 +194,8 @@ import {
     runNativeCharacterCharxExport,
     runNativeCharacterCardExport,
     runNativeRisuModuleExport,
+    runNativePresetExport,
+    prepareNativePresetImport,
     runNativeDatasetExport,
     runNativeGalleryExport,
     runNativeOfficialPublicationAttempt,
@@ -482,41 +484,6 @@ describe('native restore response deadlines', () => {
             expect(await outcome).toEqual({result})
             expect(resumed).toEqual([hold])
             expect(host.commands()).not.toContain('native_file_job_cancel')
-        } finally { finish(); release() }
-    })
-
-    it('resumes the binding when the unchanged check after a failed activation finishes past its deadline', async () => {
-        const restoreClock = clock()
-        const registry = await vi.importActual<typeof import('./sync/bindingRegistry')>('./sync/bindingRegistry')
-        const target = {kind:'server' as const, connectionId:'synthetic-late-unchanged'}
-        binding.invoke.mockImplementation(async command => {
-            if (command !== 'pds_lww_binding_state') throw new Error(`Unexpected native binding command: ${command}`)
-            return {target,targetAuthority:'1',selectionEpoch:'1',libraryId:'synthetic',progress:null}
-        })
-        binding.prepare.mockImplementation(registry.prepareBoundLibraryReplacement)
-        const unsupported = async (): Promise<never> => { throw new Error('Restore must not switch its binding') }
-        let resumed = 0
-        const release = registry.registerSyncBindingTransport(target, {
-            inspectTarget: unsupported, pullAvailableState: unsupported,
-            replaceFromTarget: unsupported, publishInitialSharedState: unsupported,
-            receiveAvailableChanges: async () => {}, fenceOldJobs: async () => {},
-            resumeBinding: async () => { resumed++ },
-        })
-        let checking = false
-        let finish!: () => void
-        const check = new Promise<void>(resolve => { finish = resolve })
-        // Ending the guard late also ends the recovery that would have resumed the binding.
-        const runtime = {...restoreRuntime(8), beginActivatedLibraryGuard: () => ({complete(){}, abortUnchanged: async () => { checking = true; await check }})}
-        const host = createNativeJobHost([{...status('waitingForInput'),phase:'awaiting-activation'},status('failed')])
-        try {
-            const outcome = expect(runNativeBlockRisuSaveRestore(runtime, {type:'desktopPath',path:'synthetic.risudat'}, {}, {...host.dependencies,restoreClock})).rejects.toThrow()
-            await vi.waitFor(() => expect(checking).toBe(true))
-            restoreClock.expire()
-            await outcome
-            expect(registry.isSyncBindingReplacementPending()).toBe(true)
-            finish()
-            await vi.waitFor(() => expect(registry.isSyncBindingReplacementPending()).toBe(false))
-            expect(resumed).toBe(1)
         } finally { finish(); release() }
     })
 })
@@ -1114,7 +1081,7 @@ describe('native file jobs', () => {
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
     })
 
-    it('hands a managed character CharX export to Android SAF after the picker', async () => {
+    it('hands a managed character CharX export to Android SAF under a hold taken after the picker', async () => {
         const events: string[] = []
         const handoffPath =
             'C:\\app\\native-file-jobs\\handoffs\\risu-charx-123e4567-e89b-42d3-a456-426614174002.charx'
@@ -1162,6 +1129,10 @@ describe('native file jobs', () => {
                 },
                 wait: async () => undefined,
                 reserveAndroidDestination: androidSafReservationFixture(() => events.push('picker')).reserve,
+                holdExport: async (operation, signal) => {
+                    events.push('hold')
+                    try { return await operation(signal) } finally { events.push('release') }
+                },
                 copyToAndroidSaf: async (request) => {
                     events.push(
                         `saf:${request.sourcePath}:${request.suggestedName}`,
@@ -1178,11 +1149,13 @@ describe('native file jobs', () => {
         expect(result.warningCodes).toEqual(['android-saf-provider-not-atomic'])
         expect(events).toEqual([
             'picker',
+            'hold',
             'native_file_job_start:{"request":{"kind":"export-character-charx","expectedRevision":31,"characterId":"character-id","card":{"spec":"chara_card_v3"},"module":{}}}',
             'native_file_job_status:{"jobId":"character-export"}',
             `saf:${handoffPath}:Leased.charx`,
             `native_character_charx_handoff_cleanup:{"path":"${handoffPath.replaceAll('\\', '\\\\')}"}`,
             'native_file_job_forget:{"jobId":"character-export"}',
+            'release',
         ])
     })
 
@@ -1920,7 +1893,7 @@ describe('native file jobs', () => {
         expect(commands).not.toContain('native_file_job_finalize')
     })
 
-    it('maps compatibility-required without taking the replacement fence', async () => {
+    it.each(['compatibility-required', 'cold-expansion-required'])('maps %s without taking the replacement fence', async (code) => {
         const acquire = vi.fn()
 
         const result = await runNativeOfficialAccountSnapshotRestore(
@@ -1942,7 +1915,7 @@ describe('native file jobs', () => {
                             state: 'failed',
                             phase: 'complete',
                             error: {
-                                code: 'compatibility-required',
+                                code,
                                 message: 'Legacy snapshot requires preparation',
                             },
                         }
@@ -5169,12 +5142,11 @@ it('cancels staged restore and waits for terminal settlement when the fresh prec
     ])
 })
 
-it.each(['both', 'cold', 'inlay', 'characters', 'pluginStorage', 'missingAssets'] as const)('cancels default incomplete restore warnings in one dialog: %s', async kind => {
+it.each(['both', 'cold', 'inlay', 'characters', 'pluginStorage'] as const)('cancels default incomplete restore warnings in one dialog: %s', async kind => {
     restoreAlerts.confirm.mockReset().mockResolvedValue(false)
     restoreAlerts.checkbox.mockReset().mockResolvedValue({ confirmed: false, checked: false })
-    const omissionsOnly = kind === 'characters' || kind === 'pluginStorage' || kind === 'missingAssets'
-    const omissions = kind === 'pluginStorage' ? { damagedPluginStorage: 2, oversizedPluginStorage: 4 }
-        : kind === 'missingAssets' ? { missingAssets: 2 } : { excludedCharacters: kind === 'characters' ? 3 : 0 }
+    const omissionsOnly = kind === 'characters' || kind === 'pluginStorage'
+    const omissions = kind === 'pluginStorage' ? { damagedPluginStorage: 2, oversizedPluginStorage: 4 } : { excludedCharacters: kind === 'characters' ? 3 : 0 }
     const preview = { unavailableColdKeys: kind === 'inlay' || omissionsOnly ? [] : ['missing'], characterNames: ['Synthetic'], invalidInlays: kind === 'cold' || omissionsOnly ? [] : ['inlay_aa.risuinlay'], omissions }
     const host = createNativeJobHost([{ ...status('waitingForInput'), phase: 'awaiting-activation', incompleteRestorePreview: preview }, status('cancelled')])
     const acquire = vi.fn()
@@ -5192,7 +5164,6 @@ it.each(['both', 'cold', 'inlay', 'characters', 'pluginStorage', 'missingAssets'
         expect(description).toContain(language.portableBackup.omittedRestoreData.damagedPluginStorage(2))
         expect(description).toContain(language.portableBackup.omittedRestoreData.oversizedPluginStorage(4))
     }
-    if (kind === 'missingAssets') expect(description).toContain(language.portableBackup.omittedRestoreData.missingAssets(2))
     expect(host.commands()).not.toContain('native_file_job_finalize')
 })
 
@@ -5312,15 +5283,17 @@ describe('native snapshot restore', () => {
 
 it.each([
     ['androidSaf', false], ['androidSaf', true], ['iosFiles', false], ['iosFiles', true],
-] as const)('publishes gallery downloads through %s (archive=%s) and cleans their handoff', async (platform, archive) => {
+] as const)('publishes gallery downloads through %s (archive=%s) under a background hold and cleans their handoff', async (platform, archive) => {
     const kind = archive ? 'export-gallery-zip' : 'export-gallery-file'
     const handoffPath = '/synthetic/native-file-jobs/handoffs/risu-download-123e4567-e89b-42d3-a456-426614174004.bin'
     let published = false
     let cleaned = false
+    let holding = false
     const selection = {kind: 'inlay' as const, keys: ['selected-inlay']}
     const publish = async (request: {sourcePath: string; suggestedName: string}) => {
         expect(request.sourcePath).toBe(handoffPath)
         expect(request.suggestedName).toBe(archive ? 'images.zip' : 'photo.png')
+        expect(holding).toBe(true)
         published = true
         return {bytes: 10, warningCodes: []}
     }
@@ -5330,6 +5303,7 @@ it.each([
         invoke: async (command, args) => {
             if (command === 'native_file_job_start') {
                 expect(args?.request).toEqual({kind, expectedRevision: 42, selection})
+                expect(holding).toBe(true)
                 return {jobId: 'gallery'}
             }
             if (command === 'native_file_job_status') return {jobId: 'gallery', kind, state: 'succeeded', phase: 'complete',
@@ -5342,11 +5316,16 @@ it.each([
         },
         wait: async () => {},
         reserveAndroidDestination: androidSafReservationFixture().reserve,
+        holdExport: async (operation, signal) => {
+            holding = true
+            try { return await operation(signal) } finally { holding = false }
+        },
         copyToAndroidSaf: publish,
         copyToIOSFiles: publish,
     })
     expect(published).toBe(true)
     expect(cleaned).toBe(true)
+    expect(holding).toBe(false)
     expect(result.handoffPath).toBeUndefined()
 })
 
@@ -5368,4 +5347,50 @@ it('neither reopens nor releases an Android destination its caller reserved', as
     }
     expect(picker.bridge.reserveExport).toHaveBeenCalledOnce()
     expect(picker.bridge.releaseExport).not.toHaveBeenCalled()
+})
+
+it('validates exact owned preset source chunks and retries cleanup without CAS', async () => {
+    let forgets = 0
+    const commands: string[] = []
+    const receipt = await prepareNativePresetImport({ type: 'desktopPath', path: 'synthetic.preset' }, 'synthetic.preset', {}, {
+        isTauri: () => true, wait: async () => {},
+        invoke: async command => {
+            commands.push(command)
+            if (command === 'native_file_job_start') return { jobId: 'preset' }
+            if (command === 'native_file_job_status') return { ...status('succeeded'), kind: 'prepare-preset-import' }
+            if (command === 'native_file_job_prepared_preset') return { displayName: 'synthetic.preset', sourceBytes: 3, nativeMapping: { outcome: 'declined', reason: 'limit', name: 'presetBytes' } }
+            if (command === 'native_file_job_preset_source') return [1, 2]
+            if (command === 'native_file_job_forget') { if (++forgets === 1) throw new Error('cleanup failed'); return true }
+            throw new Error(command)
+        },
+    })
+    await expect(receipt.readSource()).rejects.toThrow('source length')
+    await expect(receipt.release()).rejects.toThrow('cleanup failed')
+    await receipt.release()
+    await expect(receipt.readSource()).rejects.toThrow('released')
+    expect(forgets).toBe(2)
+    expect(commands.some(command => command.includes('cas'))).toBe(false)
+})
+
+it.each(['json', 'risup'] as const)('publishes managed preset %s bytes and retains cleanup failure for recovery', async format => {
+    const handoff = `preset-123e4567-e89b-42d3-a456-426614174004.${format}`
+    let published = false
+    let forgotten = false
+    const result = await runNativePresetExport({ presetIndex: 2, presetId: 'exact-preset', format, expectedRevision: 17, destination: { type: 'iosFiles', suggestedName: `Synthetic.${format}` } }, {}, {
+        isTauri: () => true, wait: async () => {}, copyToAndroidSaf: async () => { throw new Error('iOS fixture') },
+        copyToIOSFiles: async () => { published = true; return { bytes: 4 } },
+        invoke: async (command, args) => {
+            if (command === 'native_file_job_start') {
+                expect(args).toEqual({ request: { kind: 'export-preset', presetIndex: 2, presetId: 'exact-preset', format, expectedRevision: 17 } })
+                return { jobId: 'preset-export' }
+            }
+            if (command === 'native_file_job_status') return { ...status('succeeded', { revision: 17, sourceBytes: 4, sourceFingerprintKind: 'whole-file-sha256', sourceSha256: 'a'.repeat(64), characterCount: 0, presetCount: 1, warningCodes: [], handoffPath: handoff }), kind: 'export-preset' }
+            if (command === 'native_preset_handoff_cleanup') { expect(published).toBe(true); throw new Error('cleanup failed') }
+            if (command === 'native_file_job_forget') { forgotten = true; return true }
+            throw new Error(command)
+        },
+    })
+    expect(result.warningCodes).toContain('cleanup-failed')
+    expect(forgotten).toBe(false)
+    expect(result.handoffPath).toBeUndefined()
 })

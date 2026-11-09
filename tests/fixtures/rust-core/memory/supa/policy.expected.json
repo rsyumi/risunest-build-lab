@@ -1,0 +1,3212 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/memory-supa.oracle.test.ts",
+  "fixtureSha256": "2fc60ec50746f96b6e9c7d89f195821263869acfe220535cde3b7a9a30c355a9",
+  "tsSourceSha256": {
+    "src/ts/process/memory/supaMemory.ts": "6bb15d32e97c79bd61358143453702a058192685337baf32ea8d91bbd7329c5d",
+    "src/ts/tokenizer.ts": "363e56f9db56fb0d6782b87253a92e5d29c4954e75acc12438f7521d83a83eec",
+    "src/ts/plugins/plugins.svelte.ts": "84ffda0251eac1a44fa6c911a8d6ce7aef03b29ac572cefcf22ed503c0b79643",
+    "src/ts/parser/chatML.ts": "4dc3d5f3f47f6d5a45f16806492ab14cda4ae4e1844e49bf1579f6e454e5b03a",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/storage/database.svelte.ts": "6b45fb3b2608af6dfd9ad940227bd11b52af966e5445e30fe44b5d79686dbfc2",
+    "benchmarks/rust-core-oracles/memory-supa.oracle.test.ts": "fefd29e8f0e010ebe5d9eaf985fbbfc12c32e5bf924940ff81d9f6cf48f5e128"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "under-limit-unchanged",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 40,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 50,
+                "chats": [
+                  {
+                    "role": "user",
+                    "content": "c message 0",
+                    "memo": "c0"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 1",
+                    "memo": "c1"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  }
+                ]
+              }
+            },
+            "events": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "at-limit-unchanged",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 50,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 60,
+                "chats": [
+                  {
+                    "role": "user",
+                    "content": "c message 0",
+                    "memo": "c0"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 1",
+                    "memo": "c1"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  }
+                ]
+              }
+            },
+            "events": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "newchat-trims-prefix-then-fits",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 55,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 55,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "\n\n",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "greeting",
+                    "memo": "NewChat"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 0",
+                    "memo": "c0"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 1",
+                    "memo": "c1"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  }
+                ]
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "before one",
+                  "memo": "b0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "before two",
+                  "memo": "b1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "newchat-first-keeps-everything",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 61,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 54,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Greeting summary.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  }
+                ],
+                "memory": "c3\nGreeting summary.",
+                "lastId": "c3"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "greeting",
+                  "memo": "NewChat"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "Kai: greeting\n\nUser: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Greeting summary."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Greeting summary.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "stored-id-skips-prefix-and-fits",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 55,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c2\nEarlier events."
+            },
+            "roomAfter": {
+              "supaMemoryData": "c2\nEarlier events."
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 58,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Earlier events.\n\n",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  }
+                ]
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenize",
+                "text": "Earlier events.",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "stored-punctuation-removed",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 55,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c2\nEarlier, events: (kept)! a-b_c ~ok."
+            },
+            "roomAfter": {
+              "supaMemoryData": "c2\nEarlier, events: (kept)! a-b_c ~ok."
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 58,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Earlier events kept abc ok\n\n",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  }
+                ]
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenize",
+                "text": "Earlier events kept abc ok",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "stored-multiline-data-and-crlf-id",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 55,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c2\r\nFirst line.\nSecond line."
+            },
+            "roomAfter": {
+              "supaMemoryData": "c2\r\nFirst line.\nSecond line."
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 58,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "First line.\nSecond line.\n\n",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "crlf memo",
+                    "memo": "c2\r"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  }
+                ]
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenize",
+                "text": "First line.\nSecond line.",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "stored-id-not-found",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 55,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "zz\nNever matched."
+            },
+            "roomAfter": {
+              "supaMemoryData": "zz\nNever matched."
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 45,
+                "chats": [],
+                "error": "SupaMemory: chat ID not found"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "stored-short-record-ignored",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 56,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c1\nx"
+            },
+            "roomAfter": {
+              "supaMemoryData": "c1\nx"
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 49,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Sum A.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": "c4\nSum A.",
+                "lastId": "c4"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Sum A."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Sum A.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "hypa-record-read-as-supa",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 55,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "hypa:\n[]"
+            },
+            "roomAfter": {
+              "supaMemoryData": "hypa:\n[]"
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 65,
+                "chats": [
+                  {
+                    "role": "user",
+                    "content": "c message 0",
+                    "memo": "c0"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 1",
+                    "memo": "c1"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  }
+                ],
+                "error": "SupaMemory: Data saved in hypaMemory, loaded as SupaMemory."
+              }
+            },
+            "events": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "one-chunk-summary",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Sum A.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": "c4\nSum A.",
+                "lastId": "c4"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Sum A."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Sum A.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "first-chat-oversize-is-included",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 70,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 51,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Big summary.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 1",
+                    "memo": "c1"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 3",
+                    "memo": "c3"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  }
+                ],
+                "memory": "big0\nBig summary.",
+                "lastId": "big0"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "big",
+                  "memo": "big0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 32
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: big\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Big summary."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Big summary.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "resummarize-after-four-entries",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 63,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c0\nA one\n\nB two\n\nC three\n\nD four"
+            },
+            "roomAfter": {
+              "supaMemoryData": "c0\nA one\n\nB two\n\nC three\n\nD four"
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Merged.\n\nChunk sum.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": "c4\nMerged.\n\nChunk sum.",
+                "lastId": "c4"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenize",
+                "text": "A one\n\nB two\n\nC three\n\nD four",
+                "count": 3
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Chunk sum."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Chunk sum.\n\n",
+                "count": 3
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "A one\n\nB two\n\nC three\n\nD four"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Merged."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "A one\n\nB two\n\nC three\n\nD four",
+                "count": 3
+              },
+              {
+                "kind": "tokenize",
+                "text": "Merged.",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ran-out-resummarizes-memory-then-fits",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 51,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c1\nA b c d"
+            },
+            "roomAfter": {
+              "supaMemoryData": "c1\nA b c d"
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Short.\n\n",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 1",
+                    "memo": "c1"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  }
+                ],
+                "memory": "c1\nShort.\n\n",
+                "lastId": "c1"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenize",
+                "text": "A b c d",
+                "count": 15
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "A b c d"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Short."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "A b c d",
+                "count": 15
+              },
+              {
+                "kind": "tokenize",
+                "text": "Short.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ran-out-twice-not-enough-tokens",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 51,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c0\nA b c d"
+            },
+            "roomAfter": {
+              "supaMemoryData": "c0\nA b c d"
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 64,
+                "chats": [
+                  {
+                    "role": "user",
+                    "content": "c message 0",
+                    "memo": "c0"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 1",
+                    "memo": "c1"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 2",
+                    "memo": "c2"
+                  }
+                ],
+                "error": "Not Enough Tokens to summarize in SupaMemory"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenize",
+                "text": "A b c d",
+                "count": 3
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "A b c d"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Short."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "A b c d",
+                "count": 3
+              },
+              {
+                "kind": "tokenize",
+                "text": "Short.\n\n",
+                "count": 3
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "empty-chats-over-limit",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 60,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 70,
+                "chats": [],
+                "error": "Not Enough Tokens to summarize in SupaMemory"
+              }
+            },
+            "events": [
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": ""
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Nothing."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "",
+                "count": 3
+              },
+              {
+                "kind": "tokenize",
+                "text": "Nothing.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "summary-fail-reply",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 56,
+                "chats": [
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "error": "SupaMemory: HTTP: quota"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "fail",
+                  "result": "quota"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "summary-request-throws",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "thrown": {
+                "name": "Error",
+                "message": "network down"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "failure": {
+                  "name": "Error",
+                  "message": "network down"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "tokenizer-failure-throws",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "thrown": {
+                "name": "Error",
+                "message": "synthetic tokenizer failure"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "failure": {
+                  "name": "Error",
+                  "message": "synthetic tokenizer failure"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "memo-less-break-chat-gives-undefined-last-id",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Sum A.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "no memo here"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": "undefined\nSum A.",
+                "lastId": {
+                  "$undefined": true
+                }
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "no memo here"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Sum A."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Sum A.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "names-by-role-in-batch-text",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 48,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Names summary.\n\nSecond names summary.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": "c6\nNames summary.\n\nSecond names summary.",
+                "lastId": "c6"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "hello there",
+                  "memo": "n0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "hi back",
+                  "memo": "n1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "system",
+                  "content": "a note",
+                  "memo": "n2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "named",
+                  "memo": "n3",
+                  "name": "Someone"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 9
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "Rin: hello there\n\nKai: hi back\n\nRin: a note\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Names summary."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Names summary.\n\n",
+                "count": 3
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "named",
+                  "memo": "n3",
+                  "name": "Someone"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 9
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 5",
+                  "memo": "c5"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 6",
+                  "memo": "c6"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "Rin: named\n\nRin: c message 4\n\nKai: c message 5\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Second names summary."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Second names summary.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "max-supa-chunk-size-caps-batches",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 55,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Pair one.\n\nPair two.\n\nPair three.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": "c6\nPair one.\n\nPair two.\n\nPair three.",
+                "lastId": "c6"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Pair one."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Pair one.\n\n",
+                "count": 3
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Pair two."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Pair two.\n\n",
+                "count": 3
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 5",
+                  "memo": "c5"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 6",
+                  "memo": "c6"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 4\n\nKai: c message 5\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Pair three."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Pair three.\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "result-newlines-collapse",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Line one\nLine two\r\n",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": "c4\nLine one\nLine two\r\n",
+                "lastId": "c4"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Line one\n\n\nLine two\r\n"
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Line one\n\n\nLine two\r\n\n\n",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "second-invocation-reads-stored-memory",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Sum A.",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 8",
+                    "memo": "c8"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 9",
+                    "memo": "c9"
+                  }
+                ],
+                "memory": "c4\nSum A.",
+                "lastId": "c4"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": "User: c message 0\n\nKai: c message 1\n\nUser: c message 2\n\nKai: c message 3\n\n"
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": "Sum A."
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": "Sum A.\n\n",
+                "count": 3
+              }
+            ]
+          },
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {
+              "supaMemoryData": "c4\nSum A."
+            },
+            "roomAfter": {
+              "supaMemoryData": "c4\nSum A."
+            },
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": "Sum A.\n\n",
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 8",
+                    "memo": "c8"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 9",
+                    "memo": "c9"
+                  }
+                ]
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 0",
+                  "memo": "c0"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenize",
+                "text": "Sum A.",
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "utf16-content-and-memos",
+      "result": {
+        "scope": "actual-supamemory-submodel-policy",
+        "invocations": [
+          {
+            "input": {
+              "currentTokens": 66,
+              "maxContextTokens": 60
+            },
+            "roomBefore": {},
+            "roomAfter": {},
+            "outcome": {
+              "returned": {
+                "currentTokens": 59,
+                "chats": [
+                  {
+                    "role": "system",
+                    "content": {
+                      "$utf16": [
+                        83,
+                        117,
+                        114,
+                        114,
+                        111,
+                        103,
+                        97,
+                        116,
+                        101,
+                        32,
+                        57343,
+                        32,
+                        115,
+                        117,
+                        109,
+                        109,
+                        97,
+                        114,
+                        121,
+                        46
+                      ]
+                    },
+                    "memo": "supaMemory"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 4",
+                    "memo": "c4"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 5",
+                    "memo": "c5"
+                  },
+                  {
+                    "role": "user",
+                    "content": "c message 6",
+                    "memo": "c6"
+                  },
+                  {
+                    "role": "assistant",
+                    "content": "c message 7",
+                    "memo": "c7"
+                  }
+                ],
+                "memory": {
+                  "$utf16": [
+                    99,
+                    52,
+                    10,
+                    83,
+                    117,
+                    114,
+                    114,
+                    111,
+                    103,
+                    97,
+                    116,
+                    101,
+                    32,
+                    57343,
+                    32,
+                    115,
+                    117,
+                    109,
+                    109,
+                    97,
+                    114,
+                    121,
+                    46
+                  ]
+                },
+                "lastId": "c4"
+              }
+            },
+            "events": [
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": {
+                    "$utf16": [
+                      108,
+                      111,
+                      110,
+                      101,
+                      32,
+                      55296,
+                      32,
+                      117,
+                      110,
+                      105,
+                      116
+                    ]
+                  },
+                  "memo": {
+                    "$utf16": [
+                      117,
+                      56320
+                    ]
+                  }
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 1",
+                  "memo": "c1"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 2",
+                  "memo": "c2"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "assistant",
+                  "content": "c message 3",
+                  "memo": "c3"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "tokenizeChat",
+                "message": {
+                  "role": "user",
+                  "content": "c message 4",
+                  "memo": "c4"
+                },
+                "args": {
+                  "$undefined": true
+                },
+                "count": 5
+              },
+              {
+                "kind": "summary",
+                "formated": [
+                  {
+                    "role": "user",
+                    "content": {
+                      "$utf16": [
+                        85,
+                        115,
+                        101,
+                        114,
+                        58,
+                        32,
+                        108,
+                        111,
+                        110,
+                        101,
+                        32,
+                        55296,
+                        32,
+                        117,
+                        110,
+                        105,
+                        116,
+                        10,
+                        10,
+                        75,
+                        97,
+                        105,
+                        58,
+                        32,
+                        99,
+                        32,
+                        109,
+                        101,
+                        115,
+                        115,
+                        97,
+                        103,
+                        101,
+                        32,
+                        49,
+                        10,
+                        10,
+                        85,
+                        115,
+                        101,
+                        114,
+                        58,
+                        32,
+                        99,
+                        32,
+                        109,
+                        101,
+                        115,
+                        115,
+                        97,
+                        103,
+                        101,
+                        32,
+                        50,
+                        10,
+                        10,
+                        75,
+                        97,
+                        105,
+                        58,
+                        32,
+                        99,
+                        32,
+                        109,
+                        101,
+                        115,
+                        115,
+                        97,
+                        103,
+                        101,
+                        32,
+                        51,
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "role": "system",
+                    "content": "[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output to reduce tokens for gpt3 and other sublanguage models]\n"
+                  }
+                ],
+                "model": "memory",
+                "options": {
+                  "bias": {},
+                  "useStreaming": false,
+                  "noMultiGen": true
+                },
+                "signal": "absent",
+                "reply": {
+                  "type": "success",
+                  "result": {
+                    "$utf16": [
+                      83,
+                      117,
+                      114,
+                      114,
+                      111,
+                      103,
+                      97,
+                      116,
+                      101,
+                      32,
+                      57343,
+                      32,
+                      115,
+                      117,
+                      109,
+                      109,
+                      97,
+                      114,
+                      121,
+                      46
+                    ]
+                  }
+                }
+              },
+              {
+                "kind": "tokenize",
+                "text": {
+                  "$utf16": [
+                    83,
+                    117,
+                    114,
+                    114,
+                    111,
+                    103,
+                    97,
+                    116,
+                    101,
+                    32,
+                    57343,
+                    32,
+                    115,
+                    117,
+                    109,
+                    109,
+                    97,
+                    114,
+                    121,
+                    46,
+                    10,
+                    10
+                  ]
+                },
+                "count": 3
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

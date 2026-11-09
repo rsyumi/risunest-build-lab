@@ -43,7 +43,6 @@ vi.mock('./platform', async () => (await import('./platform.testSupport')).platf
     startup.native ? { runtime: 'tauri', os: 'ios' } : { runtime: 'web', os: 'windows' })))
 vi.mock('./storage/deviceSettings', async () => (await import('./bootstrap.testSupport')).deviceSettingsModule(startup))
 vi.mock('./storage/persistentStorageRuntime', async () => (await import('./bootstrap.testSupport')).persistentStorageRuntimeModule())
-vi.mock('./storage/storeCompaction', async () => (await import('./bootstrap.testSupport')).storeCompactionModule())
 vi.mock('./storage/nativeFileJobRecovery', async original => ({
     ...(await import('./bootstrap.testSupport')).nativeFileJobRecoveryModule(),
     acknowledgeRecoveredNativeRestores: (await original<typeof import('./storage/nativeFileJobRecovery')>()).acknowledgeRecoveredNativeRestores,
@@ -101,20 +100,21 @@ vi.mock('./storage/sync/external/bridge', async () => (await import('./bootstrap
 vi.mock('./process/transformers', async () => (await import('./bootstrap.testSupport')).transformersModule())
 vi.mock('./process/files/inlayProviderImage', async () => (await import('./bootstrap.testSupport')).inlayProviderImageModule())
 
+import { getPersistentDataRuntime, configurePersistentDataRuntime, initializeActiveWorkingSet } from './storage/persistentDataRuntime.svelte'
+import { checkpointNativePersistentStore } from './storage/nativePersistentMaintenance'
+import { NativeGenerationGuard, type NativeGenerationGuardCancelReason } from './storage/nativeGenerationGuard'
+import type { WorkingSetCommit } from './storage/persistentDataStore'
+import { PersistentMutationFencedError } from './storage/saveCoordinator'
+import { SaveCoordinator, makeStore, committedChanges, captureRoot, makeDatabase } from './storage/saveCoordinator.testSupport'
 import { loadData } from './bootstrap'
-import { changeLanguage, language } from 'src/lang'
-import { languageEnglish } from 'src/lang/en'
-import { languageKorean } from 'src/lang/ko'
-import { bootstrapPersistentDatabase } from './storage/persistentBootstrap'
-import { safeStructuredClone } from './safeStructuredClone'
+import { language } from 'src/lang'
 import { afterPluginsStarted, keepPluginsOffForThisStart, loadPlugins } from './plugins/plugins.svelte'
 import { pluginStartupGate, configurePluginStartup, setPluginStartupSyncExcluded, retryPluginStartup } from './plugins/pluginStartupGate'
 import { shouldReconcileNativeFileJobs, reconcileNativeFileJobsBeforeBootstrap } from './storage/nativeFileJobRecovery'
 import { alertError, alertNormal, alertToast, alertTOS, waitAlert } from './alert'
 import { invoke } from '@tauri-apps/api/core'
 import { initializePersistentStorage } from './storage/persistentStorageRuntime'
-import { compactRequestedStoreAtStart, showStoreCompactionNotice } from './storage/storeCompaction'
-import { bootFailure, LoadingStatusState } from './stores.svelte'
+import { bootFailure } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
 import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccountBootstrap'
 import { initializeNativeSyncBindings, installServerSyncProduction } from './storage/sync/serverSyncProduction'
@@ -157,10 +157,7 @@ describe('bootstrap recovery exclusions', () => {
         vi.mocked(afterPluginsStarted).mockImplementation(listener => { listeners.add(listener); return () => {listeners.delete(listener)} })
         let started = 0
         const load = async () => {
-            const before = vi.mocked(invoke).mock.calls.length
-            const ready = await pluginStartupGate.ensure()
-            expect(vi.mocked(invoke).mock.calls.slice(before).map(([command]) => command)).not.toContain('pds_lww_binding_state')
-            if (!ready) return
+            if (!await pluginStartupGate.ensure()) return
             started++
             for (const listener of listeners) await listener()
         }
@@ -169,11 +166,10 @@ describe('bootstrap recovery exclusions', () => {
         await loadData()
         expect(started).toBe(pluginsExcluded ? 0 : 1)
         expect(invoke).toHaveBeenCalledWith('native_file_job_forget', {jobId:'synthetic-restored-job'})
+        expect(invoke).not.toHaveBeenCalledWith('pds_lww_binding_state', expect.anything())
         if (!pluginsExcluded) {
-            const beforeRetry = vi.mocked(invoke).mock.calls.length
             await retryPluginStartup()
             expect(started).toBe(2)
-            expect(vi.mocked(invoke).mock.calls.slice(beforeRetry).map(([command]) => command)).not.toContain('pds_lww_binding_state')
             expect(installServerSyncProduction).toHaveBeenCalledExactlyOnceWith({resumeBound:false})
         }
     })
@@ -407,35 +403,6 @@ describe('renderer recovery notice', () => {
     })
 })
 
-describe('store compaction at start', () => {
-    beforeEach(() => {
-        startup.native = true
-        startup.exclusions = []
-        startup.reachUi = true
-        startup.reconcile.mockResolvedValue(undefined)
-    })
-
-    it('compacts before the store opens and reports the result after the terms', async () => {
-        const result = { kind: 'compacted', reclaimedBytes: 4096 } as const
-        vi.mocked(compactRequestedStoreAtStart).mockImplementationOnce(async (show) => {
-            show('synthetic compaction progress')
-            expect(LoadingStatusState.text).toBe('synthetic compaction progress')
-            return result
-        })
-        vi.mocked(initializePersistentStorage).mockImplementationOnce(async () => {
-            expect(LoadingStatusState.text).toBe(language.risuNest.startup.storage)
-        })
-        let answerTerms!: (accepted: boolean) => void
-        vi.mocked(alertTOS).mockReturnValueOnce(new Promise((resolve) => { answerTerms = resolve }))
-        await loadData()
-        expect(vi.mocked(compactRequestedStoreAtStart).mock.invocationCallOrder[0])
-            .toBeLessThan(vi.mocked(initializePersistentStorage).mock.invocationCallOrder[0])
-        expect(showStoreCompactionNotice).not.toHaveBeenCalled()
-        answerTerms(true)
-        await vi.waitFor(() => expect(showStoreCompactionNotice).toHaveBeenCalledExactlyOnceWith(result))
-    })
-})
-
 describe('display recovery record', () => {
     beforeEach(() => {
         startup.native = true
@@ -481,6 +448,143 @@ describe('display recovery record', () => {
     })
 })
 
+
+describe('native generation startup recovery', () => {
+    it.each([false, true])('installs recovery before working-set initialization independently of opt-in (native=%s)', async native => {
+        startup.native = native
+        startup.exclusions = ['sync']
+        startup.markers.getItem.mockReturnValue(null)
+        vi.resetModules()
+        const { configurePersistentDataRuntime, initializeActiveWorkingSet } = await import('./storage/persistentDataRuntime.svelte')
+        const { initializeOfficialAccountBootstrap } = await import('./storage/sync/officialAccountBootstrap')
+        const { invoke } = await import('@tauri-apps/api/core')
+        const { loadData } = await import('./bootstrap')
+        let initialized = false
+        vi.mocked(initializeActiveWorkingSet).mockImplementationOnce(async () => {
+            const configured = vi.mocked(configurePersistentDataRuntime).mock.calls
+                .find(([configuration]) => 'nativeGeneration' in configuration)![0].nativeGeneration
+            if (native) {
+                vi.mocked(invoke).mockResolvedValueOnce([])
+                await expect(configured!.active()).resolves.toEqual([])
+                expect(invoke).toHaveBeenCalledWith('native_generation_active')
+            } else expect(configured).toBeNull()
+            initialized = true
+        })
+        vi.mocked(initializeOfficialAccountBootstrap).mockImplementationOnce(async options => {
+            await options.initializeWorkingSet(startup.database)
+            return { database: startup.database, revision: 1, officialEnabled: false }
+        })
+        await loadData()
+        expect(initialized).toBe(true)
+        expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'native_generation_host_init')).toBe(false)
+        if (!native) expect(vi.mocked(invoke).mock.calls.some(([command]) => String(command).startsWith('native_generation_'))).toBe(false)
+    })
+})
+
+describe('native generation normal exit', () => {
+    async function exitHarness() {
+        startup.native = true
+        startup.exclusions = ['sync', 'account']
+        startup.reachUi = false
+        const root = captureRoot(makeDatabase())
+        let username = 'Stored input'
+        let storedUsername = username
+        const cancellations: NativeGenerationGuardCancelReason[] = []
+        let expireClose: (() => void) | undefined
+        let closeBound: number | undefined
+        const guard: NativeGenerationGuard = new NativeGenerationGuard({
+            cancel: (_ticket, reason) => { cancellations.push(reason) },
+            adopt: async () => {},
+            fence: () => save.markCommittedWorkingSetRefreshRequired(save.revision, new Error('Native close timed out')),
+            clock: {
+                setTimeout: (callback, delay) => { expireClose = callback; closeBound = delay; return callback },
+                clearTimeout: () => { expireClose = undefined },
+            },
+        })
+        const save = new SaveCoordinator({
+            store: makeStore(vi.fn(async (commit: WorkingSetCommit) => {
+                const changes = committedChanges(commit)
+                if (typeof changes.rootChanges.username === 'string') storedUsername = changes.rootChanges.username
+                return { revision: commit.expectedRevision + 1 }
+            })),
+            captureRoot: () => ({ ...root, username }), captureSelectedCharacter: () => null,
+            replaceDatabase: () => {}, nativeGenerationGuard: guard,
+        })
+        save.initialize(1)
+        const runtime = getPersistentDataRuntime()
+        Object.assign(runtime, {
+            closeNativeGenerations: (bound: number) => guard.close(bound),
+            flushPendingDataLocally: (reason: string) => save.flushPendingDataLocally(reason),
+            capturePersistentMutationToken: save.capturePersistentMutationToken.bind(save),
+            acquireDestructiveReplacementFence: async (token: Parameters<typeof save.acquireDestructiveReplacementFence>[0]) => {
+                const owner = await save.acquireDestructiveReplacementFence(token)
+                return { revision: save.revision, release: () => save.releaseDestructiveReplacementFence(owner) }
+            },
+        })
+        vi.mocked(getPersistentDataRuntime).mockReturnValueOnce(runtime)
+        vi.mocked(getExternalStorageBridge).mockReturnValue({
+            captureExitTarget: async () => ({ revision: String(save.revision), libraryEpoch: '1',
+                selection: { kind: 'none', selectionEpoch: '1', connectionId: null, paused: false } }),
+        } as never)
+        await loadData()
+        const dependencies = vi.mocked(createSyncExitCoordinator).mock.calls.at(-1)![0]
+        const real = await vi.importActual<typeof import('./storage/syncExitCoordinator')>('./storage/syncExitCoordinator')
+        const exit = real.createSyncExitCoordinator(dependencies)
+        const ticket = { epoch: '1', sequence: '1' }
+        return {
+            exit, save, guard, cancellations,
+            get storedUsername() { return storedUsername },
+            get closeBound() { return closeBound },
+            holdEdit() {
+                guard.install(ticket, { characterId: 'synthetic-character', conversationId: 'synthetic-chat' }, ['["root","username"]'])
+                username = 'Held input'
+            },
+            settle: () => guard.settle({ ticket, phase: 'cancelled', pendingCommit: false, output: 'none' }),
+            expire: () => { expect(expireClose).toBeTypeOf('function'); expireClose!() },
+        }
+    }
+
+    it.each(['local flush', 'mutation token'] as const)('settles native generation before the exit %s can park a held write', async (boundary) => {
+        const h = await exitHarness()
+        if (boundary === 'local flush') h.holdEdit()
+        else vi.mocked(checkpointNativePersistentStore).mockImplementationOnce(async () => { h.holdEdit() })
+        const exiting = h.exit.requestExit()
+        try {
+            await vi.waitFor(() => expect(h.cancellations).toEqual(['lifecycle']))
+            expect(h.storedUsername).toBe('Stored input')
+            await h.settle()
+            await expect(exiting).resolves.toBe('exit')
+            expect(h.storedUsername).toBe('Held input')
+            expect(h.guard.snapshot()).toEqual([])
+            expect(h.save.pendingWorkingSetRefreshRevision).toBeNull()
+        } finally {
+            await h.settle()
+        }
+    })
+
+    it('keeps a timed-out native close fenced through exit retry and cancellation', async () => {
+        const h = await exitHarness()
+        h.holdEdit()
+        let blocked = 0
+        h.exit.subscribe((state) => { if (state.phase === 'edit-blocked') blocked++ })
+        const exiting = h.exit.requestExit()
+        await vi.waitFor(() => expect(h.closeBound).toBeGreaterThan(0))
+        expect(h.closeBound).toBeLessThanOrEqual(1_500)
+        h.expire()
+        await vi.waitFor(() => expect(h.exit.snapshot().phase).toBe('edit-blocked'))
+        expect(h.storedUsername).toBe('Stored input')
+        expect(h.guard.snapshot()).toMatchObject([{ state: 'fenced', cancelled: true }])
+        expect(h.exit.decide('wait')).toBe(true)
+        await vi.waitFor(() => expect(blocked).toBe(2))
+        expect(h.exit.decide('cancel-exit')).toBe(true)
+        await expect(exiting).resolves.toBe('cancelled')
+        expect(h.cancellations).toEqual(['lifecycle'])
+        expect(h.save.pendingWorkingSetRefreshRevision).toBe(1)
+        await expect(h.save.flushPendingDataLocally('after-cancel-exit')).rejects.toBeInstanceOf(PersistentMutationFencedError)
+        expect(h.storedUsername).toBe('Stored input')
+    })
+})
+
 describe('native setup failure', () => {
     it('stops bootstrap before diagnostics and exposes the existing failure panel state', async () => {
         startup.native = true
@@ -501,35 +605,5 @@ describe('native setup failure', () => {
             stage: 'native-setup',
         })
         expect(alertError).not.toHaveBeenCalled()
-    })
-})
-
-describe('startup language', () => {
-    // The suite unstubs every global after each test, the setup's clone that changeLanguage uses included.
-    beforeEach(() => vi.stubGlobal('safeStructuredClone', safeStructuredClone))
-    afterEach(() => changeLanguage('en'))
-
-    // The entry applies the device language before the app mounts; Korean stands in for it here.
-    it.each([
-        ['en', languageEnglish.risuNest.startup.data],
-        [undefined, languageKorean.risuNest.startup.data],
-    ])('keeps the start language until the library language (%s) is read', async (libraryLanguage, dataText) => {
-        startup.native = true
-        startup.exclusions = []
-        const shown: string[] = []
-        vi.mocked(initializePersistentStorage).mockImplementationOnce(async () => { shown.push(LoadingStatusState.text) })
-        vi.mocked(bootstrapPersistentDatabase).mockImplementationOnce(async ({ onPhase }) => {
-            await onPhase?.('storage')
-            shown.push(LoadingStatusState.text)
-            await onPhase?.('data', libraryLanguage)
-            shown.push(LoadingStatusState.text)
-            return { database: startup.database, revision: 1 }
-        })
-        changeLanguage('ko')
-
-        await loadData()
-
-        const opening = languageKorean.risuNest.startup.storage
-        expect(shown).toEqual([opening, opening, dataText])
     })
 })

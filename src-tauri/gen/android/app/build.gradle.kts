@@ -1,6 +1,7 @@
 import java.util.Properties
 import java.net.URI
 import java.io.ByteArrayOutputStream
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     id("com.android.application")
@@ -165,6 +166,14 @@ dependencies {
 }
 
 apply(from = "tauri.build.gradle.kts")
+
+val prepareWryRendererRecovery = tasks.register<PrepareWryRendererRecovery>("prepareWryRendererRecovery") {
+    generatedDirectory = file("src/main/java/io/github/rsyumi/risunest/generated")
+    mustRunAfter(tasks.withType<BuildTask>())
+}
+tasks.withType<KotlinCompile>().configureEach {
+    dependsOn(prepareWryRendererRecovery)
+}
 
 afterEvaluate {
     if (!releaseSigningReady) {

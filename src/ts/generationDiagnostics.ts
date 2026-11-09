@@ -11,13 +11,6 @@ export type GenerationCheckpointSkipReason =
     | 'ineligible' | 'compatibility' | 'missing-capture' | 'complete-gate'
     | 'storage-failed' | 'ownership-lost'
 export type GenerationSavePath = 'windowed' | 'complete' | 'fallback' | 'unknown'
-/** Why a phase exited as failed. */
-export type GenerationFailureReason =
-    | 'conversation-changed' | 'trigger-stop' | 'memory-failed' | 'token-limit'
-    | 'fenced' | 'error' | 'stream-error'
-export type GenerationLifecycleEvent =
-    | 'active' | 'background' | 'start' | 'stop' | 'freeze' | 'resume'
-    | 'exit' | 'expiry' | 'memory-warning' | 'trim-memory'
 export type GenerationDiagnosticFallback =
     | 'none' | 'compatibility' | 'missing-capture' | 'unsupported' | 'unknown'
     | 'selected-conversation-unavailable' | 'standard-hypa-v3-disabled'
@@ -44,7 +37,6 @@ export interface GenerationDiagnosticPhaseDetails {
     skipReason?: GenerationCheckpointSkipReason
     resultKind?: 'buffered' | 'streaming' | 'multiline' | 'failed'
     savePath?: GenerationSavePath
-    reason?: GenerationFailureReason
 }
 
 export interface GenerationPersistenceDiagnostic {
@@ -155,7 +147,7 @@ export function createGenerationDiagnostics(options: { enabled: boolean; invoke:
                 phase: (phase, edge, details) => emit({
                     kind: 'phase', phase, edge, outcome: details?.outcome,
                     skipReason: details?.skipReason, resultKind: details?.resultKind,
-                    savePath: details?.savePath, reason: details?.reason,
+                    savePath: details?.savePath,
                 }),
                 persistence: (value) => emit({
                     kind: 'persistence', boundary: value.boundary, savePath: value.savePath,
@@ -170,7 +162,7 @@ export function createGenerationDiagnostics(options: { enabled: boolean; invoke:
                 }),
             }
         },
-        lifecycle(event: GenerationLifecycleEvent, trimLevel?: number): void {
+        lifecycle(event: 'background' | 'stop' | 'exit' | 'expiry' | 'memory-warning' | 'trim-memory', trimLevel?: number): void {
             send({ kind: 'lifecycle', event, ...(trimLevel === undefined ? {} : { trimLevel }) })
         },
     }

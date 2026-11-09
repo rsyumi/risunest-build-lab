@@ -9,13 +9,14 @@ import CharConfig from './CharConfig.svelte'
 const mocks = vi.hoisted(() => ({
     alertError: vi.fn(), selectMultiple: vi.fn(), selectSingle: vi.fn(), importRegex: vi.fn(), registerModel: vi.fn(),
     saveAsset: vi.fn(async () => 'assets/synthetic.bin'), mutate: vi.fn(), fileSrc: vi.fn(async () => ''),
+    tokenizeAccurateList: vi.fn(async (texts: string[]) => texts.map(() => 1)),
 }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
     return { DBState, CharConfigSubMenu: writable(4), selectedCharID: writable(0),
         MobileGUI: writable(false), ShowRealmFrameStore: writable(false), hypaV3ModalOpen: writable(false) }
 })
-vi.mock('src/ts/tokenizer', () => ({ tokenizeAccurate: vi.fn(async () => 1) }))
+vi.mock('src/ts/tokenizer', () => ({ tokenizeAccurateList: mocks.tokenizeAccurateList }))
 vi.mock('src/ts/storage/database.svelte', () => ({}))
 vi.mock('src/ts/characters', () => ({ getCharImage: vi.fn(async () => ''), addingEmotion: writable(false) }))
 vi.mock('src/ts/storage/characterArchive', () => ({ archiveIsAvailable: () => false }))
@@ -163,6 +164,27 @@ it('resolves a large additional-asset list only while its submenu is open and ig
     await tick()
     expect(mocks.fileSrc).toHaveBeenCalledTimes(300)
     expect(document.querySelector('img[src="data:,synthetic-late"]')).toBeNull()
+})
+
+it('counts the changed fields together and shows the count of the latest text of each', async () => {
+    const counts: Array<{ texts: string[], resolve: (counts: number[]) => void }> = []
+    mocks.tokenizeAccurateList.mockImplementation((texts: string[]) => new Promise(resolve => counts.push({ texts, resolve })))
+    const labels = () => [...document.querySelectorAll('span.text-textcolor2.mb-6')].map(span => span.textContent?.trim())
+    await setup(0)
+    const character = DBState.db.characters[0] as any
+
+    character.desc = 'first draft'
+    character.chats[0].note = 'note'
+    await tick()
+    character.desc = 'second'
+    await tick()
+    expect(counts.map(({ texts }) => texts)).toEqual([['first draft', 'note'], ['second']])
+
+    counts[1].resolve([6])
+    counts[0].resolve([11, 4])
+    await vi.waitFor(() => expect(labels()).toEqual([
+        `6 ${languageEnglish.tokens}`, `0 ${languageEnglish.tokens}`, `4 ${languageEnglish.tokens}`,
+    ]))
 })
 
 it('offers the asset style with new image handling even when the asset prompt is off', async () => {

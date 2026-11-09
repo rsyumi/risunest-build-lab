@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { authorNoteFingerprint } from './authorNotePresets'
 import { get } from 'svelte/store'
 
 const mocks = vi.hoisted(() => ({
@@ -105,10 +104,7 @@ vi.mock('./process/inlayScreen', () => ({ updateInlayScreen: (value: unknown) =>
 vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
 vi.mock('./translator/translator', () => ({ translateHTML: vi.fn() }))
 vi.mock('./mobileBackgroundTask', async () => (await import('./mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
-vi.mock('./process/index.svelte', async () => {
-    const { writable } = await import('svelte/store')
-    return { doingChat: writable(false) }
-})
+vi.mock('./process/index.svelte', async () => ({ doingChat: (await import('./process/generationState')).doingChat }))
 vi.mock('./characterCards', () => ({ importCharacter: vi.fn() }))
 vi.mock('./pngChunk', () => ({ PngChunk: {} }))
 vi.mock('./ui/yieldToUi', () => ({ yieldToUi: mocks.yieldToUi }))
@@ -159,7 +155,6 @@ import {
     selectCharImg,
     addCharEmotion,
     addingEmotion,
-    updateLorebooks,
 } from './characters'
 import { beginMobileBackgroundTask } from './mobileBackgroundTask'
 import { createMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
@@ -167,7 +162,7 @@ import { language } from 'src/lang'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
-import { doingChat } from './process/index.svelte'
+import { doingChat, reserveGeneration, allowNativeGenerationNavigation } from './process/generationState'
 import { translateHTML } from './translator/translator'
 import { createConversationSummaryStub } from './storage/conversationResidency'
 import { installDisplayRecovery, isDisplayRecoveryMarked, type DisplayRecoveryTarget } from './displayRecovery.svelte'
@@ -189,16 +184,6 @@ async function markForDisplayRecovery(...marked: DisplayRecoveryTarget[]) {
     await installDisplayRecovery(recoveryStore({ working: [], marked }, { commitAtOnce: true }).store)
     onTestFinished(() => installDisplayRecovery(null))
 }
-
-describe('lorebook format update', () => {
-    it('gives an entry without a key, name or content empty text', () => {
-        const [entry] = updateLorebooks([{
-            key: null, comment: null, content: null, secondkey: '', insertorder: 100,
-            mode: 'normal', alwaysActive: false, selective: false,
-        }])
-        expect(entry).toMatchObject({ key: '', comment: '', content: '', bookVersion: 2 })
-    })
-})
 
 describe('runtime chat identity', () => {
     it('keeps a newer portrait when the gallery selection changed while the picker was open', async () => {
@@ -315,6 +300,18 @@ describe('runtime chat identity', () => {
         expect(mocks.activateCharacter).toHaveBeenCalledWith(first.chaId, expect.objectContaining({
             normalize: expect.any(Function),
         }))
+    })
+
+    it('allows character navigation only after a native reservation hands off preparation', async () => {
+        mocks.database.characters.push(createBlankChar())
+        const reservation = reserveGeneration()!
+        try {
+            await expect(changeChar(0)).resolves.toBe(false)
+            const release = allowNativeGenerationNavigation(reservation)
+            await expect(changeChar(0)).resolves.toBe(true)
+            release()
+            await expect(changeChar(0)).resolves.toBe(false)
+        } finally { reservation.release() }
     })
 
     it('publishes character navigation before yielding to the UI', async () => {
@@ -1504,14 +1501,10 @@ describe('chat list operations', () => {
         const character = buildCharacter()
         character.chats[0].message = []
         mocks.database.characters.push(character)
-        Object.assign(mocks.database, { authorNotePresets: [{ id: 'preset', name: 'Preset', text: 'Shared note' }] })
-        onTestFinished(() => { Reflect.deleteProperty(mocks.database, 'authorNotePresets') })
         selectedCharID.set(0)
         mocks.readPersistentConversation.mockResolvedValue({
             ...character.chats[0],
             message: [{ role: 'user', data: 'authoritative body' }],
-            note: 'stale copy',
-            authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') },
         })
 
         await exportChat(0)
@@ -1525,8 +1518,6 @@ describe('chat list operations', () => {
         expect(exported.data.message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
-        expect(exported.data.note).toBe('Shared note')
-        expect(exported.data).not.toHaveProperty('authorNotePreset')
     })
 
     it('filters markup added by translation from an HTML export and shows names as text', async () => {
@@ -1594,9 +1585,6 @@ describe('chat list operations', () => {
         resident.chats[0].message = []
         const complete = structuredClone(resident)
         complete.chats[0].message = [{ role: 'user', data: 'authoritative body' }]
-        Object.assign(complete.chats[0], { note: 'stale copy', authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') } })
-        Object.assign(mocks.database, { authorNotePresets: [{ id: 'preset', name: 'Preset', text: 'Shared note' }] })
-        onTestFinished(() => { Reflect.deleteProperty(mocks.database, 'authorNotePresets') })
         mocks.database.characters.push(resident)
         selectedCharID.set(0)
         mocks.readPersistentCompleteCharacter.mockResolvedValue(complete)
@@ -1611,7 +1599,5 @@ describe('chat list operations', () => {
         expect(exported.data[0].message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
-        expect(exported.data[0].note).toBe('Shared note')
-        expect(exported.data[0]).not.toHaveProperty('authorNotePreset')
     })
 })

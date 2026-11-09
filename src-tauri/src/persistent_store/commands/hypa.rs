@@ -56,11 +56,16 @@ struct ReadHeader {
     entries: Vec<ReadHeaderEntry>,
 }
 
-/// Splits a framed payload into its JSON header and the vector region.
-fn split_frame(bytes: &[u8]) -> StoreResult<(&[u8], &[u8])> {
-    if bytes.len() < HEADER_LENGTH_BYTES || bytes.len() > MAX_FRAME_BYTES {
+fn validate_frame_length(length: usize, maximum: usize) -> StoreResult<()> {
+    if length < HEADER_LENGTH_BYTES || length > maximum {
         return Err(invalid("embedding frame is malformed"));
     }
+    Ok(())
+}
+
+/// Splits a framed payload into its JSON header and the vector region.
+fn split_frame(bytes: &[u8]) -> StoreResult<(&[u8], &[u8])> {
+    validate_frame_length(bytes.len(), MAX_FRAME_BYTES)?;
     let header_length = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     let body_start = HEADER_LENGTH_BYTES
         .checked_add(header_length)
@@ -217,3 +222,6 @@ pub(crate) fn pds_clear_hypa_embeddings(app: AppHandle, state: State<'_, Persist
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) mod native_cache_tests;

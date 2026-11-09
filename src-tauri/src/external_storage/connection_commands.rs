@@ -1778,19 +1778,15 @@ enum CredentialInput {
     },
 }
 
-/// Creates the descriptor of a new repository, at this app's format level
-/// when the repository syncs, and returns the descriptor the repository holds.
-#[allow(clippy::too_many_arguments)]
 async fn ensure_create_descriptor(
     root: &std::path::Path,
-    provider_id: &str,
     provider: &dyn Provider,
     handle: &RepositoryHandle,
     descriptor: &Descriptor,
     root_key: &[u8; 32],
     resuming: bool,
     cancel: &Cancellation,
-) -> Result<(super::contract::RemoteLocator, Descriptor)> {
+) -> Result<super::contract::RemoteLocator> {
     let resumed = if resuming {
         descriptor::resume_existing(root, provider, handle, descriptor, root_key, cancel).await?
     } else {
@@ -1798,18 +1794,13 @@ async fn ensure_create_descriptor(
     };
     let locator = match resumed {
         Some(locator) => locator,
-        None if descriptor.publication_strategy.is_some() && super::lww_commands::syncs_through(provider_id) => {
-            let leveled = descriptor.clone().with_format_level(crate::server_sync::library_format::LEVEL)
-                .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
-            descriptor::upload(root, provider, handle, &leveled, root_key, cancel).await?
-        }
         None => descriptor::upload(root, provider, handle, descriptor, root_key, cancel).await?,
     };
-    let created = descriptor::read(
+    descriptor::read(
         root, provider, handle, &locator, descriptor, root_key, cancel,
     )
     .await?;
-    Ok((locator, created))
+    Ok(locator)
 }
 
 fn occupied_location_error(creating: bool, error: ProviderError) -> ProviderError {
@@ -2116,11 +2107,10 @@ async fn commit_new_connection(
     require_repository_strategy(&capabilities, descriptor.publication_strategy)?;
     let root_key = read_root_key(key_vault.as_ref(), &updated.root_key_ref).await?;
     let recovery_key = read_recovery_key(key_vault.as_ref(), &updated.recovery_key_ref).await?;
-    let (descriptor_locator, format_level) = match preparation.request.mode {
+    let descriptor_locator = match preparation.request.mode {
         ConnectionOpenMode::Create => {
-            let (locator, created) = ensure_create_descriptor(
+            let locator = ensure_create_descriptor(
                 &root,
-                &config.provider,
                 provider.as_ref(),
                 &handle,
                 descriptor,
@@ -2142,7 +2132,7 @@ async fn commit_new_connection(
                 cancel,
             )
             .await?;
-            (locator, created.level())
+            locator
         }
         ConnectionOpenMode::Existing => {
             let recovered =
@@ -2151,7 +2141,7 @@ async fn commit_new_connection(
             if recovered.metadata.descriptor != *descriptor || *recovered.key != *root_key {
                 return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
             }
-            let current = descriptor::read(
+            descriptor::read(
                 &root,
                 provider.as_ref(),
                 &handle,
@@ -2161,12 +2151,11 @@ async fn commit_new_connection(
                 cancel,
             )
             .await?;
-            (recovered.metadata.descriptor_locator, current.level())
+            recovered.metadata.descriptor_locator
         }
     };
     cancel.check()?;
     let stored = store.promote_pending(connection_id, descriptor_locator, capabilities)?;
-    store.record_format_level(connection_id, format_level)?;
     let recovery = if preparation.request.mode == ConnectionOpenMode::Create {
         Some(RecoveryKeyMaterial {
             key: recovery_key.to_string(),
@@ -2286,7 +2275,7 @@ pub(crate) async fn open_connected_with_cancel<R: tauri::Runtime>(
         .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
     require_repository_strategy(&capabilities, stored.descriptor.publication_strategy)?;
     stored.capabilities = capabilities;
-    let current = descriptor::read(
+    descriptor::read(
         &root,
         provider.as_ref(),
         &handle,
@@ -2296,7 +2285,6 @@ pub(crate) async fn open_connected_with_cancel<R: tauri::Runtime>(
         cancel,
     )
     .await?;
-    ConnectionStore::open(&root)?.record_format_level(connection_id, current.level())?;
     Ok(ConnectedRepository {
         stored,
         provider,
@@ -2681,45 +2669,39 @@ mod tests {
     fn restarted_create_reuses_the_authenticated_descriptor_without_uploading_again() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            // A repository for sync is created at this app's format level, a backup repository without one.
-            for (strategy, level) in [(None, 1), (Some(super::super::contract::PublicationStrategy::Cas), 2)] {
-                let first_root = tempfile::tempdir().unwrap();
-                let restarted_root = tempfile::tempdir().unwrap();
-                let provider = super::super::fake::FakeProvider::new(true);
-                let handle = super::super::fake::repository();
-                let descriptor = Descriptor::new(handle.repository_id.clone(), strategy).unwrap();
-                let cancel = Cancellation::default();
+            let first_root = tempfile::tempdir().unwrap();
+            let restarted_root = tempfile::tempdir().unwrap();
+            let provider = super::super::fake::FakeProvider::new(true);
+            let handle = super::super::fake::repository();
+            let descriptor = Descriptor::new(handle.repository_id.clone(), None).unwrap();
+            let cancel = Cancellation::default();
 
-                let first = ensure_create_descriptor(
-                    first_root.path(),
-                    "webdav",
-                    &provider,
-                    &handle,
-                    &descriptor,
-                    &[7; 32],
-                    false,
-                    &cancel,
-                )
-                .await
-                .unwrap();
-                assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
-                assert_eq!(first.1.level(), level);
+            let first = ensure_create_descriptor(
+                first_root.path(),
+                &provider,
+                &handle,
+                &descriptor,
+                &[7; 32],
+                false,
+                &cancel,
+            )
+            .await
+            .unwrap();
+            assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
 
-                let resumed = ensure_create_descriptor(
-                    restarted_root.path(),
-                    "webdav",
-                    &provider,
-                    &handle,
-                    &descriptor,
-                    &[7; 32],
-                    true,
-                    &cancel,
-                )
-                .await
-                .unwrap();
-                assert_eq!(resumed, first);
-                assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
-            }
+            let resumed = ensure_create_descriptor(
+                restarted_root.path(),
+                &provider,
+                &handle,
+                &descriptor,
+                &[7; 32],
+                true,
+                &cancel,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resumed, first);
+            assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
         });
     }
 

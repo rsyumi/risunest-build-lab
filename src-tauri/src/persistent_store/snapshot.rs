@@ -20,8 +20,6 @@ use std::{
 use uuid::Uuid;
 
 const MIN_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
-/// The most snapshots kept, and the keep count when a caller names none.
-const MAX_SNAPSHOTS: usize = 8;
 const UNSCANNABLE_BLOCKER: &str = "record-unscannable";
 const CAS_PHYSICAL_PREFIX: &str = "assets/objects/";
 const URL_SCHEMES: [&str; 3] = ["risuasset:", "http:", "https:"];
@@ -84,7 +82,9 @@ impl ActiveReaderRegistry {
 
     pub(crate) fn detached_asset_roots(&self) -> StoreResult<Vec<AssetRootSet>> {
         if self.deferred_asset_inventories.load(Ordering::SeqCst) > 0 {
-            return Err(StoreError::AssetInventoryBusy);
+            return Err(StoreError::Validation {
+                message: "Asset inventory is being pinned by a local capture".into(),
+            });
         }
         Ok(self
             .detached_asset_roots
@@ -415,144 +415,66 @@ pub(super) fn checkpoint(connection: &Connection, mode: CheckpointMode) -> Store
     Ok(())
 }
 
-#[cfg(test)]
 pub(super) fn create(
     store: &mut super::PersistentStore,
     reason: &str,
-    keep: KeepCount,
 ) -> StoreResult<SnapshotCreated> {
     let mut archive = Archive::open(&store.snapshots_dir)?;
-    create_in_archive(store, &mut archive, reason, keep)
+    create_in_archive(store, &mut archive, reason)
 }
 
-pub(super) fn create_in_archive(
+fn create_in_archive(
     store: &mut super::PersistentStore,
     archive: &mut Archive,
     reason: &str,
-    keep: KeepCount,
 ) -> StoreResult<SnapshotCreated> {
     let started = Instant::now();
-    let (scratch, retention) = capture_scratch(store, archive, keep)?;
-    archive_scratch(archive, scratch, retention, reason, started)
-}
-
-/// How many snapshots the rotation after a capture keeps, from 1 to
-/// `MAX_SNAPSHOTS`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct KeepCount(usize);
-
-impl KeepCount {
-    pub(crate) const MAX: Self = Self(MAX_SNAPSHOTS);
-
-    /// The count the renderer sends with a snapshot request, which is the one
-    /// the user sees. A request without one keeps the full count, and a count
-    /// out of range is refused before anything is captured.
-    pub(crate) fn requested(count: Option<u32>) -> StoreResult<Self> {
-        let Some(count) = count else { return Ok(Self::MAX) };
-        usize::try_from(count)
-            .ok()
-            .filter(|count| (1..=MAX_SNAPSHOTS).contains(count))
-            .map(Self)
-            .ok_or_else(|| validation(format!("snapshot keep count {count} is outside 1 to {MAX_SNAPSHOTS}")))
-    }
-}
-
-/// What the rotation after a capture keeps: the requested snapshot count, and
-/// archive bytes within `byte_budget` of the retention basis.
-pub(super) struct Retention {
-    pub(super) keep_count: usize,
-    pub(super) basis_bytes: u64,
+    let (scratch, current_bytes) = capture_scratch(store, archive)?;
+    archive_scratch(archive, scratch, current_bytes, reason, started)
 }
 
 pub(super) fn capture_scratch(
     store: &mut super::PersistentStore,
     archive: &Archive,
-    keep: KeepCount,
-) -> StoreResult<(super::snapshot_archive::Scratch, Retention)> {
-    begin_capture(store, archive, keep)?.copy()
-}
-
-/// A capture's leased revision, taken out of the store so that copying it, which
-/// takes minutes for a large library, runs while other commands use the store.
-pub(super) struct CaptureSource {
-    scratch: super::snapshot_archive::Scratch,
-    reader: RevisionReadLease,
-    repository_root: PathBuf,
-    database_path: PathBuf,
-    keep: KeepCount,
-}
-
-/// Leases the current revision for a capture. The lease's reader leaves the store
-/// with the returned source, and the capture's asset inventory deferral keeps
-/// what it references.
-pub(super) fn begin_capture(
-    store: &mut super::PersistentStore,
-    archive: &Archive,
-    keep: KeepCount,
-) -> StoreResult<CaptureSource> {
+) -> StoreResult<(super::snapshot_archive::Scratch, u64)> {
     let scratch = archive.scratch()?;
     let revision = store.revision()?;
     let lease = store.lww_acquire_library_backup_capture(revision)?;
-    let reader = store
-        .revision_leases
-        .remove(&lease.lease)
-        .ok_or(StoreError::SnapshotReleased)?;
-    Ok(CaptureSource {
-        scratch,
-        reader,
-        repository_root: store.repository_root.clone(),
-        database_path: store.database_path.clone(),
-        keep,
-    })
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static CAPTURE_COPYING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
-
-impl CaptureSource {
-    pub(super) fn copy(self) -> StoreResult<(super::snapshot_archive::Scratch, Retention)> {
-        let Self { scratch, reader, repository_root, database_path, keep } = self;
-        let active_readers = reader.active_readers();
-        let result = (|| {
-            let current_bytes = snapshot_retention_basis_bytes(&reader.connection)?;
-            let mut output = crate::sqlite_open::open(&scratch.path)?;
-            {
-                let backup = rusqlite::backup::Backup::new(&reader.connection, &mut output)?;
-                #[cfg(test)]
-                CAPTURE_COPYING.with(|hook| { if let Some(hook) = hook.borrow_mut().take() { hook(); } });
-                loop {
-                    match backup.step(128)? {
-                        rusqlite::backup::StepResult::Done => break,
-                        rusqlite::backup::StepResult::More => (),
-                        _ => return Err(validation("snapshot source is busy")),
-                    }
+    let result = (|| {
+        let units = store.lww_backup_unit_values(&lease.lease)?;
+        let (connection, target) = store.read_view(Some(&lease.lease))?;
+        let current_bytes = snapshot_retention_basis_bytes(connection)?;
+        let mut output = crate::sqlite_open::open(&scratch.path)?;
+        {
+            let backup = rusqlite::backup::Backup::new(connection, &mut output)?;
+            loop {
+                match backup.step(128)? {
+                    rusqlite::backup::StepResult::Done => break,
+                    rusqlite::backup::StepResult::More => (),
+                    _ => return Err(validation("snapshot source is busy")),
                 }
             }
-            let tx = output.transaction()?;
-            tx.execute("DELETE FROM snapshot_original_meta", [])?;
-            tx.execute("DELETE FROM snapshot_original_units", [])?;
-            tx.execute("INSERT INTO snapshot_original_meta VALUES(1,?1,?2)", rusqlite::params![reader.target.revision,reader.target.generation])?;
-            super::lww::visit_backup_units(&reader, &repository_root, &crate::local_backup::NeverCancelled, &mut |key,value| {
-                tx.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)", rusqlite::params![key.as_str(),serde_json::to_string(&value)?])?;
-                Ok(())
-            })?;
-            tx.commit()?;
-            Ok(current_bytes)
-        })();
-        let release = close_revision(reader)
-            .and_then(|()| super::checkpoint_after_detached_release(&database_path, &active_readers));
-        let basis_bytes = result?;
-        release?;
-        Ok((scratch, Retention { keep_count: keep.0, basis_bytes }))
-    }
+        }
+        let tx = output.transaction()?;
+        tx.execute("DELETE FROM snapshot_original_meta", [])?;
+        tx.execute("DELETE FROM snapshot_original_units", [])?;
+        tx.execute("INSERT INTO snapshot_original_meta VALUES(1,?1,?2)", rusqlite::params![target.revision,target.generation])?;
+        for (key,value) in units {
+            tx.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)", rusqlite::params![key.as_str(),serde_json::to_string(&value)?])?;
+        }
+        tx.commit()?;
+        Ok(current_bytes)
+    })();
+    let release = store.release_revision(&lease.lease);
+    let current_bytes = result?;
+    release?;
+    Ok((scratch, current_bytes))
 }
 
 pub(super) fn archive_scratch(
     archive: &mut Archive,
     scratch: super::snapshot_archive::Scratch,
-    retention: Retention,
+    current_bytes: u64,
     reason: &str,
     started: Instant,
 ) -> StoreResult<SnapshotCreated> {
@@ -561,7 +483,7 @@ pub(super) fn archive_scratch(
     let roots = collect_asset_roots(&captured)?;
     drop(captured);
     let metadata = archive.insert(&scratch.path, revision, reason, roots)?;
-    archive.rotate(retention.keep_count, byte_budget(retention.basis_bytes), &metadata.id)?;
+    archive.rotate(byte_budget(current_bytes), &metadata.id)?;
     Ok(SnapshotCreated {
         id: metadata.id,
         revision,
@@ -1010,44 +932,14 @@ fn collect_character_asset_hashes_inner(
     shared: bool,
 ) -> StoreResult<Vec<String>> {
     let mut roots = AssetRootSet::default();
-    // The unused-file cleanup cannot read an archived character's text, so a key inside longer
-    // text, such as an `<img src>` in a chat, is recorded too, as a permanent delete finds it.
-    let mut candidates = BTreeSet::new();
     let scope: [&dyn rusqlite::ToSql; 2] = [&generation, &character_id];
     for query in [
         "SELECT detail FROM characters WHERE generation = ?1 AND character_id = ?2",
         "SELECT detail FROM conversations WHERE generation = ?1 AND character_id = ?2",
         "SELECT value FROM messages WHERE generation = ?1 AND character_id = ?2",
     ] {
-        let mut statement = connection.prepare(query)?;
-        let mut rows = statement.query(scope.as_slice())?;
-        while let Some(row) = rows.next()? {
-            let value = if shared {
-                let raw: String = row.get(0)?;
-                let value = serde_json::from_str(&raw)?;
-                if query.contains("FROM characters") {
-                    super::lww::shared_archive_character(value)
-                } else if query.contains("FROM conversations") {
-                    super::lww::shared_archive_conversation(value)
-                } else {
-                    value
-                }
-            } else {
-                let ScannedText::Text(encoded) = scanned_text(row, 0)? else {
-                    retain_unscannable_record(&mut roots);
-                    continue;
-                };
-                match serde_json::from_str(&encoded) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        retain_unscannable_record(&mut roots);
-                        continue;
-                    }
-                }
-            };
-            observe_json_value(&value, None, &mut roots);
-            super::asset_alias_orphans::collect_value_owned_keys(&value, &mut candidates);
-        }
+        if shared {let mut statement=connection.prepare(query)?;let mut rows=statement.query(scope.as_slice())?;while let Some(row)=rows.next()?{let raw:String=row.get(0)?;let value=serde_json::from_str(&raw)?;let value=if query.contains("FROM characters"){super::lww::shared_archive_character(value)}else if query.contains("FROM conversations"){super::lww::shared_archive_conversation(value)}else{value};observe_json_value(&value,None,&mut roots);}}else{scan_json_column(connection, query, scope.as_slice(), &mut roots)?;}
+
     }
     scan_text_column(
         connection,
@@ -1085,7 +977,12 @@ fn collect_character_asset_hashes_inner(
         hashes.insert(manifest_hash);
     }
 
-    candidates.extend(roots.legacy_asset_keys.iter().chain(&roots.inlay_ids).cloned());
+    let mut candidates: BTreeSet<String> = roots
+        .legacy_asset_keys
+        .iter()
+        .chain(&roots.inlay_ids)
+        .cloned()
+        .collect();
     collect_alias_key_candidates(connection, generation, character_id, &mut candidates,shared)?;
     for candidate in candidates {
         let mut statement = connection.prepare_cached(

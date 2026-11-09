@@ -1,0 +1,2882 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "constants",
+      "kind": "constants"
+    },
+    {
+      "id": "external-minimal",
+      "kind": "external",
+      "database": {
+        "characters": []
+      }
+    },
+    {
+      "id": "external-full",
+      "kind": "external",
+      "database": {
+        "formatversion": 5,
+        "username": "Root user",
+        "userIcon": "assets/user.png",
+        "personaPrompt": "Root persona prompt",
+        "userNote": "Root note",
+        "temperature": 55,
+        "mainPrompt": "Root main prompt",
+        "NAIsettings": {
+          "topK": 3
+        },
+        "presetRegex": [
+          {
+            "in": "a",
+            "out": "b"
+          }
+        ],
+        "reasoningEffort": 1,
+        "promptTemplate": [
+          {
+            "type": "plain",
+            "text": "root",
+            "role": "system"
+          }
+        ],
+        "groupTemplate": "{{char}}: ",
+        "groupOtherBotRole": "user",
+        "globalChatVariables": {
+          "toggle_x": "1",
+          "score": "3"
+        },
+        "doNotChangeSeperateModels": true,
+        "seperateModels": {
+          "memory": "m"
+        },
+        "characters": [
+          {
+            "chaId": "char-a",
+            "type": "character",
+            "name": "Character char-a",
+            "chats": [
+              {
+                "id": "chat-a",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "group-1",
+            "type": "group",
+            "name": "Group",
+            "characters": [
+              "char-a"
+            ]
+          },
+          {
+            "chaId": "§temp",
+            "type": "character",
+            "name": "Character §temp",
+            "chats": []
+          },
+          {
+            "chaId": "char-b",
+            "type": "character",
+            "name": "Character char-b",
+            "chats": [],
+            "trashTime": 1
+          },
+          {
+            "chaId": "char-c",
+            "type": "character",
+            "name": "Character char-c",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "char-a",
+          "group-1",
+          "§temp",
+          {
+            "id": "folder-1",
+            "name": "Folder",
+            "data": [
+              "group-1",
+              "char-c"
+            ]
+          },
+          {
+            "id": "folder-2",
+            "data": [
+              "group-1"
+            ]
+          },
+          "char-b"
+        ],
+        "loadouts": [
+          {
+            "id": "loadout-1",
+            "name": "Loadout",
+            "characterIds": [
+              "char-a",
+              "group-1",
+              "§temp"
+            ]
+          },
+          {
+            "id": "loadout-1",
+            "name": "Repeated id"
+          },
+          {
+            "name": "No id",
+            "characterIds": null
+          }
+        ],
+        "botPresets": [
+          {
+            "name": "First",
+            "id": "preset-1",
+            "groupTemplate": "first: "
+          },
+          {
+            "name": "Selected",
+            "temperature": 10,
+            "regex": [],
+            "groupOtherBotRole": "bot"
+          },
+          {
+            "name": "Repeated",
+            "id": "preset-1"
+          }
+        ],
+        "botPresetsId": 1,
+        "personas": [
+          {
+            "name": "Persona",
+            "icon": "",
+            "embeddedModule": {
+              "name": "Embedded"
+            }
+          },
+          {
+            "id": "persona-2",
+            "name": "Second",
+            "embeddedModule": {
+              "id": "kept",
+              "name": "Kept"
+            }
+          }
+        ],
+        "selectedPersona": 0,
+        "modules": [
+          {
+            "name": "Module",
+            "id": ""
+          },
+          {
+            "name": "Module 2",
+            "id": "module-2"
+          },
+          {
+            "name": "Module 3",
+            "id": "module-2"
+          }
+        ],
+        "customModels": [
+          {
+            "name": "Custom",
+            "id": 7
+          }
+        ],
+        "protectedPresetValues": {
+          "groupTemplate": "protected: "
+        }
+      }
+    },
+    {
+      "id": "external-compat",
+      "kind": "external",
+      "database": {
+        "characters": [
+          {
+            "chaId": "synthetic-a",
+            "type": "character",
+            "name": "Character synthetic-a",
+            "chats": [
+              {
+                "id": "synthetic-chat-1",
+                "name": "Chat",
+                "message": [
+                  {
+                    "role": "user",
+                    "data": "합성 질문"
+                  },
+                  {
+                    "role": "char",
+                    "data": "합성 답변"
+                  }
+                ]
+              },
+              {
+                "id": "synthetic-chat-2",
+                "name": "Empty",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "synthetic-b",
+            "type": "character",
+            "name": "Character synthetic-b",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "synthetic-a",
+          "synthetic-b"
+        ],
+        "pluginCustomStorage": {
+          "syntheticPlugin": {
+            "arbitrary": null,
+            "nested": [
+              "한글",
+              0.125,
+              9007199254740991
+            ],
+            "text": "do not rewrite assets/synthetic.png substring"
+          }
+        },
+        "personas": [
+          {
+            "id": "synthetic-persona",
+            "name": "Synthetic Persona",
+            "personaPrompt": "Synthetic prompt",
+            "icon": ""
+          }
+        ],
+        "modules": [],
+        "botPresets": [],
+        "adaptiveThinkingEffort": "high",
+        "formatversion": 5
+      }
+    },
+    {
+      "id": "external-empty-folder-dropped",
+      "kind": "external",
+      "database": {
+        "characters": [
+          {
+            "type": "group",
+            "chaId": "g"
+          }
+        ],
+        "characterOrder": [
+          {
+            "id": "f",
+            "data": [
+              "g"
+            ]
+          },
+          {
+            "id": "kept",
+            "data": []
+          },
+          "g",
+          "other"
+        ]
+      }
+    },
+    {
+      "id": "external-group-without-id",
+      "kind": "external",
+      "database": {
+        "characters": [
+          {
+            "type": "group"
+          },
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "a",
+          "undefined"
+        ]
+      }
+    },
+    {
+      "id": "external-group-number-id",
+      "kind": "external",
+      "database": {
+        "characters": [
+          {
+            "type": "group",
+            "chaId": 5
+          }
+        ],
+        "characterOrder": [
+          {
+            "data": [
+              5,
+              "5"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "external-temp-number-type",
+      "kind": "external",
+      "database": {
+        "characters": [
+          {
+            "type": 7,
+            "chaId": "§temp"
+          }
+        ],
+        "loadouts": [
+          {
+            "characterIds": [
+              "§temp",
+              "x"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "external-order-not-array",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "characterOrder": "not a list"
+      }
+    },
+    {
+      "id": "external-loadout-ids-absent",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "loadouts": [
+          {
+            "name": "Absent"
+          },
+          {
+            "name": "Null",
+            "characterIds": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "external-loadouts-null",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "loadouts": null,
+        "botPresets": null
+      }
+    },
+    {
+      "id": "external-message-names-null",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "groupTemplate": null
+      }
+    },
+    {
+      "id": "external-message-names-overwrite",
+      "kind": "external",
+      "database": {
+        "messageNameTemplate": "local",
+        "characters": [],
+        "groupTemplate": "upstream",
+        "namedMessageRole": "bot"
+      }
+    },
+    {
+      "id": "external-protected-string",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "protectedPresetValues": "truthy text"
+      }
+    },
+    {
+      "id": "external-protected-falsy",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "protectedPresetValues": 0,
+        "groupOtherBotRole": "user"
+      }
+    },
+    {
+      "id": "external-preset-primitives",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "botPresets": [
+          5,
+          "text",
+          [],
+          false,
+          {
+            "groupTemplate": "object: "
+          }
+        ]
+      }
+    },
+    {
+      "id": "external-primitive-characters",
+      "kind": "external",
+      "database": {
+        "characters": [
+          5,
+          "text",
+          [],
+          true,
+          {
+            "type": "group",
+            "chaId": "g"
+          }
+        ],
+        "characterOrder": [
+          "g",
+          "text"
+        ]
+      }
+    },
+    {
+      "id": "external-protected-index-keys",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "protectedPresetValues": {
+          "0": "zero",
+          "10": "ten",
+          "groupTemplate": "g: ",
+          "zeta": "z"
+        }
+      }
+    },
+    {
+      "id": "external-unicode",
+      "kind": "external",
+      "database": {
+        "characters": [
+          {
+            "chaId": "캐릭터 🐿️ \ud800",
+            "type": "character",
+            "name": "Character 캐릭터 🐿️ \ud800",
+            "chats": []
+          },
+          {
+            "type": "group",
+            "chaId": "그룹"
+          }
+        ],
+        "characterOrder": [
+          "캐릭터 🐿️ \ud800",
+          "그룹"
+        ],
+        "groupTemplate": "이름: "
+      }
+    },
+    {
+      "id": "external-not-object",
+      "kind": "external",
+      "database": null,
+      "decline": "database"
+    },
+    {
+      "id": "external-array",
+      "kind": "external",
+      "database": [],
+      "decline": "database"
+    },
+    {
+      "id": "external-characters-missing",
+      "kind": "external",
+      "database": {},
+      "decline": "characters"
+    },
+    {
+      "id": "external-characters-object",
+      "kind": "external",
+      "database": {
+        "characters": {}
+      },
+      "decline": "characters"
+    },
+    {
+      "id": "external-characters-null-entry",
+      "kind": "external",
+      "database": {
+        "characters": [
+          null
+        ]
+      },
+      "decline": "characters"
+    },
+    {
+      "id": "external-order-null-entry",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          null
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "external-order-number-entry",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          3
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "external-order-array-entry",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          [
+            "a"
+          ]
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "external-order-folder-no-data",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          {
+            "id": "f"
+          }
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "external-order-folder-string-data",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          {
+            "data": "abc"
+          }
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "external-loadouts-object",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "loadouts": {}
+      },
+      "decline": "loadouts"
+    },
+    {
+      "id": "external-loadouts-string",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "loadouts": "ab"
+      },
+      "decline": "loadouts"
+    },
+    {
+      "id": "external-loadout-null",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "loadouts": [
+          null
+        ]
+      },
+      "decline": "loadouts"
+    },
+    {
+      "id": "external-loadout-ids-string",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "loadouts": [
+          {
+            "characterIds": "abc"
+          }
+        ]
+      },
+      "decline": "characterIds"
+    },
+    {
+      "id": "external-presets-object",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "botPresets": {}
+      },
+      "decline": "botPresets"
+    },
+    {
+      "id": "external-presets-null-entry",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "botPresets": [
+          null
+        ]
+      },
+      "decline": "botPresets"
+    },
+    {
+      "id": "external-proto-key",
+      "kind": "external",
+      "database": {
+        "characters": [],
+        "extra": {
+          "__proto__": {
+            "polluted": true
+          },
+          "plain": 1
+        }
+      },
+      "decline": "protoKey"
+    },
+    {
+      "id": "upstream-minimal",
+      "kind": "upstream",
+      "database": {}
+    },
+    {
+      "id": "upstream-full",
+      "kind": "upstream",
+      "database": {
+        "formatversion": 5,
+        "username": "Root user",
+        "userIcon": "assets/user.png",
+        "personaPrompt": "Root persona prompt",
+        "userNote": "Root note",
+        "temperature": 55,
+        "mainPrompt": "Root main prompt",
+        "NAIsettings": {
+          "topK": 3
+        },
+        "presetRegex": [
+          {
+            "in": "a",
+            "out": "b"
+          }
+        ],
+        "reasoningEffort": 1,
+        "promptTemplate": [
+          {
+            "type": "plain",
+            "text": "root",
+            "role": "system"
+          }
+        ],
+        "groupTemplate": "{{char}}: ",
+        "groupOtherBotRole": "user",
+        "globalChatVariables": {
+          "toggle_x": "1",
+          "score": "3"
+        },
+        "doNotChangeSeperateModels": true,
+        "seperateModels": {
+          "memory": "m"
+        },
+        "characters": [
+          {
+            "chaId": "char-a",
+            "type": "character",
+            "name": "Character char-a",
+            "chats": [
+              {
+                "id": "chat-a",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "group-1",
+            "type": "group",
+            "name": "Group",
+            "characters": [
+              "char-a"
+            ]
+          },
+          {
+            "chaId": "§temp",
+            "type": "character",
+            "name": "Character §temp",
+            "chats": []
+          },
+          {
+            "chaId": "char-b",
+            "type": "character",
+            "name": "Character char-b",
+            "chats": [],
+            "trashTime": 1
+          },
+          {
+            "chaId": "char-c",
+            "type": "character",
+            "name": "Character char-c",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "char-a",
+          "group-1",
+          "§temp",
+          {
+            "id": "folder-1",
+            "name": "Folder",
+            "data": [
+              "group-1",
+              "char-c"
+            ]
+          },
+          {
+            "id": "folder-2",
+            "data": [
+              "group-1"
+            ]
+          },
+          "char-b"
+        ],
+        "loadouts": [
+          {
+            "id": "loadout-1",
+            "name": "Loadout",
+            "characterIds": [
+              "char-a",
+              "group-1",
+              "§temp"
+            ]
+          },
+          {
+            "id": "loadout-1",
+            "name": "Repeated id"
+          },
+          {
+            "name": "No id",
+            "characterIds": null
+          }
+        ],
+        "botPresets": [
+          {
+            "name": "First",
+            "id": "preset-1",
+            "groupTemplate": "first: "
+          },
+          {
+            "name": "Selected",
+            "temperature": 10,
+            "regex": [],
+            "groupOtherBotRole": "bot"
+          },
+          {
+            "name": "Repeated",
+            "id": "preset-1"
+          }
+        ],
+        "botPresetsId": 1,
+        "personas": [
+          {
+            "name": "Persona",
+            "icon": "",
+            "embeddedModule": {
+              "name": "Embedded"
+            }
+          },
+          {
+            "id": "persona-2",
+            "name": "Second",
+            "embeddedModule": {
+              "id": "kept",
+              "name": "Kept"
+            }
+          }
+        ],
+        "selectedPersona": 0,
+        "modules": [
+          {
+            "name": "Module",
+            "id": ""
+          },
+          {
+            "name": "Module 2",
+            "id": "module-2"
+          },
+          {
+            "name": "Module 3",
+            "id": "module-2"
+          }
+        ],
+        "customModels": [
+          {
+            "name": "Custom",
+            "id": 7
+          }
+        ],
+        "protectedPresetValues": {
+          "groupTemplate": "protected: "
+        }
+      }
+    },
+    {
+      "id": "upstream-compat",
+      "kind": "upstream",
+      "database": {
+        "characters": [
+          {
+            "chaId": "synthetic-a",
+            "type": "character",
+            "name": "Character synthetic-a",
+            "chats": [
+              {
+                "id": "synthetic-chat-1",
+                "name": "Chat",
+                "message": [
+                  {
+                    "role": "user",
+                    "data": "합성 질문"
+                  },
+                  {
+                    "role": "char",
+                    "data": "합성 답변"
+                  }
+                ]
+              },
+              {
+                "id": "synthetic-chat-2",
+                "name": "Empty",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "synthetic-b",
+            "type": "character",
+            "name": "Character synthetic-b",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "synthetic-a",
+          "synthetic-b"
+        ],
+        "pluginCustomStorage": {
+          "syntheticPlugin": {
+            "arbitrary": null,
+            "nested": [
+              "한글",
+              0.125,
+              9007199254740991
+            ],
+            "text": "do not rewrite assets/synthetic.png substring"
+          }
+        },
+        "personas": [
+          {
+            "id": "synthetic-persona",
+            "name": "Synthetic Persona",
+            "personaPrompt": "Synthetic prompt",
+            "icon": ""
+          }
+        ],
+        "modules": [],
+        "botPresets": [],
+        "adaptiveThinkingEffort": "high",
+        "formatversion": 5
+      }
+    },
+    {
+      "id": "upstream-ids",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "name": "a"
+          },
+          {
+            "id": "",
+            "name": "b"
+          },
+          {
+            "id": "p",
+            "name": "c"
+          },
+          {
+            "id": "p",
+            "name": "d"
+          },
+          {
+            "id": 3,
+            "name": "e"
+          }
+        ],
+        "personas": [
+          {
+            "id": "p",
+            "name": "same id as a preset"
+          },
+          {
+            "name": "no id",
+            "embeddedModule": {
+              "id": ""
+            }
+          },
+          {
+            "id": "x",
+            "embeddedModule": null
+          },
+          {
+            "id": "y",
+            "embeddedModule": 0
+          },
+          {
+            "id": "z",
+            "embeddedModule": {
+              "id": 0
+            }
+          }
+        ],
+        "modules": [
+          {
+            "id": "m"
+          },
+          {
+            "id": "m"
+          },
+          {}
+        ],
+        "loadouts": [
+          {
+            "id": "m"
+          }
+        ],
+        "customModels": [
+          {
+            "id": null
+          },
+          {
+            "id": "c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "upstream-preset-mirror-new-fields",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "name": "only"
+          }
+        ],
+        "botPresetsId": 0,
+        "temperature": 1,
+        "NAIsettings": {
+          "a": 1
+        },
+        "presetRegex": null,
+        "reasoningEffort": 2,
+        "verbosity": 0,
+        "dynamicOutput": {
+          "x": true
+        }
+      }
+    },
+    {
+      "id": "upstream-preset-mirror-string-index",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b",
+            "temperature": 5
+          }
+        ],
+        "botPresetsId": "1",
+        "temperature": 9
+      }
+    },
+    {
+      "id": "upstream-preset-index-out-of-range",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          }
+        ],
+        "botPresetsId": 4,
+        "temperature": 9
+      }
+    },
+    {
+      "id": "upstream-preset-index-fraction",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          }
+        ],
+        "botPresetsId": 0.5,
+        "temperature": 9
+      }
+    },
+    {
+      "id": "upstream-preset-index-negative",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          }
+        ],
+        "botPresetsId": -1,
+        "temperature": 9
+      }
+    },
+    {
+      "id": "upstream-preset-index-null",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          }
+        ],
+        "botPresetsId": null,
+        "temperature": 9
+      }
+    },
+    {
+      "id": "upstream-preset-index-bool",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          }
+        ],
+        "botPresetsId": true,
+        "temperature": 9
+      }
+    },
+    {
+      "id": "upstream-preset-index-missing",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          }
+        ],
+        "mainPrompt": "root"
+      }
+    },
+    {
+      "id": "upstream-no-presets-string-index",
+      "kind": "upstream",
+      "database": {
+        "botPresetsId": "length",
+        "temperature": 9
+      }
+    },
+    {
+      "id": "upstream-persona-mirror",
+      "kind": "upstream",
+      "database": {
+        "personas": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b",
+            "name": "old",
+            "note": "old note",
+            "extra": 1
+          }
+        ],
+        "selectedPersona": 1,
+        "username": "New",
+        "userIcon": "",
+        "personaPrompt": null,
+        "userNote": "note"
+      }
+    },
+    {
+      "id": "upstream-global-vars-existing-explicit",
+      "kind": "upstream",
+      "database": {
+        "explicitGlobalChatVariables": {
+          "old": "1"
+        },
+        "name": "x",
+        "globalChatVariables": {
+          "1": "index",
+          "b": "2",
+          "a": "3"
+        }
+      }
+    },
+    {
+      "id": "upstream-global-vars-null",
+      "kind": "upstream",
+      "database": {
+        "globalChatVariables": null
+      }
+    },
+    {
+      "id": "upstream-global-vars-number",
+      "kind": "upstream",
+      "database": {
+        "globalChatVariables": 5
+      }
+    },
+    {
+      "id": "upstream-protected-absent",
+      "kind": "upstream",
+      "database": {
+        "doNotChangeFallbackModels": 1,
+        "fallbackModels": {
+          "a": [
+            "b"
+          ]
+        },
+        "fallbackWhenBlankResponse": false
+      }
+    },
+    {
+      "id": "upstream-protected-null",
+      "kind": "upstream",
+      "database": {
+        "protectedPresetValues": null,
+        "after": 1,
+        "disableSeperateParameterChangeOnPresetChange": "yes",
+        "seperateParameters": {
+          "memory": {}
+        }
+      }
+    },
+    {
+      "id": "upstream-protected-existing",
+      "kind": "upstream",
+      "database": {
+        "protectedPresetValues": {
+          "seperateModels": "old",
+          "other": 1
+        },
+        "doNotChangeSeperateModels": true,
+        "seperateModelsForAxModels": true
+      }
+    },
+    {
+      "id": "upstream-protected-flag-off",
+      "kind": "upstream",
+      "database": {
+        "protectedPresetValues": "kept text",
+        "doNotChangeSeperateModels": false,
+        "seperateModels": "x"
+      }
+    },
+    {
+      "id": "upstream-global-vars-index-keys",
+      "kind": "upstream",
+      "database": {
+        "globalChatVariables": {
+          "0": "zero",
+          "10": "ten",
+          "b": "1",
+          "a": "2",
+          "01": "not an index",
+          "4294967295": "not an index"
+        }
+      }
+    },
+    {
+      "id": "upstream-protected-index-keys",
+      "kind": "upstream",
+      "database": {
+        "protectedPresetValues": {
+          "0": "zero",
+          "10": "ten",
+          "zeta": "z"
+        },
+        "doNotChangeSeperateModels": true,
+        "seperateModels": {
+          "memory": "m"
+        }
+      }
+    },
+    {
+      "id": "upstream-unicode",
+      "kind": "upstream",
+      "database": {
+        "personas": [
+          {
+            "name": "페르소나 🐿️ \ud800"
+          }
+        ],
+        "selectedPersona": 0,
+        "username": "사용자",
+        "globalChatVariables": {
+          "변수": "값"
+        }
+      }
+    },
+    {
+      "id": "upstream-not-object",
+      "kind": "upstream",
+      "database": null,
+      "decline": "database"
+    },
+    {
+      "id": "upstream-array",
+      "kind": "upstream",
+      "database": [
+        {}
+      ],
+      "decline": "database"
+    },
+    {
+      "id": "upstream-proto-key",
+      "kind": "upstream",
+      "database": {
+        "extra": {
+          "__proto__": {
+            "polluted": true
+          },
+          "plain": 1
+        }
+      },
+      "decline": "protoKey"
+    },
+    {
+      "id": "upstream-presets-object",
+      "kind": "upstream",
+      "database": {
+        "botPresets": {}
+      },
+      "decline": "botPresets"
+    },
+    {
+      "id": "upstream-presets-primitive",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          "a"
+        ]
+      },
+      "decline": "botPresets"
+    },
+    {
+      "id": "upstream-personas-null-entry",
+      "kind": "upstream",
+      "database": {
+        "personas": [
+          null
+        ]
+      },
+      "decline": "personas"
+    },
+    {
+      "id": "upstream-modules-array-entry",
+      "kind": "upstream",
+      "database": {
+        "modules": [
+          []
+        ]
+      },
+      "decline": "modules"
+    },
+    {
+      "id": "upstream-custom-models-string",
+      "kind": "upstream",
+      "database": {
+        "customModels": "ab"
+      },
+      "decline": "customModels"
+    },
+    {
+      "id": "upstream-preset-index-length",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          }
+        ],
+        "botPresetsId": "length"
+      },
+      "decline": "botPresetsId"
+    },
+    {
+      "id": "upstream-preset-index-array",
+      "kind": "upstream",
+      "database": {
+        "botPresets": [
+          {
+            "id": "a"
+          }
+        ],
+        "botPresetsId": [
+          0
+        ],
+        "temperature": 1
+      },
+      "decline": "botPresetsId"
+    },
+    {
+      "id": "upstream-persona-index-object",
+      "kind": "upstream",
+      "database": {
+        "personas": [
+          {
+            "id": "a"
+          }
+        ],
+        "selectedPersona": {},
+        "username": "x"
+      },
+      "decline": "selectedPersona"
+    },
+    {
+      "id": "upstream-global-vars-string",
+      "kind": "upstream",
+      "database": {
+        "globalChatVariables": "ab"
+      },
+      "decline": "globalChatVariables"
+    },
+    {
+      "id": "upstream-global-vars-array",
+      "kind": "upstream",
+      "database": {
+        "globalChatVariables": [
+          "a"
+        ]
+      },
+      "decline": "globalChatVariables"
+    },
+    {
+      "id": "upstream-protected-string",
+      "kind": "upstream",
+      "database": {
+        "protectedPresetValues": "text",
+        "doNotChangeFallbackModels": true
+      },
+      "decline": "protectedPresetValues"
+    },
+    {
+      "id": "upstream-protected-array",
+      "kind": "upstream",
+      "database": {
+        "protectedPresetValues": [],
+        "doNotChangeFallbackModels": true
+      },
+      "decline": "protectedPresetValues"
+    },
+    {
+      "id": "upstream-embedded-string",
+      "kind": "upstream",
+      "database": {
+        "personas": [
+          {
+            "id": "a",
+            "embeddedModule": "text"
+          }
+        ]
+      },
+      "decline": "embeddedModule"
+    },
+    {
+      "id": "upstream-embedded-array",
+      "kind": "upstream",
+      "database": {
+        "personas": [
+          {
+            "id": "a",
+            "embeddedModule": []
+          }
+        ]
+      },
+      "decline": "embeddedModule"
+    },
+    {
+      "id": "route-minimal",
+      "kind": "route",
+      "database": {
+        "characters": []
+      }
+    },
+    {
+      "id": "route-full",
+      "kind": "route",
+      "database": {
+        "formatversion": 5,
+        "username": "Root user",
+        "userIcon": "assets/user.png",
+        "personaPrompt": "Root persona prompt",
+        "userNote": "Root note",
+        "temperature": 55,
+        "mainPrompt": "Root main prompt",
+        "NAIsettings": {
+          "topK": 3
+        },
+        "presetRegex": [
+          {
+            "in": "a",
+            "out": "b"
+          }
+        ],
+        "reasoningEffort": 1,
+        "promptTemplate": [
+          {
+            "type": "plain",
+            "text": "root",
+            "role": "system"
+          }
+        ],
+        "groupTemplate": "{{char}}: ",
+        "groupOtherBotRole": "user",
+        "globalChatVariables": {
+          "toggle_x": "1",
+          "score": "3"
+        },
+        "doNotChangeSeperateModels": true,
+        "seperateModels": {
+          "memory": "m"
+        },
+        "characters": [
+          {
+            "chaId": "char-a",
+            "type": "character",
+            "name": "Character char-a",
+            "chats": [
+              {
+                "id": "chat-a",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "group-1",
+            "type": "group",
+            "name": "Group",
+            "characters": [
+              "char-a"
+            ]
+          },
+          {
+            "chaId": "§temp",
+            "type": "character",
+            "name": "Character §temp",
+            "chats": []
+          },
+          {
+            "chaId": "char-b",
+            "type": "character",
+            "name": "Character char-b",
+            "chats": [],
+            "trashTime": 1
+          },
+          {
+            "chaId": "char-c",
+            "type": "character",
+            "name": "Character char-c",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "char-a",
+          "group-1",
+          "§temp",
+          {
+            "id": "folder-1",
+            "name": "Folder",
+            "data": [
+              "group-1",
+              "char-c"
+            ]
+          },
+          {
+            "id": "folder-2",
+            "data": [
+              "group-1"
+            ]
+          },
+          "char-b"
+        ],
+        "loadouts": [
+          {
+            "id": "loadout-1",
+            "name": "Loadout",
+            "characterIds": [
+              "char-a",
+              "group-1",
+              "§temp"
+            ]
+          },
+          {
+            "id": "loadout-1",
+            "name": "Repeated id"
+          },
+          {
+            "name": "No id",
+            "characterIds": null
+          }
+        ],
+        "botPresets": [
+          {
+            "name": "First",
+            "id": "preset-1",
+            "groupTemplate": "first: "
+          },
+          {
+            "name": "Selected",
+            "temperature": 10,
+            "regex": [],
+            "groupOtherBotRole": "bot"
+          },
+          {
+            "name": "Repeated",
+            "id": "preset-1"
+          }
+        ],
+        "botPresetsId": 1,
+        "personas": [
+          {
+            "name": "Persona",
+            "icon": "",
+            "embeddedModule": {
+              "name": "Embedded"
+            }
+          },
+          {
+            "id": "persona-2",
+            "name": "Second",
+            "embeddedModule": {
+              "id": "kept",
+              "name": "Kept"
+            }
+          }
+        ],
+        "selectedPersona": 0,
+        "modules": [
+          {
+            "name": "Module",
+            "id": ""
+          },
+          {
+            "name": "Module 2",
+            "id": "module-2"
+          },
+          {
+            "name": "Module 3",
+            "id": "module-2"
+          }
+        ],
+        "customModels": [
+          {
+            "name": "Custom",
+            "id": 7
+          }
+        ],
+        "protectedPresetValues": {
+          "groupTemplate": "protected: "
+        }
+      }
+    },
+    {
+      "id": "route-compat",
+      "kind": "route",
+      "database": {
+        "characters": [
+          {
+            "chaId": "synthetic-a",
+            "type": "character",
+            "name": "Character synthetic-a",
+            "chats": [
+              {
+                "id": "synthetic-chat-1",
+                "name": "Chat",
+                "message": [
+                  {
+                    "role": "user",
+                    "data": "합성 질문"
+                  },
+                  {
+                    "role": "char",
+                    "data": "합성 답변"
+                  }
+                ]
+              },
+              {
+                "id": "synthetic-chat-2",
+                "name": "Empty",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "synthetic-b",
+            "type": "character",
+            "name": "Character synthetic-b",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "synthetic-a",
+          "synthetic-b"
+        ],
+        "pluginCustomStorage": {
+          "syntheticPlugin": {
+            "arbitrary": null,
+            "nested": [
+              "한글",
+              0.125,
+              9007199254740991
+            ],
+            "text": "do not rewrite assets/synthetic.png substring"
+          }
+        },
+        "personas": [
+          {
+            "id": "synthetic-persona",
+            "name": "Synthetic Persona",
+            "personaPrompt": "Synthetic prompt",
+            "icon": ""
+          }
+        ],
+        "modules": [],
+        "botPresets": [],
+        "adaptiveThinkingEffort": "high",
+        "formatversion": 5
+      }
+    },
+    {
+      "id": "route-groups-only",
+      "kind": "route",
+      "database": {
+        "characters": [
+          {
+            "type": "group",
+            "chaId": "g1"
+          },
+          {
+            "chaId": "§temp",
+            "type": "character",
+            "name": "Character §temp",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          {
+            "id": "f",
+            "data": [
+              "g1"
+            ]
+          },
+          "g1"
+        ],
+        "loadouts": [
+          {
+            "id": "l",
+            "characterIds": [
+              "g1"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "route-unicode",
+      "kind": "route",
+      "database": {
+        "characters": [
+          {
+            "chaId": "캐릭터 🐿️",
+            "type": "character",
+            "name": "Character 캐릭터 🐿️",
+            "chats": []
+          }
+        ],
+        "username": "사용자",
+        "groupTemplate": "이름: ",
+        "personas": [
+          {
+            "name": "페르소나"
+          }
+        ],
+        "selectedPersona": 0
+      }
+    },
+    {
+      "id": "route-characters-missing",
+      "kind": "route",
+      "database": {},
+      "decline": "characters"
+    },
+    {
+      "id": "chain-minimal",
+      "kind": "chain",
+      "database": {
+        "characters": []
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-full",
+      "kind": "chain",
+      "database": {
+        "formatversion": 5,
+        "username": "Root user",
+        "userIcon": "assets/user.png",
+        "personaPrompt": "Root persona prompt",
+        "userNote": "Root note",
+        "temperature": 55,
+        "mainPrompt": "Root main prompt",
+        "NAIsettings": {
+          "topK": 3
+        },
+        "presetRegex": [
+          {
+            "in": "a",
+            "out": "b"
+          }
+        ],
+        "reasoningEffort": 1,
+        "promptTemplate": [
+          {
+            "type": "plain",
+            "text": "root",
+            "role": "system"
+          }
+        ],
+        "groupTemplate": "{{char}}: ",
+        "groupOtherBotRole": "user",
+        "globalChatVariables": {
+          "toggle_x": "1",
+          "score": "3"
+        },
+        "doNotChangeSeperateModels": true,
+        "seperateModels": {
+          "memory": "m"
+        },
+        "characters": [
+          {
+            "chaId": "char-a",
+            "type": "character",
+            "name": "Character char-a",
+            "chats": [
+              {
+                "id": "chat-a",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "group-1",
+            "type": "group",
+            "name": "Group",
+            "characters": [
+              "char-a"
+            ]
+          },
+          {
+            "chaId": "§temp",
+            "type": "character",
+            "name": "Character §temp",
+            "chats": []
+          },
+          {
+            "chaId": "char-b",
+            "type": "character",
+            "name": "Character char-b",
+            "chats": [],
+            "trashTime": 1
+          },
+          {
+            "chaId": "char-c",
+            "type": "character",
+            "name": "Character char-c",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "char-a",
+          "group-1",
+          "§temp",
+          {
+            "id": "folder-1",
+            "name": "Folder",
+            "data": [
+              "group-1",
+              "char-c"
+            ]
+          },
+          {
+            "id": "folder-2",
+            "data": [
+              "group-1"
+            ]
+          },
+          "char-b"
+        ],
+        "loadouts": [
+          {
+            "id": "loadout-1",
+            "name": "Loadout",
+            "characterIds": [
+              "char-a",
+              "group-1",
+              "§temp"
+            ]
+          },
+          {
+            "id": "loadout-1",
+            "name": "Repeated id"
+          },
+          {
+            "name": "No id",
+            "characterIds": null
+          }
+        ],
+        "botPresets": [
+          {
+            "name": "First",
+            "id": "preset-1",
+            "groupTemplate": "first: "
+          },
+          {
+            "name": "Selected",
+            "temperature": 10,
+            "regex": [],
+            "groupOtherBotRole": "bot"
+          },
+          {
+            "name": "Repeated",
+            "id": "preset-1"
+          }
+        ],
+        "botPresetsId": 1,
+        "personas": [
+          {
+            "name": "Persona",
+            "icon": "",
+            "embeddedModule": {
+              "name": "Embedded"
+            }
+          },
+          {
+            "id": "persona-2",
+            "name": "Second",
+            "embeddedModule": {
+              "id": "kept",
+              "name": "Kept"
+            }
+          }
+        ],
+        "selectedPersona": 0,
+        "modules": [
+          {
+            "name": "Module",
+            "id": ""
+          },
+          {
+            "name": "Module 2",
+            "id": "module-2"
+          },
+          {
+            "name": "Module 3",
+            "id": "module-2"
+          }
+        ],
+        "customModels": [
+          {
+            "name": "Custom",
+            "id": 7
+          }
+        ],
+        "protectedPresetValues": {
+          "groupTemplate": "protected: "
+        }
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-compat",
+      "kind": "chain",
+      "database": {
+        "characters": [
+          {
+            "chaId": "synthetic-a",
+            "type": "character",
+            "name": "Character synthetic-a",
+            "chats": [
+              {
+                "id": "synthetic-chat-1",
+                "name": "Chat",
+                "message": [
+                  {
+                    "role": "user",
+                    "data": "합성 질문"
+                  },
+                  {
+                    "role": "char",
+                    "data": "합성 답변"
+                  }
+                ]
+              },
+              {
+                "id": "synthetic-chat-2",
+                "name": "Empty",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "synthetic-b",
+            "type": "character",
+            "name": "Character synthetic-b",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "synthetic-a",
+          "synthetic-b"
+        ],
+        "pluginCustomStorage": {
+          "syntheticPlugin": {
+            "arbitrary": null,
+            "nested": [
+              "한글",
+              0.125,
+              9007199254740991
+            ],
+            "text": "do not rewrite assets/synthetic.png substring"
+          }
+        },
+        "personas": [
+          {
+            "id": "synthetic-persona",
+            "name": "Synthetic Persona",
+            "personaPrompt": "Synthetic prompt",
+            "icon": ""
+          }
+        ],
+        "modules": [],
+        "botPresets": [],
+        "adaptiveThinkingEffort": "high",
+        "formatversion": 5
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-groups-only",
+      "kind": "chain",
+      "database": {
+        "characters": [
+          {
+            "type": "group",
+            "chaId": "g1"
+          },
+          {
+            "chaId": "§temp",
+            "type": "character",
+            "name": "Character §temp",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          {
+            "id": "f",
+            "data": [
+              "g1"
+            ]
+          },
+          "g1"
+        ],
+        "loadouts": [
+          {
+            "id": "l",
+            "characterIds": [
+              "g1"
+            ]
+          }
+        ]
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-unicode",
+      "kind": "chain",
+      "database": {
+        "characters": [
+          {
+            "chaId": "캐릭터 🐿️",
+            "type": "character",
+            "name": "Character 캐릭터 🐿️",
+            "chats": []
+          }
+        ],
+        "username": "사용자",
+        "groupTemplate": "이름: ",
+        "personas": [
+          {
+            "name": "페르소나"
+          }
+        ],
+        "selectedPersona": 0
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-index-keys",
+      "kind": "chain",
+      "database": {
+        "characters": [],
+        "globalChatVariables": {
+          "0": "zero",
+          "10": "ten",
+          "b": "1",
+          "a": "2",
+          "01": "not an index"
+        },
+        "protectedPresetValues": {
+          "0": "zero",
+          "10": "ten",
+          "zeta": "z"
+        },
+        "doNotChangeSeperateModels": true,
+        "seperateModels": {
+          "memory": "m"
+        }
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-old-format",
+      "kind": "chain",
+      "database": {
+        "customBackground": "C:\\x\\assets\\bg.png",
+        "loreBookToken": 100,
+        "groupTemplate": "g: ",
+        "characters": [
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": [
+              {
+                "message": []
+              },
+              {
+                "id": "dup",
+                "message": []
+              }
+            ],
+            "image": "C:\\y\\assets\\a.png"
+          },
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": [
+              {
+                "id": "dup"
+              }
+            ]
+          },
+          {
+            "chaId": "gone",
+            "type": "character",
+            "name": "Character gone",
+            "chats": [],
+            "trashTime": 1699654400000
+          },
+          {
+            "chaId": "trashed",
+            "type": "character",
+            "name": "Character trashed",
+            "chats": [],
+            "trashTime": 1699913600000
+          },
+          {
+            "type": "group",
+            "chaId": "g"
+          }
+        ],
+        "characterOrder": [
+          "gone",
+          {
+            "id": "folder",
+            "data": [
+              "a",
+              "gone",
+              "g"
+            ]
+          },
+          {
+            "data": []
+          },
+          "missing"
+        ],
+        "personas": [
+          {
+            "name": "p"
+          },
+          {
+            "id": "kept",
+            "name": "q"
+          }
+        ],
+        "modules": [
+          {
+            "id": "m",
+            "name": "mod",
+            "lorebook": [
+              {
+                "content": "<char> @@end"
+              }
+            ]
+          }
+        ]
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-plugin-storage-array",
+      "kind": "chain",
+      "database": {
+        "characters": [],
+        "pluginCustomStorage": []
+      },
+      "now": 1700000000000
+    },
+    {
+      "id": "chain-cold-plugin-index",
+      "kind": "chain",
+      "database": {
+        "characters": [],
+        "pluginCustomStorage": {
+          "_coldpluginIndex": "index",
+          "kept": 1
+        }
+      },
+      "now": 1700000000000,
+      "decline": "coldPluginStorage"
+    },
+    {
+      "id": "chain-cold-plugin-legacy",
+      "kind": "chain",
+      "database": {
+        "characters": [],
+        "pluginCustomStorage": {
+          "_coldplugin": {
+            "a": "key"
+          }
+        }
+      },
+      "now": 1700000000000,
+      "decline": "coldPluginStorage"
+    },
+    {
+      "id": "chain-characters-missing",
+      "kind": "chain",
+      "database": {},
+      "now": 1700000000000,
+      "decline": "characters"
+    },
+    {
+      "id": "assign-ids-fresh",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": "",
+            "type": "character",
+            "name": "Character ",
+            "chats": []
+          },
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": [
+              {
+                "id": ""
+              },
+              {
+                "id": "c"
+              },
+              {
+                "id": "c"
+              },
+              {}
+            ]
+          },
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": []
+          },
+          {
+            "chaId": null,
+            "type": "character",
+            "name": "Character null",
+            "chats": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "assign-ids-collision",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": "00000000-0000-4000-8000-000000000001",
+            "type": "character",
+            "name": "Character 00000000-0000-4000-8000-000000000001",
+            "chats": []
+          },
+          {
+            "chaId": "",
+            "type": "character",
+            "name": "Character ",
+            "chats": []
+          },
+          {
+            "chaId": "b",
+            "type": "character",
+            "name": "Character b",
+            "chats": [
+              {
+                "id": "b"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "assign-ids-falsy",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": 0,
+            "type": "character",
+            "name": "Character 0",
+            "chats": []
+          },
+          {
+            "chaId": false,
+            "type": "character",
+            "name": "Character false",
+            "chats": [
+              {
+                "id": null
+              },
+              {
+                "id": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "assign-ids-key-order",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "name": "no id yet",
+            "chats": [
+              {
+                "message": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "assign-ids-compat",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": "synthetic-a",
+            "type": "character",
+            "name": "Character synthetic-a",
+            "chats": [
+              {
+                "id": "synthetic-chat-1",
+                "name": "Chat",
+                "message": [
+                  {
+                    "role": "user",
+                    "data": "합성 질문"
+                  },
+                  {
+                    "role": "char",
+                    "data": "합성 답변"
+                  }
+                ]
+              },
+              {
+                "id": "synthetic-chat-2",
+                "name": "Empty",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "synthetic-b",
+            "type": "character",
+            "name": "Character synthetic-b",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "synthetic-a",
+          "synthetic-b"
+        ],
+        "pluginCustomStorage": {
+          "syntheticPlugin": {
+            "arbitrary": null,
+            "nested": [
+              "한글",
+              0.125,
+              9007199254740991
+            ],
+            "text": "do not rewrite assets/synthetic.png substring"
+          }
+        },
+        "personas": [
+          {
+            "id": "synthetic-persona",
+            "name": "Synthetic Persona",
+            "personaPrompt": "Synthetic prompt",
+            "icon": ""
+          }
+        ],
+        "modules": [],
+        "botPresets": [],
+        "adaptiveThinkingEffort": "high",
+        "formatversion": 5
+      }
+    },
+    {
+      "id": "assign-ids-unicode",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": "캐릭터",
+            "type": "character",
+            "name": "Character 캐릭터",
+            "chats": []
+          },
+          {
+            "chaId": "캐릭터",
+            "type": "character",
+            "name": "Character 캐릭터",
+            "chats": [
+              {
+                "id": "대화"
+              },
+              {
+                "id": "대화"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "assign-ids-number-cha-id",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": 5,
+            "type": "character",
+            "name": "Character 5",
+            "chats": []
+          }
+        ]
+      },
+      "decline": "chaId"
+    },
+    {
+      "id": "assign-ids-number-chat-id",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": [
+              {
+                "id": 3
+              }
+            ]
+          }
+        ]
+      },
+      "decline": "chatId"
+    },
+    {
+      "id": "assign-ids-chats-missing",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": "a"
+          }
+        ]
+      },
+      "decline": "chats"
+    },
+    {
+      "id": "assign-ids-chat-null",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": [
+              null
+            ]
+          }
+        ]
+      },
+      "decline": "chats"
+    },
+    {
+      "id": "assign-ids-characters-object",
+      "kind": "assign-ids",
+      "database": {
+        "characters": {}
+      },
+      "decline": "characters"
+    },
+    {
+      "id": "assign-ids-character-null",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [
+          null
+        ]
+      },
+      "decline": "characters"
+    },
+    {
+      "id": "assign-ids-proto-key",
+      "kind": "assign-ids",
+      "database": {
+        "characters": [],
+        "extra": {
+          "__proto__": {
+            "polluted": true
+          },
+          "plain": 1
+        }
+      },
+      "decline": "protoKey"
+    },
+    {
+      "id": "char-order-missing",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": []
+          },
+          {
+            "chaId": "b",
+            "type": "character",
+            "name": "Character b",
+            "chats": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "char-order-null",
+      "kind": "char-order",
+      "database": {
+        "characterOrder": null,
+        "characters": [
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "char-order-full",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": []
+          },
+          {
+            "chaId": "b",
+            "type": "character",
+            "name": "Character b",
+            "chats": [],
+            "trashTime": 5
+          },
+          {
+            "chaId": "§playground",
+            "type": "character",
+            "name": "Character §playground",
+            "chats": []
+          },
+          {
+            "chaId": "c",
+            "type": "character",
+            "name": "Character c",
+            "chats": []
+          },
+          {
+            "chaId": "d",
+            "type": "character",
+            "name": "Character d",
+            "chats": []
+          },
+          {
+            "chaId": "e",
+            "type": "character",
+            "name": "Character e",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "a",
+          "b",
+          "gone",
+          null,
+          0,
+          false,
+          "",
+          {
+            "id": "empty",
+            "data": []
+          },
+          {
+            "id": "emptied",
+            "data": [
+              "gone",
+              "b"
+            ]
+          },
+          {
+            "id": "kept",
+            "data": [
+              "gone",
+              "c",
+              "gone",
+              5,
+              null
+            ]
+          },
+          "e"
+        ]
+      }
+    },
+    {
+      "id": "char-order-duplicate-ids",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          {
+            "chaId": "x",
+            "type": "character",
+            "name": "Character x",
+            "chats": []
+          },
+          {
+            "chaId": "x",
+            "type": "character",
+            "name": "Character x",
+            "chats": []
+          }
+        ],
+        "characterOrder": []
+      }
+    },
+    {
+      "id": "char-order-trashed-zero",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          {
+            "chaId": "a",
+            "type": "character",
+            "name": "Character a",
+            "chats": [],
+            "trashTime": 0
+          },
+          {
+            "chaId": "b",
+            "type": "character",
+            "name": "Character b",
+            "chats": [],
+            "trashTime": ""
+          }
+        ],
+        "characterOrder": [
+          "b"
+        ]
+      }
+    },
+    {
+      "id": "char-order-compat",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          {
+            "chaId": "synthetic-a",
+            "type": "character",
+            "name": "Character synthetic-a",
+            "chats": [
+              {
+                "id": "synthetic-chat-1",
+                "name": "Chat",
+                "message": [
+                  {
+                    "role": "user",
+                    "data": "합성 질문"
+                  },
+                  {
+                    "role": "char",
+                    "data": "합성 답변"
+                  }
+                ]
+              },
+              {
+                "id": "synthetic-chat-2",
+                "name": "Empty",
+                "message": []
+              }
+            ]
+          },
+          {
+            "chaId": "synthetic-b",
+            "type": "character",
+            "name": "Character synthetic-b",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "synthetic-a",
+          "synthetic-b"
+        ],
+        "pluginCustomStorage": {
+          "syntheticPlugin": {
+            "arbitrary": null,
+            "nested": [
+              "한글",
+              0.125,
+              9007199254740991
+            ],
+            "text": "do not rewrite assets/synthetic.png substring"
+          }
+        },
+        "personas": [
+          {
+            "id": "synthetic-persona",
+            "name": "Synthetic Persona",
+            "personaPrompt": "Synthetic prompt",
+            "icon": ""
+          }
+        ],
+        "modules": [],
+        "botPresets": [],
+        "adaptiveThinkingEffort": "high",
+        "formatversion": 5
+      }
+    },
+    {
+      "id": "char-order-unicode",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          {
+            "chaId": "캐릭터 🐿️ \ud800",
+            "type": "character",
+            "name": "Character 캐릭터 🐿️ \ud800",
+            "chats": []
+          }
+        ],
+        "characterOrder": [
+          "없음",
+          {
+            "data": [
+              "캐릭터 🐿️ \ud800"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "char-order-string",
+      "kind": "char-order",
+      "database": {
+        "characters": [],
+        "characterOrder": "abc"
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "char-order-object",
+      "kind": "char-order",
+      "database": {
+        "characters": [],
+        "characterOrder": {}
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "char-order-number-entry",
+      "kind": "char-order",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          1
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "char-order-array-entry",
+      "kind": "char-order",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          [
+            "a"
+          ]
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "char-order-folder-no-data",
+      "kind": "char-order",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          {
+            "id": "f"
+          }
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "char-order-folder-string-data",
+      "kind": "char-order",
+      "database": {
+        "characters": [],
+        "characterOrder": [
+          {
+            "data": "ab"
+          }
+        ]
+      },
+      "decline": "characterOrder"
+    },
+    {
+      "id": "char-order-cha-id-missing",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          {
+            "name": "no id"
+          }
+        ]
+      },
+      "decline": "chaId"
+    },
+    {
+      "id": "char-order-characters-missing",
+      "kind": "char-order",
+      "database": {
+        "characterOrder": []
+      },
+      "decline": "characters"
+    },
+    {
+      "id": "char-order-character-null",
+      "kind": "char-order",
+      "database": {
+        "characters": [
+          null
+        ]
+      },
+      "decline": "characters"
+    },
+    {
+      "id": "char-order-proto-key",
+      "kind": "char-order",
+      "database": {
+        "characters": [],
+        "extra": {
+          "__proto__": {
+            "polluted": true
+          },
+          "plain": 1
+        }
+      },
+      "decline": "protoKey"
+    }
+  ]
+}

@@ -16,6 +16,8 @@ export const DEVICE_MARKER_KEYS = [
     'nightlyWarned',
     'risuNestDeviceSettings',
     'risuNestStartupExclusions',
+    'risuNestNativeOllamaGeneration',
+    'risuNestNativeDisplayRender',
     'risuNestPluginSyncSettings',
     'risuNestDefaultPluginsAttempted',
     'risuNestUpdateSettings',

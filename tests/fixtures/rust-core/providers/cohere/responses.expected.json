@@ -1,0 +1,1509 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-cohere.oracle.test.ts",
+  "fixtureSha256": "51827e48f7b04c2f3955c8c3b2b89af547740c0f23f8fa56e6cfb9fe61b682db",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/globalApi.svelte.ts": "74c285e0038f8e1d033e267e1f3374fd925e1d3d73870cb97e811712e1ff2f0c",
+    "src/ts/model/types.ts": "676f450344e842cd5a4bddfbdb09cda220c351c98c07a5ab36f54b30a9441caf"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "text",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Hello there."
+        }
+      }
+    },
+    {
+      "id": "text-unicode",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "日本語 😀 \"q\" \\ \n"
+        }
+      }
+    },
+    {
+      "id": "text-whitespace-only",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": " "
+        }
+      }
+    },
+    {
+      "id": "text-with-extra-fields",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Hi"
+        }
+      }
+    },
+    {
+      "id": "text-empty-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"text\":\"\"}"
+        }
+      }
+    },
+    {
+      "id": "text-missing-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"generation_id\":\"g\"}"
+        }
+      }
+    },
+    {
+      "id": "text-null-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"text\":null}"
+        }
+      }
+    },
+    {
+      "id": "text-zero-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"text\":0}"
+        }
+      }
+    },
+    {
+      "id": "text-false-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"text\":false}"
+        }
+      }
+    },
+    {
+      "id": "data-null-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "null"
+        }
+      }
+    },
+    {
+      "id": "data-array-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "[1,2]"
+        }
+      }
+    },
+    {
+      "id": "data-string-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"text\""
+        }
+      }
+    },
+    {
+      "id": "data-number-fails",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "5"
+        }
+      }
+    },
+    {
+      "id": "data-numbers-echo",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"x\":1,\"y\":1e+21,\"z\":0.1,\"big\":12345678901234567000,\"s\":\"é\",\"t\":[1,2,{\"a\":null}]}"
+        }
+      }
+    },
+    {
+      "id": "text-bom",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Bom."
+        }
+      }
+    },
+    {
+      "id": "http-400-json",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"message\":\"invalid api token\"}"
+        }
+      }
+    },
+    {
+      "id": "http-400-with-text",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"text\":\"Looks like success\",\"message\":\"no\"}"
+        }
+      }
+    },
+    {
+      "id": "http-500-json-null",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "null"
+        }
+      }
+    },
+    {
+      "id": "http-401-text",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"SyntaxError: Unexpected token 'u', \\\"unauthorized\\\" is not valid JSON\""
+        }
+      }
+    },
+    {
+      "id": "http-500-empty",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"SyntaxError: Unexpected end of JSON input\""
+        }
+      }
+    },
+    {
+      "id": "http-500-html",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"SyntaxError: Unexpected token '<', \\\"<html>oops</html>\\\" is not valid JSON\""
+        }
+      }
+    },
+    {
+      "id": "http-200-not-json",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"SyntaxError: Unexpected token 'o', \\\"not json\\\" is not valid JSON\""
+        }
+      }
+    },
+    {
+      "id": "http-200-empty-body",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"SyntaxError: Unexpected end of JSON input\""
+        }
+      }
+    },
+    {
+      "id": "http-201-ok",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Created."
+        }
+      }
+    },
+    {
+      "id": "http-302-with-text",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"text\":\"Redirected.\"}"
+        }
+      }
+    },
+    {
+      "id": "transport-error",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"TypeError: fetch failed\""
+        }
+      }
+    },
+    {
+      "id": "http-error-long-message",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "\"SyntaxError: Unexpected token 'x', \\\"xxxxxxxxxx\\\"... is not valid JSON\""
+        }
+      }
+    },
+    {
+      "id": "text-number-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": 5
+        }
+      }
+    },
+    {
+      "id": "text-true-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": true
+        }
+      }
+    },
+    {
+      "id": "text-object-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": {
+            "a": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "text-array-declines",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "cohere-command-r",
+          "internalID": "command-r",
+          "format": 8,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "requiresAlternateRole",
+            "mustStartWithUserInput"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 7
+        },
+        "requests": [
+          {
+            "url": "https://api.cohere.com/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-cohere"
+              ]
+            ],
+            "body": "{\"message\":\"system: Be brief.\",\"chat_history\":[],\"temperature\":0.8,\"k\":40,\"p\":0.9,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"safety_mode\":\"NONE\"}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": [
+            "a"
+          ]
+        }
+      }
+    }
+  ]
+}

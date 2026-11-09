@@ -6,8 +6,6 @@ export interface LwwSchedulerDependencies {
     publish(call: LwwCall): Promise<LwwTurn>
     receive(call: LwwCall): Promise<LwwTurn>
     maintain?(call: LwwCall): Promise<void>
-    /** Checks the library format level again, failing while it still stops sync. */
-    checkFormat?(call: LwwCall): Promise<void>
     failed(error: unknown, operation: LwwOperation): void
     succeeded?(operation: LwwOperation): void
     now?(): number
@@ -21,16 +19,6 @@ export interface LwwSchedulerDependencies {
     catchingUp?(catchingUp: boolean): void
 }
 type ExplicitKind = 'publish' | 'receive' | 'manual'
-// Another device can switch the library format, so these blocks are checked again on each sync trigger.
-export const formatKinds = ['libraryFormatSwitchRequired', 'appUpdateRequired']
-export const failureKind = (error: unknown) => (error as { kind?: string; code?: string } | undefined)?.kind ?? (error as { code?: string } | undefined)?.code ?? ''
-/** Whether a failure stops the operation until recovery instead of retrying it. */
-const blocks = (error: unknown) => {
-    const failure = error as { retryable?: boolean; action?: string } | undefined
-    const kind = failureKind(error)
-    return kind !== 'clockSkew' && kind !== 'cancelled' && (failure?.retryable === false || ['reauthenticate', 'unlock-key', 'free-space', 'check-endpoint'].includes(failure?.action ?? '')
-        || ['unauthorized', 'reauthRequired', 'deviceVaultUnavailable', 'repositoryKeyUnavailable', 'localStorageFull', 'localPermissionDenied', 'storageFull', 'endpointRejected', 'corrupt', 'repositoryMismatch', ...formatKinds].includes(kind))
-}
 interface Waiting {
     kind: ExplicitKind
     promise: Promise<void>
@@ -68,10 +56,8 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     let wakeTimer: unknown
     let receiveTimer: unknown
     let maintenanceTimer: unknown
-    let formatTimer: unknown
     let inFlight: Promise<void> | undefined
     let maintenance: Promise<void> | undefined
-    let rechecking: Promise<void> | undefined
     let activeWaiting: Waiting | undefined
     let quiescence: { promise: Promise<void>; resolve(): void } | undefined
     const waiting = new Map<ExplicitKind, Waiting>()
@@ -85,53 +71,33 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
             reportedCatchingUp = catchingUp
             dependencies.catchingUp?.(catchingUp)
         }
-        const busy = !!inFlight || !!maintenance || !!rechecking || waiting.size > 0
+        const busy = !!inFlight || !!maintenance || waiting.size > 0
             || enabled && (receivePending || !hidden && dirtyVersion !== coveredVersion)
         if (busy === reportedBusy) return
         reportedBusy = busy
         dependencies.busy?.(busy)
     }
     const checkSettled = () => {
-        if (!inFlight && !maintenance && !rechecking && !waiting.size) { quiescence?.resolve(); quiescence = undefined }
+        if (!inFlight && !maintenance && !waiting.size) { quiescence?.resolve(); quiescence = undefined }
         reportBusy()
     }
     const aborted = () => new DOMException('Sync scheduling stopped', 'AbortError')
     const clearWake = () => { if (wakeTimer !== undefined) clearTimer(wakeTimer); wakeTimer = undefined }
     const clearReceive = () => { if (receiveTimer !== undefined) clearTimer(receiveTimer); receiveTimer = undefined }
     const clearMaintenance = () => { if (maintenanceTimer !== undefined) clearTimer(maintenanceTimer); maintenanceTimer = undefined }
-    const clearFormat = () => { if (formatTimer !== undefined) clearTimer(formatTimer); formatTimer = undefined }
     const hasPublish = () => dirtyVersion !== coveredVersion
     const sendDue = () => Math.max(retryAt.publish, immediate ? 0 : Math.min(lastDirty + 15_000, (firstDirty ?? now()) + 60_000))
     const rememberFailure = (error: unknown, operation: LwwOperation) => {
-        const deadline = Number((error as { retryAtMs?: string | number } | undefined)?.retryAtMs)
+        const failure = error as { kind?: string; code?: string; retryAtMs?: string | number; retryable?: boolean; action?: string }
+        const kind = failure?.kind ?? failure?.code
+        const deadline = Number(failure?.retryAtMs)
         if (Number.isFinite(deadline)) serviceRetryAt[operation] = Math.max(serviceRetryAt[operation], now() + Math.max(0, deadline - wallNow()))
         retryAt[operation] = Math.max(retryAt[operation], serviceRetryAt[operation],
             now() + (operation === 'publish' ? 15_000 : operation === 'receive' ? 20_000 : 60_000))
-        if (blocks(error)) blocked.add(operation)
+        if (kind !== 'clockSkew' && kind !== 'cancelled' && (failure?.retryable === false || ['reauthenticate', 'unlock-key', 'free-space', 'check-endpoint'].includes(failure?.action ?? '')
+            || ['unauthorized', 'reauthRequired', 'deviceVaultUnavailable', 'repositoryKeyUnavailable', 'localStorageFull', 'localPermissionDenied', 'storageFull', 'endpointRejected', 'corrupt', 'repositoryMismatch'].includes(kind ?? ''))) blocked.add(operation)
         failureByOperation.set(operation, error)
         dependencies.failed(error, operation)
-    }
-    const formatBlocks = () => [...blocked].filter(operation => formatKinds.includes(failureKind(failureByOperation.get(operation))))
-    /** Clears format blocks once the level matches; a failure that still stops sync replaces them. */
-    const checkFormat = (signal: AbortSignal): Promise<void> => {
-        if (!dependencies.checkFormat || !formatBlocks().length) return Promise.resolve()
-        if (rechecking) return rechecking
-        const captured = epoch
-        rechecking = Promise.resolve().then(() => dependencies.checkFormat!({ signal })).then(() => {
-            if (captured !== epoch) throw aborted()
-            for (const operation of formatBlocks()) {
-                blocked.delete(operation); failureByOperation.delete(operation); retryAt[operation] = serviceRetryAt[operation]
-                dependencies.succeeded?.(operation)
-            }
-        }, error => {
-            if (captured === epoch && !signal.aborted && blocks(error)) for (const operation of formatBlocks()) rememberFailure(error, operation)
-            throw error
-        }).finally(() => { rechecking = undefined; pump(); scheduleMaintenance(); checkSettled() })
-        reportBusy()
-        return rechecking
-    }
-    const recheck = () => {
-        if (enabled && !hidden && dependencies.available()) void checkFormat(lifetime.signal).catch(() => {})
     }
     const scheduleReceive = () => {
         clearReceive()
@@ -229,7 +195,6 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
             if (captured !== epoch) throw aborted()
             signal.throwIfAborted()
             if (explicit?.kind === 'manual') {
-                await checkFormat(signal)
                 await execute('publish', false, signal, captured)
                 await execute('receive', false, signal, captured)
             } else await execute(explicit?.kind ?? operation!, !explicit, signal, captured, explicit?.publish)
@@ -277,12 +242,12 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
         const item: Waiting = { kind, promise, resolve, reject, controller, publish, participants: 0, unbounded: false }
         const caller = join(item, signal)
         waiting.set(kind, item)
-        if (kind === 'manual') for (const operation of ['publish', 'receive'] as const) if (!formatBlocks().includes(operation)) blocked.delete(operation)
+        if (kind === 'manual') { blocked.delete('publish'); blocked.delete('receive') }
         pump()
         return caller
     }
     const settled = (): Promise<void> => {
-        if (!inFlight && !maintenance && !rechecking && !waiting.size) return Promise.resolve()
+        if (!inFlight && !maintenance && !waiting.size) return Promise.resolve()
         if (!quiescence) {
             let resolve!: () => void
             const promise = new Promise<void>(yes => { resolve = yes })
@@ -297,8 +262,6 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
         lastDirty = now()
         immediate ||= generationComplete
         resetListing(); pump()
-        // Edits made during a library format stop check the level again once they settle.
-        if (formatBlocks().includes('publish')) { clearFormat(); formatTimer = setTimer(() => { formatTimer = undefined; recheck() }, 2_000) }
     }
     const receiveNow = (force = false, signal?: AbortSignal) => {
         if (force) return requestExplicit('receive', signal)
@@ -311,11 +274,11 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
         enabled = true; hidden = false; receiveMore = false; epoch++; lifetime = new AbortController(); emptyListings = 0; nextDirection = 'publish'
         receivePending = true
         if (publish) { dirtyVersion++; firstDirty = now(); lastDirty = now(); immediate = true }
-        recheck(); pump(); scheduleMaintenance()
+        pump(); scheduleMaintenance()
     }
     const pauseAutomatic = () => {
         enabled = false
-        clearWake(); clearReceive(); clearMaintenance(); clearFormat()
+        clearWake(); clearReceive(); clearMaintenance()
         coveredVersion = dirtyVersion; firstDirty = undefined; immediate = false; receivePending = false; receiveMore = false; receiveBehind = false
     }
     return {
@@ -349,10 +312,10 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
         },
         resumeForeground(publish = true) {
             if (!enabled) start(publish)
-            else { hidden = false; resetListing(); if (publish) dirty(true); receivePending = true; recheck(); pump(); scheduleMaintenance() }
+            else { hidden = false; resetListing(); if (publish) dirty(true); receivePending = true; pump(); scheduleMaintenance() }
             return settled()
         },
-        conversationOpened() { resetListing(); recheck(); return receiveNow() },
+        conversationOpened() { resetListing(); return receiveNow() },
         publishNow(force = false, signal?: AbortSignal, publish?: (call: LwwCall) => Promise<LwwTurn>) {
             if (force) return requestExplicit('publish', signal, publish)
             dirty(true); return settled()

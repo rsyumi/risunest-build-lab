@@ -26,6 +26,7 @@ function tokenizer(calls: string[]) {
         return chat.content.length + 1
     }
     return {
+        prefetch: vi.fn(async () => {}),
         tokenizeChat: vi.fn(async (chat) => count(chat)),
         tokenizeChats: vi.fn(async (chats) => chats.reduce(
             (total: number, chat: any) => total + count(chat),
@@ -209,6 +210,52 @@ describe('Hypa V3 prepared history parity', () => {
     })
 })
 
+
+it.each([false, true])('counts the summaries ahead before it selects from them (experimental: %s)', async (useExperimentalImpl) => {
+    const preset = createHypaV3Preset('Summary counts', {
+        memoryTokensRatio: 0.4, maxChatsPerSummary: 100,
+        recentMemoryRatio: 1, similarMemoryRatio: 0, queryChatCount: 1,
+        preserveOrphanedMemory: false, useExperimentalImpl,
+    })
+    setDatabaseLite({ maxResponse: 128, hypaModel: 'MiniLM', hypaV3PresetId: 0, hypaV3Presets: [preset] } as never)
+    const chats = [
+        { role: 'system', content: '[Start a new chat]', memo: 'NewChat' },
+        { role: 'user', content: 'covered user', memo: 'a' },
+        { role: 'assistant', content: 'covered assistant', memo: 'b' },
+        { role: 'user', content: 'unsummarized tail', memo: 'c' },
+    ] as any[]
+    const room = {
+        id: 'chat',
+        name: 'Chat',
+        message: [],
+        hypaV3Data: {
+            summaries: [
+                { text: 'Important events', chatMemos: ['a'], isImportant: true },
+                { text: 'Later events', chatMemos: ['b'], isImportant: false },
+            ],
+        },
+    } as unknown as Chat
+    const events: string[] = []
+    const counter = {
+        prefetch: async (texts: string[]) => {
+            events.push(`prefetch ${texts.join(' | ')}`)
+        },
+        tokenizeChat: async (chat: { content: string }) => {
+            events.push(chat.content)
+            return chat.content.length + 1
+        },
+        tokenizeChats: async (chats: { content: string }[]) => chats.reduce((total, chat) => total + chat.content.length + 1, 0),
+    } as any
+
+    await hypaMemoryV3(chats, tokenTotal(chats), 4_096, room, { type: 'character', chaId: 'owner', name: 'Owner' } as character, counter)
+
+    const prefetch = events.indexOf('prefetch Important events\n\n | Later events\n\n')
+    expect(prefetch).toBeGreaterThanOrEqual(0)
+    const summaryCounts = events.flatMap((event, index) =>
+        !event.startsWith('prefetch ') && event.endsWith(' events\n\n') ? [index] : [])
+    expect(summaryCounts).toHaveLength(2)
+    expect(summaryCounts.every((index) => index > prefetch)).toBe(true)
+})
 
 it('keeps completed summaries and stops subsequent requests when a deferred summary is aborted', async () => {
     const { requestChatData } = await import('../request/request')

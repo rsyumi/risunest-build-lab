@@ -11,7 +11,6 @@ const maintenance = vi.hoisted(() => ({
     deleteNativePersistentSnapshot: vi.fn(),
     createNativePersistentSnapshot: vi.fn(),
     restoreNativePersistentSnapshot: vi.fn(),
-    restartNativeApp: vi.fn(async () => {}),
 }))
 const server = vi.hoisted(() => ({
     getServerSyncBackupInventory: vi.fn(),
@@ -46,13 +45,11 @@ vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSuppor
 import RisuNestStorageDashboard from './RisuNestStorageDashboard.svelte'
 import { assetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency.testSupport'
 import { languageEnglish } from 'src/lang/en'
-import { getDeviceSettings, updateDeviceSettings } from 'src/ts/storage/deviceSettings'
 
 const syncText = languageEnglish.risuNest.serverSync
 const stats = {
     snapshotBytes: 2 * 1024 * 1024,
     databaseBytes: 1024 * 1024,
-    databaseReclaimableBytes: 0,
     assetObjects: { count: 2, bytes: 2 * 1024 * 1024 }, assetBodies: { count: 2, bytes: 2 * 1024 * 1024 },
     missingAssetBodies: { count: 0, bytes: 0 }, inlayBodies: { count: 1, bytes: 1024 * 1024 }, assetAliases: [{ kind: 'inlay', inlayType: null, count: 1, bytes: 1024 * 1024 }], pluginStorage: { count: 1, bytes: 1024 },
     characters: { active: { count: 2, bytes: 0 }, trashedCount: 1 }, conversations: { count: 3, messageCount: 4 }, assetObjectDeletions: [],
@@ -87,36 +84,12 @@ describe('RisuNestStorageDashboard', () => {
     })
 
     it('localizes snapshot reasons without exposing unknown tokens', async () => {
-        maintenance.listNativePersistentSnapshots.mockResolvedValueOnce(['manual', 'periodic', 'data-health-repair', 'synthetic-unknown'].map((reason, index) => ({ id: `snapshot-${index}`, reason, bytes: 1, modifiedAt: 1 })))
+        maintenance.listNativePersistentSnapshots.mockResolvedValueOnce(['manual', 'periodic', 'data-health-repair', 'synthetic-unknown'].map((reason, index) => ({ id: `snapshot-${index}`, reason, bytes: 1, reclaimableBytes: 0, modifiedAt: 1 })))
         const target = setup()
         await vi.waitFor(() => expect(target.querySelectorAll('[data-storage-backup-list="snapshots"] [data-storage-backup-row]')).toHaveLength(4))
         expect(target.textContent).toContain(languageEnglish.risuNest.storage.snapshotReasons.dataHealthRepair)
         expect(target.textContent).not.toContain('synthetic-unknown')
         expect(target.textContent).not.toContain('data-health-repair')
-    })
-
-    it('stores the automatic snapshot switch and a keep count from one to eight', async () => {
-        const strings = languageEnglish.risuNest.storage
-        const target = setup()
-        const toggle = target.querySelector<HTMLInputElement>('[data-storage-setting="automatic-snapshots"] input[type="checkbox"]')!
-        const count = target.querySelector<HTMLInputElement>('[data-storage-setting="snapshot-keep-count"] input')!
-        expect(target.textContent).toContain(strings.snapshotKeepCountHelp.replace('{0}', '8'))
-        try {
-            expect(toggle.checked).toBe(true)
-            toggle.click()
-            await tick()
-            expect(getDeviceSettings().automaticSnapshotsEnabled).toBe(false)
-            for (const [typed, stored] of [['12', 8], ['0', 1], ['3', 3]] as const) {
-                count.value = typed
-                count.dispatchEvent(new Event('input', { bubbles: true }))
-                count.dispatchEvent(new Event('change', { bubbles: true }))
-                await tick()
-                expect(getDeviceSettings().snapshotKeepCount).toBe(stored)
-                expect(count.value).toBe(String(stored))
-            }
-        } finally {
-            updateDeviceSettings({ automaticSnapshotsEnabled: true, snapshotKeepCount: 8 })
-        }
     })
 
     it('describes a blocked temporary file cleanup without exposing the reason token', async () => {
@@ -129,21 +102,19 @@ describe('RisuNestStorageDashboard', () => {
 
     function setup(
         statsPromise: Promise<typeof stats> = Promise.resolve(stats),
-        snapshotsPromise: Promise<unknown[]> = Promise.resolve([
-            {
-                id: 'snapshot.db',
-                reason: 'manual',
-                bytes: 1024,
-                modifiedAt: 1,
-            },
-        ]),
     ): HTMLElement {
         maintenance.getNativePersistentStorageStats.mockImplementation(
             () => statsPromise,
         )
-        maintenance.listNativePersistentSnapshots.mockImplementation(
-            () => snapshotsPromise,
-        )
+        maintenance.listNativePersistentSnapshots.mockResolvedValue([
+            {
+                id: 'snapshot.db',
+                reason: 'manual',
+                reclaimableBytes: 0,
+                bytes: 1024,
+                modifiedAt: 1,
+            },
+        ])
         server.getServerSyncCacheUsage.mockResolvedValue({
             totalBytes: 1024 + 2048,
             cacheBytes: 1024,
@@ -282,20 +253,9 @@ describe('RisuNestStorageDashboard', () => {
         expect(target.querySelector('[data-storage-summary-placeholder]')).toBeNull()
     })
 
-    it('shows the totals while the snapshot list is still loading', async () => {
-        let resolveSnapshots: ((value: unknown[]) => void) | undefined
-        const target = setup(Promise.resolve(stats), new Promise((resolve) => { resolveSnapshots = resolve }))
-
-        await vi.waitFor(() => expect(target.querySelector('[data-storage-summary]')).not.toBeNull())
-        expect(target.querySelector('[data-storage-backup-list="snapshots"]')).toBeNull()
-
-        resolveSnapshots?.([{ id: 'snapshot.db', reason: 'manual', bytes: 1024, modifiedAt: 1 }])
-        await vi.waitFor(() => expect(target.querySelectorAll('[data-storage-backup-list="snapshots"] [data-storage-backup-row]')).toHaveLength(1))
-    })
-
     it('summarizes each backup list with its count and size and keeps delete beside the row text', async () => {
         const target = setup()
-        await vi.waitFor(() => expect(target.querySelectorAll('[data-storage-backup-list] > summary')).toHaveLength(3))
+        await vi.waitFor(() => expect(target.textContent).toContain('Snapshots'))
 
         const summaries = [...target.querySelectorAll<HTMLElement>('[data-storage-backup-list] > summary')]
         expect(summaries.map((summary) => summary.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
@@ -445,34 +405,6 @@ describe('RisuNestStorageDashboard', () => {
         expect(row.querySelector('p')?.textContent).toBe('Finds and deletes files that nothing refers to.')
     })
 
-    it('offers database compaction only when the files can shrink, and restarts after recording it', async () => {
-        const strings = languageEnglish.risuNest.storage
-        const reclaimable = 3 * 1024 * 1024
-        const order: string[] = []
-        runtime.flushPendingData.mockImplementationOnce(async () => { order.push('flush') })
-        core.invoke.mockImplementation(async (command) => {
-            order.push(command)
-            return command === 'pds_store_compaction_request' ? { kind: 'requested' } : { revision: 2 }
-        })
-        maintenance.restartNativeApp.mockImplementationOnce(async () => { order.push('restart') })
-        alerts.alertConfirm.mockResolvedValue(true)
-        const target = setup(Promise.resolve({ ...stats, databaseReclaimableBytes: reclaimable }))
-        await vi.waitFor(() => expect(target.querySelector('[data-storage-action="compact"]')).not.toBeNull())
-
-        const row = target.querySelector<HTMLElement>('[data-storage-action="compact"]')!
-        expect(row.textContent).toContain(strings.compactReclaimable.replace('{0}', '3.0 MiB'))
-        exact(row, strings.compact)!.click()
-        await vi.waitFor(() => expect(order).toContain('restart'))
-        expect(alerts.alertConfirm).toHaveBeenCalledWith(strings.compactConfirm)
-        expect(order).toEqual(['flush', 'pds_store_compaction_request', 'restart'])
-    })
-
-    it('disables database compaction when the files have no free space', async () => {
-        const target = setup()
-        await vi.waitFor(() => expect(target.querySelector('[data-storage-action="compact"]')).not.toBeNull())
-        expect(exact(target, languageEnglish.risuNest.storage.compact)?.disabled).toBe(true)
-    })
-
     it('formats large counts with locale separators', async () => {
         const target = setup(Promise.resolve({ ...stats, conversations: { count: 1200, messageCount: 15231 } }))
         await vi.waitFor(() => expect(target.textContent).toContain('Total data'))
@@ -526,7 +458,7 @@ describe('RisuNestStorageDashboard', () => {
         const target = setup()
         const selected: string[] = []
         maintenance.restoreNativePersistentSnapshot.mockImplementation(async (actions) => {
-            const chosen = await actions.choose([{ id: 'snapshot.db', reason: 'manual', bytes: 1024, modifiedAt: 1 }])
+            const chosen = await actions.choose([{ id: 'snapshot.db', reason: 'manual', reclaimableBytes: 0, bytes: 1024, modifiedAt: 1 }])
             expect(chosen).toBe('snapshot.db')
             expect(actions).not.toHaveProperty('confirm')
             expect(actions).not.toHaveProperty('restart')
@@ -556,41 +488,6 @@ describe('RisuNestStorageDashboard', () => {
         await vi.waitFor(() => expect(alerts.alertError).toHaveBeenCalledOnce())
         expect(alerts.alertError).toHaveBeenCalledWith(languageEnglish.risuNest.backup.syncUnavailable)
         expect(alerts.alertError).not.toHaveBeenCalledWith(languageEnglish.risuNest.storage.actionFailed)
-    })
-
-    const retryLater = languageEnglish.risuNest.importDialog.reasonBusy
-    const offerDataCheck = `${languageEnglish.risuNest.storage.actionFailed} ${languageEnglish.risuNest.dataHealth.openResult}`
-    it.each([
-        ['library-operation-busy', [], [retryLater]],
-        ['commit-busy', [], [retryLater]],
-        ['validation', [offerDataCheck], []],
-    ])('offers the data check only when the unused file search fails for a reason other than a busy library (%s)', async (code, confirms, errors) => {
-        const target = setup()
-        maintenance.previewNativePersistentAssetGc.mockRejectedValue({ code })
-        alerts.alertConfirm.mockResolvedValue(false)
-        await vi.waitFor(() => expect(exact(target, 'Find')).toBeDefined())
-
-        exact(target, 'Find')!.click()
-
-        await vi.waitFor(() => expect(alerts.alertConfirm.mock.calls.length + alerts.alertError.mock.calls.length).toBe(1))
-        expect(alerts.alertConfirm.mock.calls.map(([message]) => message)).toEqual(confirms)
-        expect(alerts.alertError.mock.calls.map(([message]) => message)).toEqual(errors)
-    })
-
-    it('asks for a retry when another operation holds the library as the unused files are deleted', async () => {
-        const target = setup()
-        maintenance.previewNativePersistentAssetGc.mockResolvedValue({ candidateCount: 1, candidateBytes: 1024, deletedCount: 0, deletedBytes: 0, blockers: [] })
-        core.invoke.mockRejectedValueOnce({ code: 'library-operation-busy' })
-        alerts.alertConfirm.mockResolvedValue(true)
-        await vi.waitFor(() => expect(exact(target, 'Find')).toBeDefined())
-        exact(target, 'Find')!.click()
-        await vi.waitFor(() => expect(exact(target, 'Delete now')).toBeDefined())
-
-        exact(target, 'Delete now')!.click()
-
-        await vi.waitFor(() => expect(alerts.alertError).toHaveBeenCalledExactlyOnceWith(retryLater))
-        expect(core.invoke).toHaveBeenCalledExactlyOnceWith('pds_asset_delete_orphaned_aliases', { expectedRevision: 1, owner: null })
-        expect(maintenance.executeNativePersistentAssetGc).not.toHaveBeenCalled()
     })
 
     it('marks a running action busy on its button instead of swapping the label', async () => {

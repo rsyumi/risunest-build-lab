@@ -636,9 +636,6 @@ describe('selected conversation eviction correctness corpus', () => {
             getActiveConversationSession: () => runtime.getActiveConversationSession(),
             getPersistentDataRuntime: () => runtime,
             invalidateActiveConversationSession: () => runtime.invalidateActiveConversationSession(),
-            flushPendingDataLocallyForCheckpoint: (reason: string) => runtime.flushPendingDataLocallyForCheckpoint(reason),
-            capturesImmutableCharacters: () => runtime.capturesImmutableCharacters(),
-            pendingConversationMutationDiagnostics: () => runtime.pendingConversationMutationDiagnostics(),
         }))
         // Later imports recognize the runtime's metadata-only shells only when they share its lifecycle module.
         vi.doMock('./selectedConversationLifecycle', () => selectedConversationLifecycle)
@@ -653,13 +650,7 @@ describe('selected conversation eviction correctness corpus', () => {
                 }),
             })),
         }))
-        vi.doMock('../tokenizer', () => ({
-            ChatTokenizer: class {
-                async tokenizeChat() { return 1 }
-                async tokenizeChats(chats: unknown[]) { return chats.length }
-            },
-            tokenize: vi.fn(async () => 1), tokenizeNum: vi.fn(async () => []),
-        }))
+        vi.doMock('../tokenizer', async () => (await import('../process/tests/sendChatTestHarness')).tokenizerModule())
         vi.doMock('../alert', () => ({ alertError: vi.fn(), alertToast: vi.fn() }))
         vi.doMock('../parser/chatML', () => ({ parseChatML: (value: string) => value }))
         vi.doMock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
@@ -670,16 +661,7 @@ describe('selected conversation eviction correctness corpus', () => {
             isLastCharPunctuation: () => true, trimUntilPunctuation: (value: string) => value,
             parseToggleSyntax: () => [], prebuiltAssetCommand: '',
         }))
-        vi.doMock('../process/scripts', () => ({
-            createPromptScriptOperationScope: () => ({
-                assertOwnerCurrent: vi.fn(), adoptMessageId: vi.fn(),
-                parse: (_char: unknown, value: string) => value,
-                finish: vi.fn(), finishAfterError: vi.fn(), release: vi.fn(),
-            }),
-            processScript: vi.fn(async (_char: unknown, value: string) => value),
-            processScriptFull: vi.fn(async (_char: unknown, value: string) => ({ data: value, emoChanged: false })),
-            risuChatParser: (value: string) => value, resetScriptCache: vi.fn(),
-        }))
+        vi.doMock('../process/scripts', async () => (await import('../process/tests/sendChatTestHarness')).scriptsModule())
         vi.doMock('../process/triggers', () => ({
             runTrigger: vi.fn(async (_char: unknown, mode: string, arg: { chat: Chat }) =>
                 mode === 'start' ? null : { chat: arg.chat }),

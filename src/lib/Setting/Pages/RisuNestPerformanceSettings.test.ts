@@ -3,7 +3,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 
+const platform = vi.hoisted(() => ({ isTauri: false }))
 const deviceSettings = vi.hoisted(() => ({
+    getNativeOllamaGeneration: vi.fn(() => false),
+    updateNativeOllamaGeneration: vi.fn(() => true),
     getDeviceSettings: vi.fn(() => ({
         performanceProfile: 'normal' as const,
         generationHistoryLimitEnabled: false,
@@ -15,6 +18,7 @@ const deviceSettings = vi.hoisted(() => ({
 }))
 
 vi.mock('src/ts/storage/deviceSettings', () => deviceSettings)
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: platform.isTauri ? 'tauri' : 'web', os: 'windows' })))
 
 import { language } from 'src/lang'
 import RisuNestPerformanceSettings from './RisuNestPerformanceSettings.svelte'
@@ -29,6 +33,76 @@ describe('RisuNestPerformanceSettings', () => {
         mounted = undefined
         document.body.replaceChildren()
         vi.clearAllMocks()
+        platform.isTauri = false
+    })
+
+    it('offers generating Ollama replies in the app only in the native app and stores the choice', async () => {
+        const find = (target: HTMLElement) => [...target.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
+            input.getAttribute('aria-label') === strings.nativeOllamaGeneration
+                || input.closest('label')?.textContent?.includes(strings.nativeOllamaGeneration))
+
+        const web = document.createElement('div')
+        document.body.append(web)
+        mounted = mount(RisuNestPerformanceSettings, { target: web })
+        await tick()
+        expect(find(web)).toBeUndefined()
+        expect(web.textContent).not.toContain(strings.nativeOllamaGenerationHelp)
+        await unmount(mounted)
+
+        platform.isTauri = true
+        const target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(RisuNestPerformanceSettings, { target })
+        await tick()
+        const toggle = find(target)
+        expect(toggle?.checked).toBe(false)
+        expect(target.textContent).toContain(strings.nativeOllamaGenerationHelp)
+
+        toggle!.click()
+        await tick()
+
+        expect(deviceSettings.updateNativeOllamaGeneration).toHaveBeenCalledExactlyOnceWith(true)
+        expect(deviceSettings.updateDeviceSettings).not.toHaveBeenCalled()
+    })
+
+    it('reads the opt-in again when the device settings reload', async () => {
+        platform.isTauri = true
+        let notify: (settings: unknown) => void = () => undefined
+        deviceSettings.subscribeDeviceSettings.mockImplementationOnce(((listener: typeof notify) => {
+            notify = listener
+            return () => undefined
+        }) as never)
+        const target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(RisuNestPerformanceSettings, { target })
+        await tick()
+        const find = () => [...target.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
+            input.closest('label')?.textContent?.includes(strings.nativeOllamaGeneration))
+        expect(find()?.checked).toBe(false)
+
+        deviceSettings.getNativeOllamaGeneration.mockReturnValue(true)
+        notify(deviceSettings.getDeviceSettings())
+        await tick()
+
+        expect(find()?.checked).toBe(true)
+        deviceSettings.getNativeOllamaGeneration.mockReturnValue(false)
+    })
+
+    it('shows the opt-in as off again when it could not be stored', async () => {
+        platform.isTauri = true
+        deviceSettings.updateNativeOllamaGeneration.mockReturnValueOnce(false)
+        const target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(RisuNestPerformanceSettings, { target })
+        await tick()
+        const find = () => [...target.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
+            input.closest('label')?.textContent?.includes(strings.nativeOllamaGeneration))
+
+        find()!.click()
+        await tick()
+
+        expect(deviceSettings.updateNativeOllamaGeneration).toHaveBeenCalledExactlyOnceWith(true)
+        expect(find()?.checked).toBe(false)
     })
 
     it('exposes the selected profile as a pressed button and updates it on activation', async () => {

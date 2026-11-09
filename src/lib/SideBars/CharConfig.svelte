@@ -6,7 +6,7 @@
     import type { AssetSection } from "src/ts/gallery/assetGallery";
     let galleryOwner = $state<{ id: string; section: AssetSection } | null>(null)
     import { language } from "../../lang";
-    import { tokenizeAccurate } from "../../ts/tokenizer";
+    import { tokenizeAccurateList } from "../../ts/tokenizer";
     import { getCurrentCharacter, type character } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { untrack } from 'svelte';
@@ -18,7 +18,7 @@
     import LoreBook from "./LoreBook/LoreBookSetting.svelte";
     import { alertNormal, alertRisuServiceTOS, showHypaV2Alert } from "../../ts/alert";
     import BarIcon from "./BarIcon.svelte";
-    import { selectMultipleFile, selectSingleFile } from "../../ts/util";
+    import { getAuthorNoteDefaultText, selectMultipleFile, selectSingleFile } from "../../ts/util";
     import Help from "../Others/Help.svelte";
     import { exportChar } from "src/ts/characterCards";
     import { getElevenTTSVoices, getWebSpeechTTSVoices, getVOICEVOXVoices, oaiVoices, getNovelAIVoices } from "src/ts/process/tts";
@@ -42,8 +42,6 @@
     import Toggles from "./Toggles.svelte";
     import { convertCharacterToModule } from "src/ts/interchangeability";
     import OnboardingEditor from "./OnboardingEditor.svelte";
-    import AuthorNoteInput from "./AuthorNoteInput.svelte";
-    import { effectiveAuthorNote } from "src/ts/authorNotePresets";
     import { mutatePersistentCharacterDetail } from "src/ts/storage/persistentDataRuntime.svelte";
 
     let iconRemoveMode = $state(false)
@@ -69,18 +67,26 @@
         firstMsg: string | null,
         localNote: string
     ) {
+        const fields: ('desc' | 'firstMsg' | 'localNote')[] = []
         if (desc !== null && lasttokens.desc !== desc) {
             lasttokens.desc = desc
-            tokens.desc = await tokenizeAccurate(desc)
+            fields.push('desc')
         }
         if (firstMsg !== null && lasttokens.firstMsg !== firstMsg) {
             lasttokens.firstMsg = firstMsg
-            tokens.firstMsg = await tokenizeAccurate(firstMsg)
+            fields.push('firstMsg')
         }
         if (lasttokens.localNote !== localNote) {
             lasttokens.localNote = localNote
-            tokens.localNote = await tokenizeAccurate(localNote)
+            fields.push('localNote')
         }
+        if (fields.length === 0) return
+        const texts = fields.map((field) => lasttokens[field])
+        const counts = await tokenizeAccurateList(texts)
+        // A count that resolves after a newer text for the same field is dropped.
+        fields.forEach((field, index) => {
+            if (lasttokens[field] === texts[index]) tokens[field] = counts[index]
+        })
     }
 
 
@@ -96,7 +102,7 @@
         const chara = DBState.db.characters[$selectedCharID]
         const desc = (chara as character).desc
         const firstMsg = chara.firstMessage
-        const localNote = effectiveAuthorNote(DBState.db.authorNotePresets, chara.chats[chara.chatPage])
+        const localNote = chara.chats[chara.chatPage].note
 
         untrack(() => {
             loadTokenize(desc, firstMsg, localNote)
@@ -276,7 +282,13 @@
         <span class="text-textcolor2 mb-6 text-sm">{tokens.firstMsg} {language.tokens}</span>
     {/if}
     <span class="text-textcolor">{language.authorNote} <Help key="chatNote"/></span>
-    <AuthorNoteInput />
+    <TextAreaInput
+        margin="both"
+        autocomplete="off"
+        bind:value={DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].note}
+        highlight
+        placeholder={getAuthorNoteDefaultText()}
+    />
     <span class="text-textcolor2 mb-6 text-sm">{tokens.localNote} {language.tokens}</span>
 
     {#if !$MobileGUI}

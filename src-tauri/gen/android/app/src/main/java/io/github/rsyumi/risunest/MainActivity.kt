@@ -55,7 +55,6 @@ private const val ROOT_BACK_EVENT = "risunest-root-back"
 private const val ROOT_BACK_REPLY_TIMEOUT_MILLIS = 1_000L
 private const val NATIVE_LIFECYCLE_EVENT = "risu-native-lifecycle"
 private const val OPENED_FILES_EVENT = "risu-opened-files"
-private const val START_REASON = "start"
 private const val STOP_REASON = "stop"
 private const val TRIM_MEMORY_REASON = "trim-memory"
 private const val EXIT_REASON = "exit"
@@ -326,20 +325,15 @@ private data class PendingLegacyBackupSource(
 )
 
 internal class LifecycleFlushDispatcher(
-  private val dispatch: (reason: String, trimLevel: Int?) -> Unit,
+  private val dispatch: (String) -> Unit,
 ) {
-  /** The app is on screen again; the page records it without a flush. */
-  fun onStart() {
-    dispatch(START_REASON, null)
-  }
-
   fun onStop() {
-    dispatch(STOP_REASON, null)
+    dispatch(STOP_REASON)
   }
 
   fun onTrimMemory(level: Int) {
     if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
-      dispatch(TRIM_MEMORY_REASON, level)
+      dispatch(TRIM_MEMORY_REASON)
     }
   }
 }
@@ -606,13 +600,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     )
   }
   private val mainHandler = Handler(Looper.getMainLooper())
-  private val pageKeptActive = PageKeptActivePolicy(
-    apply = ::setWebViewKeptActive,
-    keepService = { GenerationForegroundService.keepService(this) },
-    postDelayed = { task, delay -> mainHandler.postDelayed(task, delay) },
-    removeCallbacks = { task -> mainHandler.removeCallbacks(task) },
-  )
-  private val heldObserver: (Boolean) -> Unit = pageKeptActive::onHeldChanged
   private val safScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val portableSourceOwner = PortableSourceOwner()
   private val safSourcePickFlow = SafSourcePickFlow { block -> safScope.launch { block() } }
@@ -639,9 +626,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       AndroidSafAtomicPublisher,
     )
   }
-  private val safDestinationReceipts by lazy {
-    SafDestinationReceiptStore(File(filesDir, "native-file-jobs/android-saf-receipts"), AndroidSafAtomicPublisher)
-  }
   private val safDestinationPicker = registerForActivityResult(
     object : ActivityResultContracts.CreateDocument("application/octet-stream") {
       override fun createIntent(context: Context, input: String): Intent =
@@ -656,10 +640,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val legacyBackupSourcePicker = registerForActivityResult(
     ActivityResultContracts.OpenDocument(),
     ::onLegacyBackupSourceSelected,
-  )
-  private val contentSourcePicker = registerForActivityResult(
-    ActivityResultContracts.OpenMultipleDocuments(),
-    ::onDocumentSourcesSelected,
   )
   private var notificationPermissionResult: CompletableDeferred<Boolean>? = null
   private val postNotificationsPermissionLauncher = registerForActivityResult(
@@ -774,7 +754,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
     showRendererRecoveryWarning()
     diagnoseWebViewProvider()
-    GenerationForegroundService.observeHeld(heldObserver)
   }
 
   override fun recoverRenderer(webView: WebView, didCrash: Boolean): Boolean {
@@ -919,7 +898,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   override fun onStart() {
     super.onStart()
     GenerationForegroundService.setVisible(this, true)
-    lifecycleFlushDispatcher.onStart()
   }
 
   override fun onStop() {
@@ -932,7 +910,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   override fun onResume() {
     super.onResume()
-    pageKeptActive.onResumedChanged(true)
     appLock.onResume()
     rendererRestartGate.onResume()
     dispatchNotificationStateRefresh()
@@ -941,7 +918,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   override fun onPause() {
     appLock.onPause()
     rendererRestartGate.onPause()
-    pageKeptActive.onResumedChanged(false)
     super.onPause()
   }
 
@@ -1026,8 +1002,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   override fun onDestroy() {
-    // Detached first, so ending the holds below posts no release after this activity is gone.
-    GenerationForegroundService.stopObservingHeld(heldObserver)
     appLock.close()
     exitWaitDialog?.dismiss()
     exitWaitDialog = null
@@ -1066,10 +1040,9 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     super.onTrimMemory(level)
   }
 
-  private fun dispatchLifecycleFlush(reason: String, trimLevel: Int? = null) {
-    val level = trimLevel?.let { ",trimLevel:$it" } ?: ""
+  private fun dispatchLifecycleFlush(reason: String) {
     lifecycleWebView?.evaluateJavascript(
-      "window.dispatchEvent(new CustomEvent('$NATIVE_LIFECYCLE_EVENT',{detail:{reason:'$reason'$level}}));",
+      "window.dispatchEvent(new CustomEvent('$NATIVE_LIFECYCLE_EVENT',{detail:{reason:'$reason'}}));",
       null,
     )
   }
@@ -1392,10 +1365,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             importDestination = importDestination,
           )
           launchSafSourcePicker(
-            launch = {
-              if (content) contentSourcePicker.launch(arrayOf("*/*"))
-              else legacyBackupSourcePicker.launch(arrayOf("*/*"))
-            },
+            launch = { legacyBackupSourcePicker.launch(arrayOf("*/*")) },
             onFailure = {
               pendingLegacyBackupSource = null
               safSourceCancellations.remove(requestId, cancellation)
@@ -1451,11 +1421,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         var sourceKind = SafDestinationSourceKind.RISU_SAVE
         try {
           reconcileSafDestination()
-          // Recovered receipts wait for their owner without blocking a new export.
-          val pendingState = synchronized(safDestinationStateLock) {
-            loadSafDestinationState()?.takeUnless { safDestinationRendererSession.hasRecovered(it.requestId) }
-          }
-          if (reservationKind != null && pendingState != null) {
+          if (reservationKind != null && loadSafDestinationState() != null) {
             throw SafDestinationException("destination-busy", emptyList(), "Another Android SAF destination is pending")
           }
           val source = if (reservationKind != null) null else {
@@ -1492,7 +1458,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           )
           withContext(Dispatchers.IO) {
             synchronized(safDestinationStateLock) {
-              keepRecoveredSafReceipt(loadSafDestinationState(), requestId, safDestinationRendererSession, safDestinationReceipts)
               saveSafDestinationState(state)
               safDestinationRendererSession.own(requestId, rendererGeneration)
             }
@@ -1636,8 +1601,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
     fun acknowledgeExport(requestId: String): Boolean = synchronized(safDestinationStateLock) {
       if (safDestinationRendererSession.hasRecovered(requestId)) {
-        return@synchronized runCatching { safDestinationReceipts.clear(requestId) }.getOrDefault(false) &&
-          safDestinationRendererSession.acknowledge(requestId, loadSafDestinationState(), ::clearSafDestinationState)
+        return@synchronized safDestinationRendererSession.acknowledge(requestId, loadSafDestinationState(), ::clearSafDestinationState)
       }
       acknowledgeSafDestinationExport(
         requestId,
@@ -1774,12 +1738,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     lifecycleWebView?.evaluateJavascript(androidBackupSourcePickedScript(requestId, batch), null)
   }
 
-  private fun onLegacyBackupSourceSelected(uri: Uri?) = onDocumentSourcesSelected(listOfNotNull(uri))
-
-  private fun onDocumentSourcesSelected(uris: List<Uri>) {
+  private fun onLegacyBackupSourceSelected(uri: Uri?) {
     val pending = pendingLegacyBackupSource ?: return
     pendingLegacyBackupSource = null
-    if (uris.isEmpty()) {
+    if (uri == null) {
       finishLegacyBackupSourcePick(pending, SafSpoolBatch(emptyList(), emptyList()))
       return
     }
@@ -1787,23 +1749,23 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       val copyContext = currentCoroutineContext()
       val batch = try {
         val store = safSpoolStore()
-        val sources = withContext(Dispatchers.IO) {
+        val source = withContext(Dispatchers.IO) {
           store.cleanupStale()
-          uris.map { uri ->
-            val (displayName, totalBytes) = runCatching { resolveSourceMetadata(uri) }
-              .getOrElse {
-                safeSafDisplayName(uri.lastPathSegment ?: "opened-file") to null
-              }
-            contentResolverSource(uri, displayName, totalBytes)
-          }
+          val (displayName, totalBytes) = runCatching { resolveSourceMetadata(uri) }
+            .getOrElse {
+              safeSafDisplayName(uri.lastPathSegment ?: "opened-file") to null
+            }
+          contentResolverSource(uri, displayName, totalBytes)
         }
-        val (supported, unsupported) = partitionDocumentSources(sources, pending.content)
-        if (supported.isEmpty()) {
-          SafSpoolBatch(emptyList(), unsupported)
+        if (!(if (pending.content) isNativeContentSource(source.displayName, pending.importDestination) else source.displayName.endsWith(".bin", ignoreCase = true))) {
+          SafSpoolBatch(
+            emptyList(),
+            listOf(SafSpoolFailure(source.displayName, "unsupported-source")),
+          )
         } else {
           spoolOpenedFilesOnIo(
             store,
-            supported,
+            listOf(source),
             importDestination = pending.importDestination,
             isCancelled = { pending.cancellation.get() || !copyContext.isActive },
             onProgress = { progress ->
@@ -1819,7 +1781,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
                 },
               )
             },
-          ).let { spooled -> SafSpoolBatch(spooled.ready, unsupported + spooled.failures) }
+          )
         }
       } catch (error: Exception) {
         SafSpoolBatch(
@@ -2072,27 +2034,23 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   private suspend fun reconcileSafDestination() {
-    val records = withContext(Dispatchers.IO) {
+    val record = withContext(Dispatchers.IO) {
       synchronized(safDestinationStateLock) {
-        fun recover(record: SafDestinationRecord, save: (SafDestinationRecord) -> Unit) =
-          runCatching {
-            safDestinationRendererSession.reconcile(
-              record,
-              System.currentTimeMillis(),
-              save,
-              { terminal -> !terminal.exportBound || !terminal.copyStarted ||
-                prepareRecoveredRisuSaveAcknowledgement(filesDir, terminal.exportId) },
-              requiresPublicationProof = { terminal ->
-                requiresRisuSavePublicationProof(filesDir, terminal.exportId, terminal.sourceKind)
-              },
-            )
-          }.onFailure { Log.e(TAG, "Android SAF recovery failed", it) }.getOrNull()
-        runCatching { safDestinationReceipts.loadAll() }.getOrDefault(emptyList())
-          .mapNotNull { recover(it, safDestinationReceipts::save) } +
-          listOfNotNull(loadSafDestinationState()?.let { recover(it, ::saveSafDestinationState) })
+        val current = loadSafDestinationState() ?: return@synchronized null
+        runCatching {
+          safDestinationRendererSession.reconcile(
+            current,
+            System.currentTimeMillis(),
+            ::saveSafDestinationState,
+            { terminal -> !terminal.exportBound || !terminal.copyStarted ||
+              prepareRecoveredRisuSaveAcknowledgement(filesDir, terminal.exportId) },
+            ::clearSafDestinationState,
+            retainJournal = !frontendReady.isReady,
+          )
+        }.onFailure { Log.e(TAG, "Android SAF recovery failed", it) }.getOrNull()
       }
     }
-    for (record in records) dispatchSafDestination(record, destinationMessage(record))
+    record?.let { dispatchSafDestination(it, destinationMessage(it)) }
   }
 
   private suspend fun finalizeSafDestination(

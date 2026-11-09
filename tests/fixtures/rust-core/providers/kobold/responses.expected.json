@@ -1,0 +1,857 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-kobold.oracle.test.ts",
+  "fixtureSha256": "c6ec1f70de21eb117daae68e47e9fd575a521c391bdccd49841481418b1bdacf",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/process/templates/chatTemplate.ts": "d302dcdc22313a8f1961f96efe018e2fe3209daab5cf0bac6bd5fed5aca88ab7",
+    "src/ts/globalApi.svelte.ts": "153d6ecb403c35b61154860bb7bde49ddf891d4ee56400f995cec885d8b552d1",
+    "src/ts/model/modellist.ts": "1c4c97cf87d85b06d891531ef8ab65700a220840f116ba425173d0d8061033ae"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "text",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "Hello there."
+        }
+      }
+    },
+    {
+      "id": "text-unicode",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "안녕 😀\n"
+        }
+      }
+    },
+    {
+      "id": "text-empty",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": ""
+        }
+      }
+    },
+    {
+      "id": "extra-results-ignored",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "first"
+        }
+      }
+    },
+    {
+      "id": "status-201-ok",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "created"
+        }
+      }
+    },
+    {
+      "id": "text-number-declines",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": 7
+        }
+      }
+    },
+    {
+      "id": "text-missing-declines",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "resultUndefined": true
+        }
+      }
+    },
+    {
+      "id": "results-missing-throws",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of undefined (reading '0')"
+        }
+      }
+    },
+    {
+      "id": "results-empty-throws",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of undefined (reading 'text')"
+        }
+      }
+    },
+    {
+      "id": "json-null-throws",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of null (reading 'results')"
+        }
+      }
+    },
+    {
+      "id": "http-error-object",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"detail\":{\"msg\":\"boom\",\"type\":\"server\"}}",
+          "noRetry": true
+        }
+      }
+    },
+    {
+      "id": "http-error-string",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "Server busy",
+          "noRetry": true
+        }
+      }
+    },
+    {
+      "id": "http-error-array",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "[1,\"two\"]",
+          "noRetry": true
+        }
+      }
+    },
+    {
+      "id": "http-error-not-json",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "SyntaxError: Unexpected token 'B', \"Bad gateway\" is not valid JSON",
+          "noRetry": true
+        }
+      }
+    },
+    {
+      "id": "ok-not-json",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "SyntaxError: Unexpected token 'o', \"not json\" is not valid JSON",
+          "noRetry": true
+        }
+      }
+    },
+    {
+      "id": "ok-empty-body",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "SyntaxError: Unexpected end of JSON input",
+          "noRetry": true
+        }
+      }
+    },
+    {
+      "id": "transport-error",
+      "result": {
+        "model": {
+          "id": "kobold",
+          "internalID": "kobold",
+          "format": 14,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "repetition_penalty",
+            "top_k",
+            "top_a"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"http://kobold.example.test:5001/api/v1/generate\",\"body\":{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2},\"headers\":{\"content-type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "http://kobold.example.test:5001/api/v1/generate",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "content-type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>system\\nBe brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"max_length\":300,\"max_context_length\":4000,\"n\":1,\"temperature\":0.8,\"top_p\":0.9,\"rep_pen\":1.1,\"top_k\":40,\"top_a\":0.2}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "TypeError: fetch failed",
+          "noRetry": true
+        }
+      }
+    }
+  ]
+}

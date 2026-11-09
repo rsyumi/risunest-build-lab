@@ -136,6 +136,7 @@ export const nodeAppTests = [
   'src/ts/process/mcp/stdioApproval.test.ts',
   'src/ts/process/memory/hypaCacheKey.test.ts',
   'src/ts/process/memory/hypaEmbeddingCacheUse.test.ts',
+  'src/ts/process/memory/memoryPrefetch.test.ts',
   'src/ts/process/memory/taskRateLimiter.test.ts',
   'src/ts/process/nativeRegexBatch.test.ts',
   'src/ts/process/presetChain.test.ts',
@@ -145,6 +146,7 @@ export const nodeAppTests = [
   'src/ts/process/regexWorkerClient.test.ts',
   'src/ts/process/request/anthropic.bedrock.test.ts',
   'src/ts/process/request/openAI/requests.responses.test.ts',
+  'src/ts/process/request/request.novelai.test.ts',
   'src/ts/process/request/request.ollama.test.ts',
   'src/ts/process/request/tests/additionalParams.test.ts',
   'src/ts/process/streamingDisplayScheduler.test.ts',
@@ -194,6 +196,7 @@ export const nodeAppTests = [
   'src/ts/storage/conversationBranchJobs.test.ts',
   'src/ts/storage/conversationHistoryOperation.test.ts',
   'src/ts/storage/conversationInsertPages.test.ts',
+  'src/ts/storage/conversationJournalRebase.test.ts',
   'src/ts/storage/dataHealth.test.ts',
   'src/ts/storage/dataHealthModel.test.ts',
   'src/ts/storage/dataHealthNames.test.ts',
@@ -227,7 +230,10 @@ export const nodeAppTests = [
   'src/ts/storage/nativeFileTaxonomyGolden.test.ts',
   'src/ts/storage/nativeJpegAssetImport.test.ts',
   'src/ts/storage/nativeMediaIpc.test.ts',
+  'src/ts/storage/nativeModuleFileRoute.test.ts',
   'src/ts/storage/nativeModuleRisumExportRoute.test.ts',
+  'src/ts/storage/nativePresetImportRoute.test.ts',
+  'src/ts/storage/nativePresetExportRoute.test.ts',
   'src/ts/storage/nativeOfficialPublicationUpload.test.ts',
   'src/ts/storage/nativePaths.test.ts',
   'src/ts/storage/nativePersistenceValue.test.ts',
@@ -331,6 +337,7 @@ export const nodeAppTests = [
   'src/ts/storage/workingSetResidency.test.ts',
   'src/ts/toggleBindings.test.ts',
   'src/ts/tokenizer/nativeTokenizer.test.ts',
+  'src/ts/tokenizer/nativeTokenizerCoalescer.test.ts',
   'src/ts/tokenizer/nativeTokenizerCorpus.test.ts',
   'src/ts/tokenizer/nativeTokenizerProduction.test.ts',
   'src/ts/translator/presets.test.ts',
@@ -375,7 +382,7 @@ export function ownerOf(path) {
   if (!isTestEntry(path)) return null
   if (nodeTestExceptions.includes(path)
     || (path.endsWith('.node-test.mjs') && ['tests', 'benchmarks'].some(root => under(path, root)))) {
-    return under(path, 'benchmarks') ? 'harness-node' : 'node'
+    return under(path, 'benchmarks') || under(path, 'tests/native/execution-profile') || under(path, 'tests/native/ollama-route') ? 'harness-node' : 'node'
   }
   if (under(path, 'tests/browser')) return 'browser'
   if (under(path, 'tests/native')) return 'native'
@@ -402,6 +409,13 @@ export async function discoverTestEntries(root, relative = '') {
     }
   }
   return files.sort()
+}
+
+export async function discoverNodeTestEntries(root, harness = false) {
+  const roots = harness ? ['benchmarks', 'tests/native/execution-profile', 'tests/native/ollama-route'] : ['tests']
+  const files = []
+  for (const directory of roots) files.push(...await discoverTestEntries(root, directory))
+  return files
 }
 
 export function selectNodeTests(files, owner = 'node') {

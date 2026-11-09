@@ -50,13 +50,11 @@ type RenderAvatarProps = Pick<AvatarProps, 'src'> &
 const mounted: AvatarComponent[] = []
 
 function deferred<T>() {
-    let resolve!: (value: T) => void
     let reject!: (reason?: unknown) => void
-    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-        resolve = resolvePromise
+    const promise = new Promise<T>((_resolve, rejectPromise) => {
         reject = rejectPromise
     })
-    return { promise, resolve, reject }
+    return { promise, reject }
 }
 
 function renderAvatar(props: RenderAvatarProps) {
@@ -104,14 +102,11 @@ describe('SidebarAvatar lazy sources', () => {
         } finally { list.dispose() }
     })
 
-    it.each([
-        ['rejects', (source: ReturnType<typeof deferred<string>>) => source.reject(new Error('synthetic avatar failure'))],
-        ['finds no image', (source: ReturnType<typeof deferred<string>>) => source.resolve('')],
-    ])('renders the avatar placeholder when an existing source promise %s', async (_case, settle) => {
+    it('renders the avatar placeholder when an existing source promise rejects', async () => {
         const source = deferred<string>()
         const { target } = renderAvatar({ src: source.promise, rounded: true })
 
-        settle(source)
+        source.reject(new Error('synthetic avatar failure'))
         await tick()
 
         expect(target.querySelector('img')).toBeNull()

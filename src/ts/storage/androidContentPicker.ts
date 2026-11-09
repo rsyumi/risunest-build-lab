@@ -1,11 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
 import {
-    AndroidSafSourceError,
-    pickAndroidContentSources,
+    pickAndroidContentSource,
     type AndroidSafJavascriptBridge,
     type AndroidSpoolReady,
 } from './androidSafBridge'
-import { importContentBatch } from './contentImportBatch'
 import {
     runSharedNativeFileOperation,
     type SharedNativeFileOperationContext,
@@ -19,9 +17,16 @@ export function importAndroidContentFromPicker(
         'import',
         'content-picker',
         async (context) => {
-            const picked = await pickAndroidContentSources({
+            let displayName = ''
+            let sourceBytes = 0
+            const source = await pickAndroidContentSource({
                 destination,
                 signal: context.signal,
+                onSource: (file) => {
+                    displayName = file.displayName
+                    sourceBytes = file.bytes
+                    context.setSource({ name: displayName, bytes: file.bytes })
+                },
                 onProgress: (progress) => {
                     // Copying starts once the picker returns, so the copy is the first protected work.
                     context.protect()
@@ -38,37 +43,21 @@ export function importAndroidContentFromPicker(
                     )
                 },
             })
-            if (!picked) return null
+            if (!source || source.type !== 'androidSpool') return null
             context.protect()
-            return importContentBatch(
-                context,
-                picked.sources,
-                (source) => ({ name: source.displayName, bytes: source.bytes }),
-                (source) => consumeAndroidContentSpool(
-                    { ...source, importDestination: destination },
-                    destination,
-                    context,
-                ),
+            return consumeAndroidContentSpool(
                 {
-                    failures: picked.failures.map((failure) => ({
-                        name: failure.displayName,
-                        error: new AndroidSafSourceError(failure.code, `${failure.displayName}: ${failure.code}`),
-                    })),
-                    releaseUnstarted: (source) => discardContentSpool(source.token),
+                    token: source.token,
+                    displayName,
+                    bytes: sourceBytes,
+                    importDestination: destination,
                 },
+                destination,
+                context,
             )
         },
         { presentation: 'dialog', format: 'content', protectAfterPicker: true },
     )
-}
-
-async function discardContentSpool(token: string): Promise<void> {
-    const bridge = (
-        window as Window & {
-            RisuSafBridge?: AndroidSafJavascriptBridge
-        }
-    ).RisuSafBridge
-    await bridge?.discardSource?.(token)
 }
 
 export function importReplayedAndroidContentSpool(
@@ -118,7 +107,8 @@ async function consumeAndroidContentSpool(
             )
             if (destination === 'module' || moduleJson) {
                 const { importModuleData } = await import('../process/modules')
-                return await importModuleData({ name: displayName, data, ...(parsedJson && { parsedJson }) }) ? 'module' : null
+                await importModuleData({ name: displayName, data, ...(parsedJson && { parsedJson }) })
+                return 'module'
             }
             const { importCharacterProcess } = await import('../characterCards')
             const { getDatabase } = await import('./database.svelte')
@@ -152,6 +142,13 @@ async function consumeAndroidContentSpool(
         return result.kind === 'imported' ? result.value : null
     } finally {
         // A native job consumes the spool. Metadata-only imports release their ready spool here.
-        if (/\.(json|lorebook)$/i.test(displayName)) await discardContentSpool(source.token)
+        if (/\.(json|lorebook)$/i.test(displayName)) {
+            const bridge = (
+                window as Window & {
+                    RisuSafBridge?: AndroidSafJavascriptBridge
+                }
+            ).RisuSafBridge
+            await bridge?.discardSource?.(source.token)
+        }
     }
 }

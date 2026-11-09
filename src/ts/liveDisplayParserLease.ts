@@ -4,7 +4,7 @@ import {
     planChatParserHistory,
     type ChatParserHistoryClassificationInput,
 } from './chatParserHistory'
-import { captureRevisionAdvance, collectLiveChatParserUnsafeDependencies } from './selectedConversationLiveParserProjection'
+import { collectLiveChatParserUnsafeDependencies } from './selectedConversationLiveParserProjection'
 import {
     getCurrentCharacter,
     getCurrentChat,
@@ -211,7 +211,6 @@ async function prepareLiveDisplayParserProjection(inputs: LiveDisplayParserInput
     let source = runtime.getActiveConversationViewportSource()
     let version = source?.snapshot().version
     let historyVersion = source?.snapshot().historyVersion
-    const revisionAdvanced = captureRevisionAdvance(runtime, target)
     const historyDependencies = new CbsHistoryDependencies()
     let completeLease: Awaited<ReturnType<typeof runtime.acquireCompleteConversation>> | undefined
     let released = false
@@ -314,7 +313,7 @@ async function prepareLiveDisplayParserProjection(inputs: LiveDisplayParserInput
                 // A later pass can depend on a row that changed before it was read,
                 // which selection updates skipped, so the owner has to prepare again.
                 // Notify after this parse call stack, which may be inside a derived.
-                if (!released && !signal.aborted && (historyChanged() || revisionAdvanced())) queueMicrotask(() => {
+                if (!released && !signal.aborted && historyChanged()) queueMicrotask(() => {
                     if (!released && !signal.aborted) onStale?.()
                 })
                 throw error
@@ -323,13 +322,7 @@ async function prepareLiveDisplayParserProjection(inputs: LiveDisplayParserInput
         return { release, projection: { kind: 'bounded', characterId: target.characterId, conversationId: target.conversationId,
             revision: target.storeRevision, totalMessages, chatID, projectedChatID: chatID, historyOffset: 0, messages: [],
             parsedSource, context: { ...context, parserContext: { ...context.parserContext, historyAccess, prepareHistory } } } }
-    } catch (error) {
-        if (!signal.aborted && (historyChanged() || revisionAdvanced())) queueMicrotask(() => {
-            if (!signal.aborted) onStale?.()
-        })
-        release()
-        throw error
-    }
+    } catch (error) { release(); throw error }
 }
 
 export function captureLiveDisplayParserSelection(): string {

@@ -1,15 +1,15 @@
 import type { PluginStorageWriteCheck } from '../plugins/pluginStorageProtection'
 import { generatingConversations } from './generatingConversationRegistry'
 import type { LwwStageReceive, LwwApplyResult } from './persistentDataStore'
+import type { NativeGenerationPort } from './nativeGenerationPort'
 import { flushPersistentIdentityEdits, derivePersistentIdentityMirrors } from './persistentIdentityHooks'
 import { applyReceivedDisplaySettings } from '../gui/receivedDisplaySettings'
 import { isConversationStreaming } from './streamingConversationRegistry'
 import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
 import { isTauri } from '../platform'
 import { restoreStreamingConversationState } from './streamingConversationRegistry'
-import { fillLorebookText } from './lorebookText'
 import { derived, get, readonly, writable } from 'svelte/store'
-import { doingChat } from '../process/generationState'
+import { doingChat, isNativeGenerationNavigationAllowed } from '../process/generationState'
 import { ReloadGUIPointer, selectedCharID, selIdState } from '../stores.svelte'
 import type { ActiveConversationSession } from './activeConversationSession'
 import type {
@@ -21,7 +21,7 @@ import type {
     WindowedConversationMutationController,
 } from './activeWorkingSet.svelte'
 import type { ConversationViewportSource } from '../conversationViewportSource'
-import type { Chat, Database, botPreset, character, loreBook } from './database.svelte'
+import type { Chat, Database, botPreset, character } from './database.svelte'
 import { fillRootFieldDefaults, getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
 import { getEffectivePresetOverride } from './effectiveIdentityState'
 import { prepareDatabaseForPersistence, preparePersistentRootForWorkingSet } from './databasePreparation'
@@ -34,7 +34,6 @@ import type {
 } from './persistentDataStore'
 import type {
     CharacterAdditionRequest,
-    CharacterDetailFieldsMutation,
     PersistentCharacterDetailMutation,
     PersistentCompleteCharacterMutation,
     PersistentCompleteCharacterUpsert,
@@ -124,16 +123,6 @@ function carryPresetOverride(id: string, readPreset?: (id: string) => Promise<{ 
         if (!isLoadedPreset(current.botPresets[index])) current.botPresets[index] = value.value
         setEffectivePresetOverride(id, current)
     }).catch((error) => productionConfiguration.onBackgroundError?.(error))
-}
-
-/// Every character the runtime installs takes its streaming state from this
-/// document's generations, and lorebook text in the shape its readers expect.
-function prepareResidentCharacter(character: { globalLore?: loreBook[], chats: Chat[] }): void {
-    fillLorebookText(character.globalLore)
-    for (const chat of character.chats) {
-        restoreStreamingConversationState(chat)
-        fillLorebookText(chat.localLore)
-    }
 }
 
 export function createProductionStateAdapter(options: {
@@ -239,9 +228,10 @@ export function createProductionStateAdapter(options: {
                 forceScalableProjection,
             ) ?? database
             if (isTauri) replacement.account = getDatabase().account
+            for (const character of replacement.characters) {
+                for (const chat of character.chats) restoreStreamingConversationState(chat)
+            }
             setDatabase(replacement)
-            // Loading clears every streaming flag, so running generations restore theirs afterwards.
-            for (const character of getDatabase().characters) prepareResidentCharacter(character)
             notifyPluginStorageAuthorityReplacement()
             restoreStableWorkingSetSelection(
                 replacement,
@@ -318,7 +308,6 @@ export function createProductionStateAdapter(options: {
             if (index < 0) return
             workingSetResidency.markCharacterHydrated(character.chaId)
             workingSetResidency.reconcileConversationResidency(character)
-            prepareResidentCharacter(character)
             database.characters[index] = carryCatalogCharacterMetadata(database.characters[index], character)
             selectedCharID.set(index)
         },
@@ -339,7 +328,6 @@ export function createProductionStateAdapter(options: {
             )
             if (conversationIndex < 0) return
             if (!nextCharacter) character.chats[conversationIndex] = conversation
-            prepareResidentCharacter(character)
             character.chatPage = conversationIndex
             database.characters[characterIndex] = carryCatalogCharacterMetadata(database.characters[characterIndex], character)
             workingSetResidency.reconcileConversationResidency(character)
@@ -440,7 +428,7 @@ export function createProductionStateAdapter(options: {
         },
         conversationViewportRowBudget: getRuntimePerformanceBudgets().chatMountedMessageBudget,
         canActivateWorkingSet() {
-            return !get(doingChat)
+            return !get(doingChat) || isNativeGenerationNavigationAllowed()
         },
         canDeactivateWorkingSet() {
             return !get(doingChat)
@@ -465,6 +453,8 @@ export interface ProductionRuntimeConfiguration {
     onLocalRevision?: (revision: DataRevision) => void
     onFlushPromise?: (promise: Promise<void> | null) => void
     onBackgroundError?: (error: unknown) => void
+    /** The native generation commands; absent where the build has none. */
+    nativeGeneration?: NativeGenerationPort | null
     projectWorkingSet?(
         database: Database,
         selectedCharacterId: string | null,
@@ -507,6 +497,7 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
             },
             onFlushPromise: (promise) => productionConfiguration.onFlushPromise?.(promise),
             onBackgroundError: (error) => productionConfiguration.onBackgroundError?.(error),
+            getNativeGenerationPort: () => productionConfiguration.nativeGeneration ?? null,
             onLocalSaveFailure: (error) => localSaveFailure.set(error),
             onWorkingSetRefreshRequired: (revision) => workingSetRefreshRevision.set(revision),
             onDestructiveReplacementFenceChanged: (active) => destructiveReplacementActive.set(active),
@@ -549,12 +540,6 @@ export const flushPendingData = (reason: string): Promise<void> =>
     getPersistentDataRuntime().flushPendingData(reason)
 export const flushPendingDataLocally = (reason: string): Promise<void> =>
     getPersistentDataRuntime().flushPendingDataLocally(reason)
-export const flushPendingDataLocallyForCheckpoint = (reason: string): Promise<boolean> =>
-    getPersistentDataRuntime().flushPendingDataLocallyForCheckpoint(reason)
-export const capturesImmutableCharacters = (): boolean =>
-    getPersistentDataRuntime().capturesImmutableCharacters()
-export const pendingConversationMutationDiagnostics = (): { pendingEvents: number; unacknowledgedMs?: number } =>
-    getPersistentDataRuntime().pendingConversationMutationDiagnostics()
 export const acknowledgeGenerationCompletion = async (expectedAuthorityEpoch?: number): Promise<void> => {
     const runtime = getPersistentDataRuntime()
     const authorityEpoch = expectedAuthorityEpoch ?? runtime.getStorageAuthorityEpoch()
@@ -683,25 +668,6 @@ export const mutatePersistentCharacterDetail = (
     characterId,
     reason,
     mutate,
-)
-/**
- * Edits fields of a character's own record (outside its chats) without reading any of its
- * conversations, then writes the stored fields to the in-memory character, except fields edited
- * in memory meanwhile. Resolves false when the store holds no such character.
- */
-export const mutateCharacterDetailFields = (
-    characterId: string,
-    reason: string,
-    mutate: CharacterDetailFieldsMutation,
-): Promise<boolean> => getPersistentDataRuntime().mutateCharacterDetailFields(
-    characterId,
-    reason,
-    mutate,
-    () => {
-        const current = getDatabase().characters.find((value) => value.chaId === characterId)
-        // A stub holds only catalog fields; it takes the rest from the store when it is loaded.
-        return current && !isWorkingSetCharacterStub(current) ? current : undefined
-    },
 )
 export const deletePersistentCharacter = (
     characterId: string,
@@ -838,6 +804,7 @@ export const hasPendingOfficialPublication = (): boolean =>
 
 export const getPersistentRevision = (): DataRevision => getPersistentDataRuntime().revision
 export const applyPersistentLwwReceive = (request: LwwStageReceive): Promise<LwwApplyResult> => getPersistentDataRuntime().applyLwwReceive(request)
+export const applyPersistentStoredLwwReceive: PersistentDataRuntime['applyStoredLwwReceive'] = (request, apply) => getPersistentDataRuntime().applyStoredLwwReceive(request, apply)
 export const commitPersistentUnitIntent: PersistentDataRuntime['commitPersistentUnitIntent'] = (reason, mutations, conversations, wholeMessages, projectionObserver, check) =>
     getPersistentDataRuntime().commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages, projectionObserver, check)
 export const commitPreparedUnitIntent: PersistentDataRuntime['commitPreparedUnitIntent'] = (reason, prepare) =>

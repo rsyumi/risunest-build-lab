@@ -94,7 +94,6 @@ fn seeded() -> (tempfile::TempDir, Store, Device, Vec<u8>, Vec<u8>) {
     let credential = store.add_device().unwrap();
     let device = Device {
         id: credential.device_id,
-        format_level: None,
     };
     let inline = b"synthetic inline control".to_vec();
     let file = vec![17; 65_537];
@@ -819,7 +818,6 @@ fn actual_inline_sql_with_no_root_and_unattributed_upload_sha_fail_closed() {
     let credential = store.add_device().unwrap();
     let device = Device {
         id: credential.device_id,
-        format_level: None,
     };
     let body = vec![59; 65_541];
     let hash = risunest_sync_wire::hash(&body);

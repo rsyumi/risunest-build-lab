@@ -3,6 +3,7 @@ import { get, writable } from 'svelte/store'
 
 const live = vi.hoisted(() => ({
     session: null as import('../storage/activeConversationSession').ActiveConversationSession | null,
+    deferTokenCounts: false,
 }))
 
 vi.mock('../parser/chatVar.svelte', () => ({
@@ -17,8 +18,9 @@ vi.mock('../stores.svelte', () => ({
     ScriptDisplayRefreshPointer: writable(0),
 }))
 
-vi.mock('../tokenizer', () => ({
+vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')).tokenizerModule({
     tokenize: vi.fn(async (text: string) => text.length),
+    deferChatCounts: () => live.deferTokenCounts,
 }))
 
 vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
@@ -139,6 +141,7 @@ async function activePrompts() {
 beforeEach(() => {
     vi.restoreAllMocks()
     live.session = null
+    live.deferTokenCounts = false
 })
 
 describe('loadLoreBookV3Prompt characterization', () => {
@@ -188,7 +191,8 @@ describe('loadLoreBookV3Prompt characterization', () => {
         await expect(activePrompts()).resolves.toEqual(['recursive', 'beta'])
     })
 
-    test('applies priority before token budget and insertion order afterward', async () => {
+    test.each([false, true])('applies priority before token budget and insertion order afterward (counted after the loop: %s)', async (deferred) => {
+        live.deferTokenCounts = deferred
         setLorebook(
             [
                 { key: 'alpha', content: '@@priority 10\nAAAA', insertorder: 1 },
@@ -295,6 +299,34 @@ describe('loadLoreBookV3Prompt characterization', () => {
         expect(session.version).toBe(2)
         expect(session.readChatVariable('__internal_ka_flagged')).toBe('true')
         expect(session.readChatVariable('__internal_da_flagged')).toBe('true')
+    })
+
+    test('sets no match flag for an entry whose count fails while counts are deferred', async () => {
+        live.deferTokenCounts = true
+        setLorebook(
+            [{
+                key: 'alpha',
+                content: '@@keep_activate_after_match\n@@dont_activate_after_match\nflagged',
+                id: 'flagged',
+            }],
+            [{ role: 'user', data: 'alpha' }],
+        )
+        const conversation = DBState.db.characters[0].chats[0]
+        DBState.db.characters[0].chaId = 'character-test'
+        conversation.id = 'conversation-test'
+        const session = new ActiveConversationSession({
+            characterId: 'character-test',
+            conversationId: 'conversation-test',
+            conversation,
+            storeRevision: 0,
+        })
+        live.session = session
+        const { tokenize } = await import('../tokenizer')
+        vi.mocked(tokenize).mockRejectedValueOnce(new Error('synthetic count failure'))
+
+        await expect(activePrompts()).rejects.toThrow('synthetic count failure')
+        expect(session.readChatVariable('__internal_ka_flagged')).toBeUndefined()
+        expect(session.readChatVariable('__internal_da_flagged')).toBeUndefined()
     })
 
     test.each([true, false])('does not carry match flags from an earlier entry (activated: %s)', async (matched) => {

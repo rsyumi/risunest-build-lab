@@ -1,0 +1,287 @@
+{
+  "rows": [
+    {
+      "role": "user",
+      "data": "first",
+      "chatId": "one"
+    },
+    {
+      "role": null,
+      "data": {
+        "z": 1,
+        "2": "two",
+        "1": "one",
+        "01": false,
+        "a": [
+          null,
+          true,
+          "a\u0000b",
+          "😀"
+        ],
+        "wide": 9007199254740993,
+        "tiny": 1e-07,
+        "big": 1e+21,
+        "minusZero": -0.0
+      },
+      "chatId": null,
+      "time": null
+    },
+    {
+      "role": false,
+      "data": [
+        1,
+        false,
+        null
+      ],
+      "chatId": {
+        "nested": true
+      },
+      "time": {
+        "x": 2
+      }
+    },
+    {}
+  ],
+  "cases": [
+    {
+      "name": "single raw projection",
+      "source": "function run(id) return getChatMain(id,0) end",
+      "expected": "{\"role\":\"user\",\"data\":\"first\",\"time\":0}"
+    },
+    {
+      "name": "full raw projection",
+      "source": "function run(id) return getFullChatMain(id) end",
+      "expected": "[{\"role\":\"user\",\"data\":\"first\",\"chatId\":\"one\",\"time\":0},{\"role\":null,\"data\":{\"1\":\"one\",\"2\":\"two\",\"z\":1,\"01\":false,\"a\":[null,true,\"a\\u0000b\",\"😀\"],\"wide\":9007199254740992,\"tiny\":1e-7,\"big\":1e+21,\"minusZero\":0},\"chatId\":null,\"time\":0},{\"role\":false,\"data\":[1,false,null],\"chatId\":{\"nested\":true},\"time\":{\"x\":2}},{\"time\":0}]"
+    },
+    {
+      "name": "missing and null",
+      "source": "function run(id) assert(getChat(id,99)==nil); assert(getChat(id,1).role==nil); assert(getChat(id,3).data==nil); return getChatMain(id,3) end",
+      "expected": "{\"time\":0}"
+    },
+    {
+      "name": "fresh recursive decoded copies",
+      "source": "function run(id) local a=getChat(id,1); a.data.a[2]='changed'; a.data.z=99; local b=getChat(id,1); assert(b.data.z==1); return tostring(b.data.a[2]) end",
+      "expected": "true"
+    },
+    {
+      "name": "state null holes unicode and changed arity",
+      "source": "function run(id) assert(getState(id,'missing')==nil); assert(select('#',setState(id,'value',{7,false,'a'..string.char(0)..'b','😀'}))==0); local v=getState(id,'value'); assert(v[3]=='a'..string.char(0)..'b' and v[4]=='😀'); assert(select('#',setStateChanged(id,'value',{7,false,'a'..string.char(0)..'b','😀'}))==0); assert(setStateChanged(id,'changed',true)==true); return getChatVar(id,'__value') end",
+      "expected": "[7,false,\"a\\u0000b\",\"😀\"]",
+      "variables": {
+        "__value": "[7,false,\"a\\u0000b\",\"😀\"]",
+        "__changed": "true"
+      }
+    },
+    {
+      "name": "partial state errors",
+      "source": "function run(id) setState(id,'before',true); local cycle={}; cycle.self=cycle; assert(not pcall(setState,id,'bad',cycle)); assert(not pcall(setState,id,'bad',0/0)); return getChatVar(id,'__before') end",
+      "expected": "true",
+      "variables": {
+        "__before": "true"
+      },
+      "absentVariables": [
+        "__bad"
+      ]
+    },
+    {
+      "name": "lexical decoder replacement",
+      "source": "decodeJSON=function(_) return 'lexical' end; function run(id) return getState(id,'x')..':'..getChat(id,0) end",
+      "expected": "lexical:lexical"
+    },
+    {
+      "name": "global decoder replacement",
+      "source": "function run(id) getChat(id,0); json.decode=function(_) return 'override' end; return getChat(id,0) end",
+      "expected": "override"
+    },
+    {
+      "name": "decoder dependencies remain observable",
+      "source": "function run(id) setChatVar(id,'__key','\"\\\\u0061\"'); local first=getState(id,'key'); local old=string.char; string.char=function() return 'changed' end; local second=getState(id,'key'); string.char=old; return first..':'..second..':'..getState(id,'key') end",
+      "expected": "a:changed:a"
+    },
+    {
+      "name": "raw NUL key truncation",
+      "source": "function run(id) setChatVar(id,'a'..string.char(0)..'suffix','yes'); return getChatVar(id,'a') end",
+      "expected": "yes",
+      "variables": {
+        "a": "yes"
+      }
+    },
+    {
+      "name": "discarded function collision after both key passes",
+      "source": "function run(id) local t={}; local order={}; local n=0; local function key() return setmetatable({}, {__tostring=function(self) n=n+1; if n<=2 then order[n]=self end; if n==2 then t[order[1]]=function() end; t[order[2]]=2 end; return 'same' end}) end; t[key()]=0; t[key()]=0; assert(#getRecentChats(id,t)==4 and n==4); return true end",
+      "expected": true
+    },
+    {
+      "name": "state names retain Lua concatenation",
+      "source": "function run(id) setState(id,7,'number'); local name=setmetatable({}, {__concat=function(prefix,_) assert(prefix=='__'); return '__custom' end}); setState(id,name,true); return getState(id,7)..':'..tostring(getState(id,name)) end",
+      "expected": "number:true",
+      "variables": {
+        "__7": "\"number\"",
+        "__custom": "true"
+      }
+    }
+  ],
+  "recent": [
+    {
+      "name": "missing",
+      "argument": "",
+      "expected": 0
+    },
+    {
+      "name": "nil",
+      "argument": "nil",
+      "expected": 0
+    },
+    {
+      "name": "false",
+      "argument": "false",
+      "expected": 0
+    },
+    {
+      "name": "true",
+      "argument": "true",
+      "expected": 1
+    },
+    {
+      "name": "numeric NaN",
+      "argument": "0/0",
+      "expected": 0
+    },
+    {
+      "name": "negative zero",
+      "argument": "-0.0",
+      "expected": 0
+    },
+    {
+      "name": "fraction",
+      "argument": "2.9",
+      "expected": 2
+    },
+    {
+      "name": "negative",
+      "argument": "-2",
+      "expected": 0
+    },
+    {
+      "name": "positive infinity",
+      "argument": "math.huge",
+      "expected": 4
+    },
+    {
+      "name": "negative infinity",
+      "argument": "-math.huge",
+      "expected": 0
+    },
+    {
+      "name": "empty text",
+      "argument": "''",
+      "expected": 0
+    },
+    {
+      "name": "space text",
+      "argument": "'  '",
+      "expected": 0
+    },
+    {
+      "name": "bad text",
+      "argument": "'not-a-number'",
+      "expected": 4
+    },
+    {
+      "name": "exponent",
+      "argument": "' +2e0 '",
+      "expected": 2
+    },
+    {
+      "name": "hex",
+      "argument": "'0x2'",
+      "expected": 2
+    },
+    {
+      "name": "binary",
+      "argument": "'0b10'",
+      "expected": 2
+    },
+    {
+      "name": "octal",
+      "argument": "'0o2'",
+      "expected": 2
+    },
+    {
+      "name": "invalid signed radix",
+      "argument": "'-0x2'",
+      "expected": 4
+    },
+    {
+      "name": "empty object",
+      "argument": "{}",
+      "expected": 4
+    },
+    {
+      "name": "array",
+      "argument": "{'2'}",
+      "expected": 2
+    },
+    {
+      "name": "nested array",
+      "argument": "{{'2'}}",
+      "expected": 2
+    },
+    {
+      "name": "false array",
+      "argument": "{false}",
+      "expected": 4
+    },
+    {
+      "name": "null-like empty nested",
+      "argument": "{{}}",
+      "expected": 4
+    }
+  ],
+  "knownStrings": [
+    {
+      "name": "trailing two-byte NUL",
+      "expression": "string.char(194)",
+      "expected": 128
+    },
+    {
+      "name": "trailing three-byte NUL",
+      "expression": "string.char(226,130)",
+      "expected": 8320
+    },
+    {
+      "name": "owned embedded NUL continuation",
+      "expression": "string.char(226,0,130)",
+      "expected": 8194
+    },
+    {
+      "name": "long replacement",
+      "expression": "string.rep('x',17)..string.char(255)",
+      "expected": null
+    }
+  ],
+  "unknownTails": [
+    {
+      "bytes": [
+        226
+      ],
+      "requiredIndex": 2,
+      "rawLength": 1
+    },
+    {
+      "bytes": [
+        128
+      ],
+      "requiredIndex": 3,
+      "rawLength": 1
+    },
+    {
+      "bytes": [
+        240,
+        159
+      ],
+      "requiredIndex": 3,
+      "rawLength": 2
+    }
+  ]
+}

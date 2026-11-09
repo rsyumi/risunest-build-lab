@@ -1,3 +1,5 @@
+import { ConversationJournalConflictError } from './conversationJournalRebase'
+import { canonicalJson } from './saveCoordinatorHelpers'
 import type { Chat, Database, Message, character } from './database.svelte'
 import type { CommittedApplyOutcome } from './persistentDataRuntime'
 import { safeStructuredClone } from '../safeStructuredClone'
@@ -26,6 +28,7 @@ import {
 import type {
     PersistedConversationMutationEvent,
     WindowedConversationActivationChange,
+    WindowedJournalRebasePlan,
 } from './saveCoordinator'
 import type { WindowedConversationPersistenceAuthority } from './saveCoordinator'
 import {
@@ -51,7 +54,7 @@ class MissingCharacterError extends Error {}
 export interface WorkingSetCoordinator {
     readonly revision: DataRevision
     readonly mutationGeneration: number
-    initialize(revision: DataRevision, database?: Database): void
+    initialize(revision: DataRevision, database?: Database, windowedActivationChange?: WindowedConversationActivationChange): void
     flushPendingData(reason: string): Promise<void>
     retireWindowedSelectedConversation?(): void
     replacePersistentDatabase(database: Database, reason: string): Promise<CommittedApplyOutcome>
@@ -907,6 +910,153 @@ export class ActiveWorkingSet {
         return true
     }
 
+    async prepareReceiveConversationDiscard(reader: PersistentRevisionReader, characterId: string, conversationId: string, replaceHistory: boolean): Promise<{
+        authority: WindowedConversationPersistenceAuthority | null
+        assertCurrent(): void
+        publish(): void
+        notify(): void
+        dispose(): void
+    }> {
+        const state = this.selectedConversationState
+        if (!state) throw new ConversationJournalConflictError('journal-changed')
+        const navigation = this.navigationGeneration
+        const version = state.kind === 'windowed' ? state.authority.sessionVersion : state.session.version
+        const assertCurrent = () => {
+            if (!state || state.characterId !== characterId || state.conversationId !== conversationId ||
+                this.selectedConversationState !== state || this.navigationGeneration !== navigation ||
+                (state.kind === 'windowed' ? state.authority.sessionVersion : state.session.version) !== version) {
+                throw new ConversationJournalConflictError('journal-changed')
+            }
+        }
+        assertCurrent()
+        const summary = await reader.readCharacterSummary(characterId)
+        let prepared: WindowedSelectedConversationState | { kind: 'complete'; conversation: Chat } | null = null
+        if (summary && !summary.archived) {
+            if (state.kind === 'complete') {
+                const stored = replaceHistory ? await reader.readConversation(characterId, conversationId) : null
+                const metadata = replaceHistory ? null : await reader.readConversationMetadata(characterId, conversationId)
+                const conversation = stored?.value ?? (metadata ? { ...metadata.value.conversation, message: safeStructuredClone(state.conversation.message) } : null)
+                if (conversation) {
+                    if (conversation.id !== conversationId || !Array.isArray(conversation.message)) {
+                        throw new ConversationJournalConflictError('missing-history')
+                    }
+                    prepared = { kind: 'complete', conversation: safeStructuredClone(conversation) }
+                }
+            } else {
+                const stored = await reader.readConversationMetadata(characterId, conversationId)
+                if (stored) {
+                    const conversation = createMetadataOnlySelectedConversation(stored.value.conversation)
+                    const authority: WindowedConversationPersistenceAuthority = {
+                        kind: 'windowed', characterId, conversationId, sessionToken: createConversationSessionToken(),
+                        storeRevision: reader.revision, persistedSessionVersion: 0, sessionVersion: 0, totalMessages: stored.value.totalMessages,
+                    }
+                    prepared = { ...state, kind: 'windowed', conversation, authority,
+                        stateToken: Symbol('discarded windowed selected conversation'),
+                        summary: createConversationSummaryFromMetadata(characterId, conversation,
+                            state.summary.configuredIndex, authority.totalMessages, state.summary.recentAt, state.summary),
+                        viewportSource: new PersistentConversationViewportSource({
+                            reader: this.dependencies.store, characterId, conversationId, revision: reader.revision,
+                            totalMessages: authority.totalMessages, rowBudget: this.dependencies.conversationViewportRowBudget ?? 64,
+                        }),
+                    }
+                }
+            }
+        }
+        let published = false
+        let notified = false
+        let oldControllers: WindowedConversationMutationController[] = []
+        const dispose = () => {
+            if (published || prepared?.kind !== 'windowed') return
+            prepared.viewportSource.dispose()
+        }
+        try { assertCurrent() } catch (error) { dispose(); throw error }
+        return {
+            authority: prepared?.kind === 'windowed' ? prepared.authority : null,
+            assertCurrent,
+            publish: () => {
+                oldControllers = [...this.windowedControllers]
+                const resident = this.dependencies.getResidentCharacter?.(characterId)
+                const index = resident?.chats.findIndex(chat => chat.id === conversationId) ?? -1
+                if (prepared && resident && index >= 0) {
+                    resident.chats[index] = prepared.conversation
+                    resident.chatPage = index
+                    const publishedConversation = resident.chats[index]
+                    const selected = prepared.kind === 'complete'
+                        ? this.createCompleteSelectedConversationState(characterId, publishedConversation, reader.revision, navigation)
+                        : prepared
+                    selected.conversation = publishedConversation
+                    this.selectedConversationState = selected
+                    this.activeSession = selected.kind === 'complete' ? selected.session : null
+                } else {
+                    this.selectedConversationState = null
+                    this.activeSession = null
+                    dispose()
+                }
+                this.promotionFlight = null
+                published = true
+            },
+            notify: () => {
+                if (!published || notified) return
+                notified = true
+                for (const controller of oldControllers) controller.release()
+                state.viewportSource.dispose()
+                if (state.kind === 'complete') state.session.invalidate()
+                this.notifyActiveConversationViewportSource()
+            },
+            dispose,
+        }
+    }
+
+    prepareWindowedJournalAdoption(plan: WindowedJournalRebasePlan): { publish(): void; dispose(): void } {
+        const state = this.selectedConversationState
+        const assertCurrent = () => {
+            if (!state || state.kind !== 'windowed' || this.selectedConversationState !== state ||
+                state.authority.sessionToken !== plan.authority.sessionToken ||
+                state.authority.sessionVersion !== plan.authority.sessionVersion ||
+                state.authority.persistedSessionVersion !== plan.authority.persistedSessionVersion ||
+                state.authority.storeRevision !== plan.authority.storeRevision ||
+                state.authority.totalMessages !== plan.authority.totalMessages) {
+                throw new ConversationJournalConflictError('journal-changed')
+            }
+        }
+        assertCurrent()
+        if (state?.kind !== 'windowed') throw new ConversationJournalConflictError('journal-changed')
+        const viewportSource = new PersistentConversationViewportSource({
+            reader: this.dependencies.store, characterId: state.characterId, conversationId: state.conversationId,
+            revision: plan.revision, totalMessages: plan.persistedTotalMessages,
+            rowBudget: this.dependencies.conversationViewportRowBudget ?? 64,
+        })
+        try {
+            for (const mutation of plan.mutations) viewportSource.applyOptimisticRange(mutation.start, mutation.deleteCount, mutation.messages)
+        } catch (error) { viewportSource.dispose(); throw error }
+        let published = false
+        return {
+            publish: () => {
+                assertCurrent()
+                this.selectedConversationState = {
+                    ...state, stateToken: Symbol('reconciled windowed selected conversation'),
+                    authority: { ...state.authority, storeRevision: plan.revision, totalMessages: plan.totalMessages },
+                    summary: createConversationSummaryFromMetadata(state.characterId, state.conversation,
+                        state.summary.configuredIndex, plan.totalMessages, state.summary.recentAt, state.summary), viewportSource,
+                }
+                if (!plan.historyUnchanged) {
+                    for (const controller of this.windowedControllers) controller.release()
+                } else {
+                    const metadata = cloneConversationMetadata(state.conversation) as Record<string, unknown>
+                    for (const controller of this.windowedControllers) {
+                        const chat = controller.chat as unknown as Record<string, unknown>
+                        for (const key of Object.keys(chat)) if (key !== 'message' && !Object.hasOwn(metadata, key)) delete chat[key]
+                        for (const [key, value] of Object.entries(metadata)) if (key !== 'message') chat[key] = safeStructuredClone(value)
+                    }
+                }
+                published = true
+                state.viewportSource.dispose()
+                this.notifyActiveConversationViewportSource()
+            },
+            dispose: () => { if (!published) viewportSource.dispose() },
+        }
+    }
+
     advanceStoreRevision(revision: DataRevision, totalMessages?: number, preserveRows = false): void {
         const state = this.selectedConversationState
         if (state?.kind !== 'windowed') {
@@ -1174,8 +1324,13 @@ export class ActiveWorkingSet {
                 summary: createConversationSummaryFromMetadata(selected.chaId, metadata.conversation,
                     selected.chatPage ?? 0, metadata.totalMessages, conversation.lastDate ?? 0),
             }
+            const afterMetadata = cloneConversationMetadata(conversation)
+            const activationChange: WindowedConversationActivationChange | undefined =
+                canonicalJson(metadata.conversation) === canonicalJson(afterMetadata) ? undefined : {
+                    conversation: { before: metadata.conversation, after: afterMetadata },
+                }
             try {
-                this.dependencies.coordinator.initialize(revision)
+                this.dependencies.coordinator.initialize(revision, undefined, activationChange)
             } catch (error) {
                 this.clearActiveConversationSession()
                 throw error

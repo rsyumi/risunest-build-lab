@@ -1,0 +1,1989 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "jsonSchemaEnabled": false,
+    "jsonSchema": "answer",
+    "extractJson": "",
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "simplifiedToolUse": false,
+    "antiServerOverloads": false,
+    "streamGeminiThoughts": false,
+    "saveSignatures": false,
+    "gptVisionQuality": "low",
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "proxyKey": "proxy-key-synthetic",
+    "customProxyRequestModel": "gemini-2.5-pro",
+    "customAPIFormat": 5,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false,
+    "google": {
+      "accessToken": "AIza-synthetic_key",
+      "projectId": "proj-synthetic"
+    },
+    "vertexRegion": "us-central1",
+    "vertexClientEmail": "synthetic@example-project.iam.gserviceaccount.com",
+    "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDVIdx1RJzNzC3M\nFcNiGx2VyIkGybmcaA1OR4A6RzCXs5Ham7SgRAvVpIBUqnZ/uwm9S/YWXf1Ff7Es\nV6BMJv7ib5NLB2SfKdiBAeKOTpiapPZObPLC1k+gQ/PdURhOjYxRpEwvysmg6FlK\n64oZk7dSw/1UI4nXfbAHuxm7mJReIs9v5ZbXbMofkTlnlhaIJV0yYyTa5toYY2gC\nKDM/ziNUUZYtxS1wX5/Jd04/yuEH5MJxiqbUtUjpstYByHXGYrB1O2R/daix60Ej\ntNc3/Z/Vn2BGaxj0LM4R30CZAFAUXlmz68y6uPO9ST1vZabC1oL05fRSQkpdJUoO\nuXBmEzOVAgMBAAECggEAItWzeik6Nbq6+4HNGuJSrhIGL2lWIHWzQwmVsDDFhO3x\nF1leptkoVAVcgjoQPyU7XMinEpXPGQZbV2OFDB1NiIXy/Y7aR9dnjwJXXKoE8DWp\nGj1dWjH79rZUi+Y+wkwJVKi1WRRcayO+wGuJ+U825dypsZBTbbiZxlGyzYINMetT\nB+pAOOc7E1DSz1Xx2Dvy/BrK2cyYqcnm5S3b1VzGEDdPvTwGjq/Kt8yN2KEn71P4\n813d2/7/JjDNrJAWC9m5635V+1h7AVoKwA75aB2+7RFPuqiDgSdgy9pPtjfvuOcv\nKwLcysb6eMKL67EaSjKXeXHdt2EnCFAzkta5OYE06wKBgQD79l6W0ISbAsn+8ZrY\nOeOziZdICdojxNpnJTgKcwQ0ZTTy9Z9vLCYtpF08SAD9RztOyh+mS8Av22stGrR0\na5piyZjg3GgCK95oeW3TFJ4nJBIS02Kv2KGWnkIknnTccLhjOUmP7+V2yAIXGV34\nr15xYSvQ5j7Gb6WqCoApNvyMWwKBgQDYjDK3Dte93QE0pkOtuJo6rjcEanxranoo\nSI09JSeiHwJx2ozsLCYyc1GMrP60xDaVecYyhjBB+rIEGDWa/o88nOUG+PkcxUmJ\nbH3g30qbLFF5kZIXi9/euBJGeKvKCjo1wqeABLRRMT3QCoHCYixNkGWdH993COTO\ndtzec18CzwKBgEHA/the3GxTowFsbduF5/1/p8I+B/aTted7GA/qCiveSZ4qKYxq\nuh/pKAfGRrPSdhDOwMm2NRaILYUc1gEX37duIv5zppUCe81J+zY9yDQwvqK5FaUM\nZMcYz+wciiTJKeWDGsZ8daa09Y6vqQ1wPrZaBIREwhcpJdOlX+LhnbDHAoGAfNU1\nVzoDPLxuuX8vfLHylulfZfhNCU80ZIyOfzUwB9GAg0nN+0foLSU1WbdQjbyfCsRM\ncUvR/fcbMCkUnekpgXOgw8g7M063+bTFTCDszU9bGI3GfjRwNeA/CMj/n1UOAXfZ\nP392w2dzjr6/1uLpTz1yloWNOP2ziSIUaVhw6RkCgYBfelHF42Wop/3XTEN1RUE8\n8kX9Bh5fgjSY+sXkA9zlGIEikzQNuJf2Fvtmuffq8yiilE8IRIaHeJohfB3+uf21\njLS5ZlUvmjKk+qQu3woNdKcnOShGeLPT9cd+AVZEKIwai9tPu/vB+zpIUzy4MNGg\njQsRJV7HGHlc0hWx9uc0tQ==\n-----END PRIVATE KEY-----\n",
+    "vertexAccessToken": "ya29.cached-synthetic",
+    "vertexAccessTokenExpires": 1767326645000
+  },
+  "cases": [
+    {
+      "id": "text-one-chunk",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\" world\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-chunk-per-event",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\" world\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-split-mid-line",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"te"
+            },
+            {
+              "utf8": "xt\":\"Hi\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"!\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-chunk-ends-after-data-line",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n"
+            },
+            {
+              "utf8": "\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-last-line-without-newline",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"B\"}]}}]}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-crlf",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\r\n\r\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\r\n\r\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-without-space-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "non-data-lines-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": ": comment\nevent: message\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "id: 1\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-line-padded-with-spaces",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data:  {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"A\"}]}}]}  \n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "empty-text-part-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "part-without-text-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"other\":1}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "several-parts-in-one-event",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"A\"},{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "second-candidate-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"A\"}]}},{\"content\":{\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unicode-text",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"日本語\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\" 😀\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "multibyte-split-between-chunks",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "hex": "646174613a207b2263616e64696461746573223a5b7b22636f6e74656e74223a7b22726f6c65223a226d6f64656c222c227061727473223a5b7b2274657874223a2241227d5d7d7d5d7d0a0a"
+            },
+            {
+              "hex": "646174613a207b2263616e64696461746573223a5b7b22636f6e74656e74223a7b227061727473223a5b7b2274657874223a22e3"
+            },
+            {
+              "hex": "8182227d5d7d7d5d7d0a0a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bom-at-chunk-start",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "hex": "efbbbf646174613a207b2263616e64696461746573223a5b7b22636f6e74656e74223a7b22726f6c65223a226d6f64656c222c227061727473223a5b7b2274657874223a2241227d5d7d7d5d7d0a0a"
+            },
+            {
+              "hex": "646174613a207b2263616e64696461746573223a5b7b22636f6e74656e74223a7b22726f6c65223a226d6f64656c222c227061727473223a5b7b2274657874223a2242227d5d7d7d5d7d0a0a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "empty-stream",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": []
+        }
+      ]
+    },
+    {
+      "id": "empty-chunks",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": ""
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thought-then-text",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hmm. \",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Answer.\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thought-then-text-one-chunk",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hmm. \",\"thought\":true}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Answer.\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thought-only",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Only.\",\"thought\":true}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thoughts-accumulate-without-separator",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"C\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Done\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-thought-text",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"C\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thought-with-stream-thoughts-on",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "streamGeminiThoughts": true
+      },
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hmm. \",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Answer.\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thought-only-with-stream-thoughts-on",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "streamGeminiThoughts": true
+      },
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Only.\",\"thought\":true}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thoughts-accumulate-with-stream-thoughts-on",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "streamGeminiThoughts": true
+      },
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"C\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Done\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-thought-text-with-stream-thoughts-on",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "streamGeminiThoughts": true
+      },
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"C\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thought-false-is-content",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\",\"thought\":false}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thought-signature-without-setting-is-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\",\"thoughtSignature\":\"c2ln\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vertex-text",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\",\"thought\":true}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"C\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "done-line-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: [DONE]\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "done-line-in-the-same-chunk",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\ndata: [DONE]\n\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "done-line-last-without-newline",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: [DONE]"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "done-line-padded",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data:   [DONE]  \n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "malformed-json-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"C\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "malformed-last-line-is-retried",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\""
+            },
+            {
+              "utf8": ":[]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-null-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: null\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-number-and-string-and-array-are-fine",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: 5\n\n"
+            },
+            {
+              "utf8": "data: \"text\"\n\n"
+            },
+            {
+              "utf8": "data: []\n\n"
+            },
+            {
+              "utf8": "data: {}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "empty-data-line-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: \n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parts-null-is-fine",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":null}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parts-string-is-fine",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":\"abc\"}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parts-empty-string-is-fine",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":\"\"}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parts-number-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":5}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parts-object-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":{\"a\":1}}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parts-true-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":true}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "part-null-ends-the-snapshots",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[null]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "part-primitives-are-fine",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[5,\"x\",true,[],{}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "candidates-empty-and-missing",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[]}\n\n"
+            },
+            {
+              "utf8": "data: {}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "candidates-object-with-zero-key",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":{\"0\":{\"content\":{\"parts\":[{\"text\":\"A\"}]}}}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-number-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":5}]}}]}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "part-text-not-text"
+    },
+    {
+      "id": "text-after-text-object-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":{\"a\":1}}]}}]}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "part-text-not-text",
+      "terminal": true
+    },
+    {
+      "id": "usage-metadata",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"A\"}]}}],\"usageMetadata\":{\"totalTokenCount\":5}}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "usage-metadata-and-model-status",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"usageMetadata\":{\"a\":1},\"modelStatus\":{\"b\":2}}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"B\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "status-500",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": "upstream broke"
+        }
+      ]
+    },
+    {
+      "id": "status-400-json",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "text": "{\"error\":{\"message\":\"API key not valid.\"}}"
+        }
+      ]
+    },
+    {
+      "id": "status-500-empty",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "status-201-is-not-a-stream",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 201,
+          "text": "created"
+        }
+      ]
+    },
+    {
+      "id": "status-429-exhausted",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 429,
+          "text": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}"
+        }
+      ]
+    },
+    {
+      "id": "status-429-exhausted-vertex",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 429,
+          "text": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}"
+        }
+      ]
+    },
+    {
+      "id": "status-429-exhausted-anti-overload-retries",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "antiServerOverloads": true
+      },
+      "replies": [
+        {
+          "status": 429,
+          "text": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}"
+        },
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"After retry.\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "status-429-exhausted-anti-overload-vertex-no-retry",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "antiServerOverloads": true
+      },
+      "replies": [
+        {
+          "status": 429,
+          "text": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}"
+        }
+      ]
+    },
+    {
+      "id": "status-429-without-marker-no-retry",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "antiServerOverloads": true
+      },
+      "replies": [
+        {
+          "status": 429,
+          "text": "slow down"
+        }
+      ]
+    },
+    {
+      "id": "status-500-bom",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": "﻿broken"
+        }
+      ]
+    },
+    {
+      "id": "function-call-after-text-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "toolReplies": [
+        [
+          {
+            "type": "text",
+            "text": "{\"found\":true}"
+          }
+        ]
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\"}]}}]}\n\n"
+            },
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"query\":\"x\"}}}]}}]}\n\n"
+            }
+          ]
+        },
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Done.\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "tool-round",
+      "terminal": true
+    },
+    {
+      "id": "function-call-first-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "toolReplies": [
+        [
+          {
+            "type": "text",
+            "text": "{\"found\":true}"
+          }
+        ]
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"query\":\"x\"}}}]}}]}\n\n"
+            }
+          ]
+        },
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Done.\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "tool-round"
+    },
+    {
+      "id": "signature-with-setting-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "saveSignatures": true
+      },
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"A\",\"thoughtSignature\":\"c2ln\"}]}}]}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "signature-response"
+    }
+  ]
+}

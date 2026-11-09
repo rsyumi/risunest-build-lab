@@ -1,0 +1,3501 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-mistral.oracle.test.ts",
+  "fixtureSha256": "d3c14be0cb9bbac6c7f8b2d5557bafd260e49d4b3b51974d41c60b909d9df857",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/process/request/openAI/requests.ts": "58901b6539a523bdab03e92aa5b9154c6a192912e32b423bc70ef442ce27f233",
+    "src/ts/process/request/openAI/shared.ts": "c5a595e64a72f2994dd4498129a9eb7e10380e545db07465999c16359cfb541a",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/globalApi.svelte.ts": "74c285e0038f8e1d033e267e1f3374fd925e1d3d73870cb97e811712e1ff2f0c",
+    "src/ts/model/types.ts": "676f450344e842cd5a4bddfbdb09cda220c351c98c07a5ab36f54b30a9441caf"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "basic",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "multi-turn",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"You are a narrator.\"},{\"role\":\"user\",\"content\":\"Open the door.\"},{\"role\":\"assistant\",\"content\":\"The door creaks open.\"},{\"role\":\"user\",\"content\":\"Walk in.\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"You are a narrator.\"},{\"role\":\"user\",\"content\":\"Open the door.\"},{\"role\":\"assistant\",\"content\":\"The door creaks open.\"},{\"role\":\"user\",\"content\":\"Walk in.\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "no-system",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "user-first-then-assistant",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "empty-messages",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of undefined (reading 'role')"
+        },
+        "requests": [],
+        "outcome": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of undefined (reading 'role')"
+        }
+      }
+    },
+    {
+      "id": "system-only",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of undefined (reading 'role')"
+        },
+        "requests": [],
+        "outcome": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of undefined (reading 'role')"
+        }
+      }
+    },
+    {
+      "id": "consecutive-users-merge",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"One\\nTwo\\nThree\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"One\\nTwo\\nThree\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "consecutive-assistants-merge",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"One\\nTwo\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"One\\nTwo\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "system-after-user-appends",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\\nsystem: Aside.\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\\nsystem: Aside.\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "system-after-assistant-pushes-user",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"system: Aside.\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"system: Aside.\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "system-after-system-merges",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"One.\\n\\nTwo.\"},{\"role\":\"user\",\"content\":\"Hi\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"One.\\n\\nTwo.\"},{\"role\":\"user\",\"content\":\"Hi\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "function-role",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Checking.\"},{\"role\":\"user\",\"content\":\"result\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Checking.\"},{\"role\":\"user\",\"content\":\"result\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "function-after-user-merges",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"user\",\"content\":\"result\"},{\"role\":\"assistant\",\"content\":\"Ok.\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"user\",\"content\":\"result\"},{\"role\":\"assistant\",\"content\":\"Ok.\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "assistant-first",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\" \"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Hi\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\" \"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Hi\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "function-first",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\" \"},{\"role\":\"user\",\"content\":\"result\\nHi\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\" \"},{\"role\":\"user\",\"content\":\"result\\nHi\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "empty-contents-dropped",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "empty-contents-kept-without-new-handle",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "new-chat-memo-clears-content",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "new-chat-memo-kept-without-new-handle",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey.\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "other-memo-kept",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\\nAgain\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "message-fields-are-ignored",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "unicode-and-escapes",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"日本語 😀\"},{\"role\":\"user\",\"content\":\"\\\"quoted\\\" \\\\ back\\nline  \"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"日本語 😀\"},{\"role\":\"user\",\"content\":\"\\\"quoted\\\" \\\\ back\\nline  \"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "system-content-replacement",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "image-on-assistant-ignored",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hey\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "image-on-system-ignored",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Look\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Look\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "image-on-user-declines",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AAAA\",\"detail\":\"low\"}},{\"type\":\"text\",\"text\":\"Look\"}]}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AAAA\",\"detail\":\"low\"}},{\"type\":\"text\",\"text\":\"Look\"}]}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "tool-call-marker-declines",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"A\"},{\"role\":\"tool\",\"content\":\"ok\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"A\"},{\"role\":\"tool\",\"content\":\"ok\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"Again\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "tool-call-marker-in-user-declines",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"assistant\",\"content\":\"Hi \"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"assistant\",\"content\":\"Hi \"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "ooba-mode-declines",
+      "result": {
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "my-proxy-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://proxy.example.test/v1\",\"body\":{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\\nSystem:Be brief.\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-proxy\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://proxy.example.test/v1",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-proxy"
+              ]
+            ],
+            "body": "{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\\nSystem:Be brief.\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "developer-role-flag",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "DeveloperRole"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"developer:Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"developer:Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "model-mistral-small-latest",
+      "result": {
+        "model": {
+          "id": "mistral-small-latest",
+          "internalID": "mistral-small-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "model-mistral-medium-latest",
+      "result": {
+        "model": {
+          "id": "mistral-medium-latest",
+          "internalID": "mistral-medium-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-medium-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-medium-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "model-mistral-large-2411",
+      "result": {
+        "model": {
+          "id": "mistral-large-2411",
+          "internalID": "mistral-large-2411",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-2411\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-2411\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "model-open-mistral-nemo",
+      "result": {
+        "model": {
+          "id": "open-mistral-nemo",
+          "internalID": "open-mistral-nemo",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"open-mistral-nemo\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"open-mistral-nemo\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "max-tokens",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":777,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":777,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "stream-flag-is-ignored",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "temperature-disabled",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "penalties-disabled",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "top-p-zero",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "top-k-and-other-parameters-not-sent",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "separate-parameters-model",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "separate-parameters-submodel",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.7,\"presence_penalty\":0.12,\"frequency_penalty\":0.12,\"top_p\":0.7},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.7,\"presence_penalty\":0.12,\"frequency_penalty\":0.12,\"top_p\":0.7}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "separate-parameters-memory",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.61,\"presence_penalty\":0.11,\"frequency_penalty\":0.11,\"top_p\":0.6},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.61,\"presence_penalty\":0.11,\"frequency_penalty\":0.11,\"top_p\":0.6}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "separate-parameters-by-model-missing-throws",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "thrown",
+          "error": "Error: No seperate parameters found for model mistral-large-latest in model mode model. Please set parameters for this model"
+        },
+        "requests": [],
+        "outcome": {
+          "type": "thrown",
+          "error": "Error: No seperate parameters found for model mistral-large-latest in model mode model. Please set parameters for this model"
+        }
+      }
+    },
+    {
+      "id": "separate-parameters-by-model",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.33,\"presence_penalty\":0.05,\"frequency_penalty\":0.05,\"top_p\":0.33},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.33,\"presence_penalty\":0.05,\"frequency_penalty\":0.05,\"top_p\":0.33}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "additional-params-are-not-applied",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "mistral-key-in-header",
+      "result": {
+        "model": {
+          "id": "mistral-large-latest",
+          "internalID": "mistral-large-latest",
+          "format": 4,
+          "flags": [
+            "hasFirstSystemPrompt",
+            "mustStartWithUserInput",
+            "requiresAlternateRole"
+          ],
+          "parameters": [
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 5
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-other\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-other"
+              ]
+            ],
+            "body": "{\"model\":\"mistral-large-latest\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "reverse-proxy",
+      "result": {
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "my-proxy-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://proxy.example.test/v1/chat/completions\",\"body\":{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-proxy\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://proxy.example.test/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-proxy"
+              ]
+            ],
+            "body": "{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "reverse-proxy-model-is-the-alias",
+      "result": {
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "another",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://proxy.example.test/x\",\"body\":{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-proxy\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://proxy.example.test/x",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-proxy"
+              ]
+            ],
+            "body": "{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "reverse-proxy-url-normalized",
+      "result": {
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "my-proxy-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://Proxy.Example.test:8443/a b?x=1#f\",\"body\":{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-proxy\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://proxy.example.test:8443/a%20b?x=1#f",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-proxy"
+              ]
+            ],
+            "body": "{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "reverse-proxy-no-url-declines",
+      "result": {
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "my-proxy-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"\",\"body\":{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-proxy\"}}"
+        },
+        "requests": [],
+        "outcome": {
+          "type": "fail"
+        }
+      }
+    },
+    {
+      "id": "reverse-proxy-userinfo-declines",
+      "result": {
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "my-proxy-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://u:p@proxy.example.test/chat\",\"body\":{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-proxy\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://u:p@proxy.example.test/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-proxy"
+              ]
+            ],
+            "body": "{\"model\":\"reverse_proxy\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "custom-model",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "custom-model-no-url",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.mistral.ai/v1/chat/completions\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.mistral.ai/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "custom-model-no-key-uses-mistral-key",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-mistral\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-mistral"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "custom-model-empty-key-kept",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer \"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer "
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-system-after-user-appends",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\\nSystem:M\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"C\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\\nSystem:M\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"C\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-system-after-assistant-pushes-user",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"System:M\\nC\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"System:M\\nC\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-system-after-system-merges",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\\nT\"},{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\\nT\"},{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-system-last",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\\nSystem:M\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\\nSystem:M\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-function-after-assistant",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"R\"},{\"role\":\"assistant\",\"content\":\"C\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"assistant\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"R\"},{\"role\":\"assistant\",\"content\":\"C\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-function-after-user-merges",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"user\",\"content\":\"R\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"user\",\"content\":\"R\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-function-first",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"function:R\"},{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"function:R\"},{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-assistant-first",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"assistant:B\"},{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"assistant:B\"},{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-user-first-system-second",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"user\",\"content\":\"A\\nSystem:M\\nB\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"user\",\"content\":\"A\\nSystem:M\\nB\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-consecutive-all",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\\nB\"},{\"role\":\"assistant\",\"content\":\"C\\nD\"},{\"role\":\"user\",\"content\":\"System:E\\nSystem:F\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"A\\nB\"},{\"role\":\"assistant\",\"content\":\"C\\nD\"},{\"role\":\"user\",\"content\":\"System:E\\nSystem:F\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-developer-role",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "DeveloperRole"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"developer:S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"developer\",\"content\":\"M\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"developer:S\"},{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"developer\",\"content\":\"M\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-developer-after-user",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt",
+            "DeveloperRole"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"developer\",\"content\":\"M\"},{\"role\":\"assistant\",\"content\":\"B\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"user\",\"content\":\"A\"},{\"role\":\"developer\",\"content\":\"M\"},{\"role\":\"assistant\",\"content\":\"B\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-empty-first-user-dropped",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"user\",\"content\":\"A\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-empty-contents-kept",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"\"},{\"role\":\"user\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"\"},{\"role\":\"user\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "raw-function-media-kept",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-model",
+          "format": 4,
+          "flags": [
+            "hasFullSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://llm.example.test/v1/chat\",\"body\":{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"\\nA\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9},\"headers\":{\"Authorization\":\"Bearer sk-synthetic-custom\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/chat",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-custom"
+              ]
+            ],
+            "body": "{\"model\":\"xcustom:::one\",\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"\\nA\"}],\"safe_prompt\":false,\"max_tokens\":300,\"temperature\":0.8,\"presence_penalty\":0.3,\"frequency_penalty\":0.2,\"top_p\":0.9}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    },
+    {
+      "id": "other-format-declines",
+      "result": {
+        "model": {
+          "id": "gpt4o",
+          "internalID": "gpt-4o",
+          "format": 0,
+          "flags": [
+            "hasImageInput",
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 0
+        },
+        "preview": {
+          "type": "success",
+          "result": "{\"url\":\"https://api.openai.com/v1/chat/completions\",\"body\":{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":300,\"stream\":false,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3},\"headers\":{\"Authorization\":\"Bearer \",\"Content-Type\":\"application/json\"}}"
+        },
+        "requests": [
+          {
+            "url": "https://api.openai.com/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer "
+              ]
+            ],
+            "body": "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":300,\"stream\":false,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "outcome": {
+          "type": "success"
+        }
+      }
+    }
+  ]
+}

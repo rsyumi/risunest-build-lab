@@ -861,15 +861,15 @@ export interface Database{
     globalNote:string
     temperature: number
     askRemoval:boolean
-    maxContext: number|null
-    maxResponse: number|null
+    maxContext: number
+    maxResponse: number
     frequencyPenalty: number
     PresensePenalty: number
     formatingOrder: FormatingOrderItem[]
     aiModel: string
     jailbreakToggle:boolean
-    loreBookDepth: number|null
-    loreBookToken: number|null,
+    loreBookDepth: number
+    loreBookToken: number,
     cipherChat: boolean,
     loreBook: {
         name:string
@@ -929,9 +929,9 @@ export interface Database{
         FontColorQuote1 : string,
         FontColorQuote2 : string
     }
-    requestRetrys:number|null
+    requestRetrys:number
     localNetworkMode:boolean
-    localNetworkTimeoutSec:number|null
+    localNetworkTimeoutSec:number
     emotionPrompt2:string
     useSayNothing:boolean
     didFirstSetup: boolean
@@ -1009,7 +1009,7 @@ export interface Database{
     personaNote:boolean
     assetWidth:number
     animationSpeed:number
-    botSettingAtStart:boolean
+    botSettingAtStart:false
     NAIsettings:NAISettings
     hideRealm:boolean
     blockedRealmCreators:BlockedRealmCreator[]
@@ -1039,7 +1039,7 @@ export interface Database{
     localStopStrings?:string[]
     autofillRequestUrl:boolean
     customProxyRequestModel:string
-    generationSeed:number|null
+    generationSeed:number
     newOAIHandle:boolean
     gptVisionQuality:string
     reverseProxyOobaMode:boolean
@@ -1058,7 +1058,7 @@ export interface Database{
     }
     mistralKey?:string
     chainOfThought?:boolean
-    genTime:number|null
+    genTime:number
     promptSettings: PromptSettings
     keiServerURL:string
     top_k:number
@@ -1090,7 +1090,7 @@ export interface Database{
     ollamaCloudModelName:string
     ollamaThinkingMode:'auto'|'off'|'on'|'low'|'medium'|'high'
     autoContinueChat:boolean
-    autoContinueMinTokens:number|null
+    autoContinueMinTokens:number
     removeIncompleteResponse:boolean
     customTokenizer:string
     instructChatTemplate:string
@@ -1114,7 +1114,6 @@ export interface Database{
     disableToggleBinding?: boolean
     defaultToggleValues?: Record<string, string>
     togglePresets?: { name: string; values: Record<string, string>; promptPresetName?: string; id?: string }[]
-    authorNotePresets?: { id: string; name: string; text: string }[]
     globalChatVariables:{[key:string]:string}
     templateDefaultVariables:string
     hypaAllocatedTokens:number
@@ -1185,7 +1184,7 @@ export interface Database{
     presetChain: string
     legacyMediaFindings?:boolean
     geminiStream?:boolean
-    assetMaxDifference:number|null
+    assetMaxDifference:number
     auxModelUnderModelSettings:boolean
     menuSideBar:boolean
     pluginV2: RisuPlugin[]
@@ -1218,7 +1217,7 @@ export interface Database{
     checkCorruption?: boolean
     toggleConfirmRecommendedPreset?: boolean
     useExperimentalGoogleTranslator:boolean
-    thinkingTokens: number|null
+    thinkingTokens: number
     thinkingType: 'off' | 'budget' | 'adaptive'
     deepseekThinkingType: 'off' | 'enabled'
     adaptiveThinkingEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -1448,7 +1447,7 @@ export interface character{
     removedQuotes?:boolean
     creatorNotes:string
     systemPrompt:string
-    postHistoryInstructions:string|null
+    postHistoryInstructions:string
     alternateGreetings:string[]
     tags:string[]
     creator:string
@@ -1599,8 +1598,8 @@ export interface botPreset{
     jailbreak: string
     globalNote:string
     temperature: number
-    maxContext: number|null
-    maxResponse: number|null
+    maxContext: number
+    maxResponse: number
     frequencyPenalty: number
     PresensePenalty: number
     formatingOrder: FormatingOrderItem[]
@@ -1841,8 +1840,6 @@ export interface Chat{
     id?:string
     rerollRecovery?: import('../responseVariants').RerollRecovery
     savedToggleValues?: Record<string, string>
-    /** Selects an author's note preset while `note` still matches the fingerprint written with it. */
-    authorNotePreset?: { id: string; fingerprint: string }
     bindedPersona?:string
     fmIndex?:number
     hypaV3Data?:SerializableHypaV3Data
@@ -2222,8 +2219,12 @@ export function changeToPreset(id = 0, savecurrent = true, expectedNames?: Prese
     return presetWorkingSetController.changeToPreset(id, savecurrent, expectedNames)
 }
 
-export function addPreset(preset: botPreset, activate = false): Promise<number> {
-    return presetWorkingSetController.addPreset(preset, activate)
+export function addPreset(preset: botPreset, activate = false, signal?: AbortSignal): Promise<number> {
+    return presetWorkingSetController.addPreset(preset, activate, signal)
+}
+
+export function appendPreparedPreset(preset: botPreset, signal?: AbortSignal): Promise<number> {
+    return presetWorkingSetController.appendPreparedPreset(preset, signal)
 }
 
 export function removePreset(id: number, expectedNames?: PresetListExpectation): Promise<void> {
@@ -2383,6 +2384,31 @@ export async function downloadPreset(id:number, type:'json'|'risupreset'|'return
     const { downloadFile } = await import('../globalApi.svelte')
     assertPresetNames(DBState.db.botPresets, expectedNames)
     const pres = (await readPresetBodies([id], expectedNames))[0]
+    if (isTauri && type !== 'return') {
+        const afterRead = capturePresetNames(DBState.db.botPresets)
+        const { exportNativePresetFromPicker } = await import('./nativePresetExportRoute')
+        const native = await exportNativePresetFromPicker({
+            presetIndex: id,
+            preset: pres,
+            format: type === 'json' ? 'json' : 'risup',
+            assertIdentity: () => {
+                assertPresetNames(DBState.db.botPresets, afterRead)
+                if (DBState.db.botPresets[id]?.id !== pres.id) throw new Error('Preset identity changed')
+            },
+            encodeFallback: async (preset) => {
+                const exported = exportMessageNameSettings(preset as unknown as Record<string, unknown>)
+                if (type === 'json') return Buffer.from(JSON.stringify(exported, null, 2))
+                return encodeRPack(fflate.compressSync(encodeMsgpack({
+                    presetVersion: 2, type: 'preset',
+                    preset: await encryptBuffer(encodeMsgpack(exported), 'risupreset'),
+                })))
+            },
+        })
+        if (native) {
+            if (native.published) alertNormal(language.successExport)
+            return { data: native.data, buf: null }
+        }
+    }
     pres.openAIKey = ''
     pres.forceReplaceUrl = ''
     pres.forceReplaceUrl2 = ''
@@ -2446,7 +2472,11 @@ export async function readPresetBodies(ids: readonly number[], expectedNames: Pr
 export async function importPreset(f:{
     name:string
     data:Uint8Array
-}|null = null){
+}|null = null, signal?: AbortSignal){
+    if (!f && isTauri) {
+        const { importNativePresetFromPicker } = await import('./nativePresetImportRoute')
+        if (await importNativePresetFromPicker({ append: appendPreparedPreset, importLegacy: importPreset }, { signal })) return
+    }
     if(!f){
         f = await selectSingleFile(["json", "preset", "risupreset", "risup"])
     }
@@ -2492,7 +2522,8 @@ export async function importPreset(f:{
         pr.NAISettings.mirostat_lr = pre.parameters.mirostat_lr
         pr.NAISettings.mirostat_tau = pre.parameters.mirostat_tau
         pr.name = pre.name ?? "Imported"
-        await addPreset(pr)
+        signal?.throwIfAborted()
+        await addPreset(pr, false, signal)
         return
     }
 
@@ -2598,12 +2629,14 @@ export async function importPreset(f:{
         }
         pr.promptTemplate = normalizePromptTemplate(pr.promptTemplate)
         pr.name = "Imported ST Preset"
-        await addPreset(pr)
+        signal?.throwIfAborted()
+        await addPreset(pr, false, signal)
         return
     }
     importMessageNameSettings(pre)
     pre.name ??= "Imported"
-    await addPreset(pre)
+    signal?.throwIfAborted()
+    await addPreset(pre, false, signal)
 }
 
 function normalizePromptRole(role: unknown): 'user'|'bot'|'system'|null {

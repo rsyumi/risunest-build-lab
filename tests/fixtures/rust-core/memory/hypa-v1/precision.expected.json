@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/memory-hypa-v1.oracle.test.ts",
+  "fixtureSha256": "476834660cb0741f82903ab49f09bd7368c95d28e56ca306bb20c9900a9e0ec8",
+  "tsSourceSha256": {
+    "src/ts/storage/hypaEmbeddingCache.ts": "b6d7f069d90a8e29e34d4c1f356b235a0c74dc90866f5ca5f413146b2d9a0e74"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "direct-precision-helper-f64-specials-and-rounding",
+      "result": {
+        "boundary": "hypa-v1-typed-vector-conversion",
+        "conversions": [
+          {
+            "dimensions": 7,
+            "bytesHex": "0000c07f0000807f000080ff00000080000000000000803f0200803f"
+          },
+          {
+            "dimensions": 2,
+            "bytesHex": "4523a17f00000080"
+          },
+          {
+            "dimensions": 2,
+            "bytesHex": "4523a17f00000080"
+          }
+        ]
+      }
+    }
+  ]
+}

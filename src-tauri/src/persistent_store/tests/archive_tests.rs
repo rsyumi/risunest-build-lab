@@ -1,5 +1,6 @@
 use super::*;
 use crate::asset_repository::PayloadCas;
+use crate::persistent_store::lww;
 use std::cell::Cell;
 
 fn archive_store() -> (tempfile::TempDir, PersistentStore, PayloadCas) {
@@ -762,4 +763,268 @@ fn a_full_database_read_leaves_archived_characters_out() {
         .map(|character| character["chaId"].as_str().expect("character id"))
         .collect::<Vec<_>>();
     assert_eq!(ids, ["first-active", "last-active"]);
+}
+
+fn reconcile_unit(parts: &[&str], value: Value) -> lww::UnitMutation {
+    lww::UnitMutation::Set { key: lww::unit_key(parts).unwrap(), value }
+}
+
+fn reconcile_request(store: &mut PersistentStore, request_id: &str) -> super::super::archive_reconcile::ArchiveReconcileRequest {
+    let owner = "middle-archived";
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+    let histories = store.archive_reconcile_histories(&lease, owner, &["middle-chat".into()]).unwrap();
+    store.release_revision(&lease).unwrap();
+    store.archive_character(owner, store.revision().unwrap(), 123).unwrap();
+    let binding = store.lww_binding_state().unwrap();
+    super::super::archive_reconcile::ArchiveReconcileRequest {
+        header: lww::Header { binding_authority: binding.target_authority, request_id: request_id.into() },
+        expected_revision: store.revision().unwrap(), selection_epoch: binding.selection_epoch,
+        character_id: owner.into(), histories,
+        unit_mutations: vec![reconcile_unit(&["character", owner, "name"], json!("Locally edited"))],
+        conversations: vec![ConversationMutation::ReplaceRange { character_id: owner.into(), conversation_id: "middle-chat".into(),
+            start: 1, delete_count: 1, messages: vec![json!({"chatId":"m3","role":"char","data":"local result","futureMessage":{"nested":true}})],
+            conversation: None, configured_index: None }],
+        asset_owner_heads: vec![],
+    }
+}
+
+#[test]
+fn archive_reconciliation_commits_local_edits_without_restoring_the_owner() {
+    use super::super::archive_reconcile::ArchiveReconcileResult;
+    let (_directory, mut store, _cas) = archive_store();
+    store.commit(&WorkingSetCommit { expected_revision: store.revision().unwrap(), unit_mutations: Some(vec![
+        reconcile_unit(&["character", "middle-archived", "privateOwn"], json!("device-only")),
+        reconcile_unit(&["character", "middle-archived", "futureCharacter"], json!({"unrecognized":[1,"value"]})),
+        reconcile_unit(&["conversation", "middle-archived", "middle-chat", "futureConversation"], json!({"kept":true})),
+    ]), ..Default::default() }).unwrap();
+    let unrelated = store.read_conversation("first-active", "first-chat", None).unwrap().unwrap().value;
+    let request = reconcile_request(&mut store, "archive-reconcile-edits");
+    let result = store.reconcile_archived_character(&request, &|| false).unwrap();
+    let ArchiveReconcileResult::Committed { revision, archive, histories } = result else { panic!("expected commit") };
+    assert_eq!(revision, request.expected_revision + 1);
+    assert!(archive.archived);
+    assert_eq!(archive.name, "Locally edited");
+    assert_ne!(histories[0].history_hash, request.histories[0].history_hash);
+    assert_eq!(histories[0].message_count, Some(2));
+    assert_eq!(archived_object(&store, "middle-archived").archived_at, 123);
+    assert!(store.read_character("middle-archived", None).is_err());
+    assert_eq!(store.read_conversation("first-active", "first-chat", None).unwrap().unwrap().value, unrelated);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM conversations WHERE character_id='middle-archived'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    store.restore_character("middle-archived", revision).unwrap();
+    let detail = store.read_character("middle-archived", None).unwrap().unwrap().value;
+    assert_eq!(detail["name"], "Locally edited");
+    assert_eq!(detail["privateOwn"], "device-only");
+    assert_eq!(detail["futureCharacter"], json!({"unrecognized":[1,"value"]}));
+    let chat = store.read_conversation("middle-archived", "middle-chat", None).unwrap().unwrap().value;
+    assert_eq!(chat["futureConversation"], json!({"kept":true}));
+    assert_eq!(chat["message"][1]["data"], "local result");
+    assert_eq!(chat["message"][1]["futureMessage"], json!({"nested":true}));
+}
+
+#[test]
+fn archive_reconciliation_receipt_survives_reopen_and_later_restore() {
+    use super::super::archive_reconcile::ArchiveReconcileResult;
+    let (directory, mut store, _cas) = archive_store();
+    let request = reconcile_request(&mut store, "archive-reconcile-retry");
+    store.reconcile_archived_character(&request, &|| false).unwrap();
+    let committed_revision = store.revision().unwrap();
+    drop(store);
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    assert!(matches!(store.reconcile_archived_character(&request, &|| false).unwrap(),
+        ArchiveReconcileResult::Replayed { committed_revision: prior } if prior == committed_revision));
+    assert_eq!(store.revision().unwrap(), committed_revision);
+    store.restore_character("middle-archived", committed_revision).unwrap();
+    let restored_revision = store.revision().unwrap();
+    assert!(matches!(store.reconcile_archived_character(&request, &|| false).unwrap(), ArchiveReconcileResult::Replayed { .. }));
+    assert_eq!(store.revision().unwrap(), restored_revision);
+    assert_eq!(store.read_conversation("middle-archived", "middle-chat", None).unwrap().unwrap().value["message"].as_array().unwrap().len(), 2);
+    let mut changed = request.clone();
+    changed.conversations.clear();
+    changed.histories.clear();
+    assert!(store.reconcile_archived_character(&changed, &|| false).unwrap_err().to_string().contains("request-id-integrity"));
+}
+
+#[test]
+fn archive_reconciliation_commands_keep_witnesses_and_replay_before_unrelated_intent_recovery() {
+    use super::super::{archive_reconcile::ArchiveReconcileResult, commands};
+    use tauri::Manager;
+    let (_directory, mut store, _cas) = archive_store();
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+    let request = reconcile_request(&mut store, "archive-reconcile-command");
+    let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+    app.manage(commands::PersistentStoreState::with_test_store(store));
+    assert_eq!(commands::pds_archive_reconcile_histories(app.state(), lease.clone(), request.character_id.clone(),
+        vec!["middle-chat".into()]).unwrap(), request.histories);
+    commands::pds_release_revision(app.state(), lease).unwrap();
+    tauri::async_runtime::block_on(commands::hydrate_archive_reconcile(app.handle().clone(),
+        request.character_id.clone(), "reconcile-hydrate-command".into())).unwrap();
+    let result = tauri::async_runtime::block_on(commands::reconcile_archived_character(app.handle().clone(),
+        request.clone(), "reconcile-write-command".into())).unwrap();
+    let ArchiveReconcileResult::Committed { revision, archive, .. } = result else { panic!("expected command commit") };
+    assert!(archive.archived);
+    commands::with_store_mut(app.state(), |store| {
+        store.restore_character(&request.character_id, revision)?;
+        store.device_store()?.connection().execute(
+            "INSERT INTO lww_intents(request_id,authority,stamp,body,digest,complete) VALUES('synthetic-invalid-pending','0','{}','{','synthetic',0)", [],
+        )?;
+        Ok(())
+    }).unwrap();
+    assert!(commands::with_store_mut(app.state(), |_| Ok(())).is_err());
+    let current_revision = commands::pds_read_revision(app.state()).unwrap();
+    let replay = tauri::async_runtime::block_on(commands::reconcile_archived_character(app.handle().clone(),
+        request, "reconcile-replay-command".into())).unwrap();
+    assert!(matches!(replay, ArchiveReconcileResult::Replayed { committed_revision } if committed_revision == revision));
+    assert_eq!(commands::pds_read_revision(app.state()).unwrap(), current_revision);
+}
+#[test]
+fn archive_reconciliation_refuses_changed_history_without_losing_the_archive() {
+    use super::super::archive_reconcile::ArchiveReconcileResult;
+    for insert in [false, true] {
+        let (_directory, mut store, _cas) = archive_store();
+        let mut request = reconcile_request(&mut store, "archive-reconcile-conflict");
+        store.restore_character("middle-archived", store.revision().unwrap()).unwrap();
+        store.commit(&WorkingSetCommit { expected_revision: store.revision().unwrap(), conversations: Some(vec![
+            ConversationMutation::ReplaceRange { character_id: "middle-archived".into(), conversation_id: "middle-chat".into(),
+                start: 0, delete_count: if insert { 0 } else { 1 }, messages: vec![json!({"chatId":"remote-message","role":"user","data":"remote change"})],
+                conversation: None, configured_index: None }
+        ]), ..Default::default() }).unwrap();
+        store.archive_character("middle-archived", store.revision().unwrap(), 456).unwrap();
+        request.expected_revision = store.revision().unwrap();
+        let before = archived_object(&store, "middle-archived");
+        assert!(matches!(store.reconcile_archived_character(&request, &|| false).unwrap(), ArchiveReconcileResult::HistoryConflict { .. }));
+        assert_eq!(store.revision().unwrap(), request.expected_revision);
+        assert_eq!(archived_object(&store, "middle-archived"), before);
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_requests WHERE request_id=?1", [&request.header.request_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(store.device_store().unwrap().connection().query_row("SELECT count(*) FROM lww_intents WHERE request_id=?1", [&request.header.request_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+}
+
+#[test]
+fn archive_reconciliation_failure_rolls_back_child_units_archive_and_receipt() {
+    let (_directory, mut store, _cas) = archive_store();
+    let request = reconcile_request(&mut store, "archive-reconcile-rollback");
+    let before = archived_object(&store, "middle-archived");
+    let outbox = store.lww_read_outbox(request.header.binding_authority, 256).unwrap();
+    store.connection.execute_batch("CREATE TEMP TRIGGER reject_archive_reconcile BEFORE INSERT ON main.lww_requests WHEN NEW.request_id='archive-reconcile-rollback' BEGIN SELECT RAISE(ABORT,'synthetic receipt failure'); END;").unwrap();
+    assert!(store.reconcile_archived_character(&request, &|| false).is_err());
+    assert_eq!(store.revision().unwrap(), request.expected_revision);
+    assert_eq!(archived_object(&store, "middle-archived"), before);
+    let after = store.lww_read_outbox(request.header.binding_authority, 256).unwrap();
+    assert_eq!(after.revision, outbox.revision);
+    assert_eq!(after.entries, outbox.entries);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM conversations WHERE character_id='middle-archived'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(store.device_store().unwrap().connection().query_row("SELECT count(*) FROM lww_intents WHERE request_id=?1", [&request.header.request_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    store.connection.execute_batch("DROP TRIGGER reject_archive_reconcile").unwrap();
+    assert!(store.reconcile_archived_character(&request, &|| false).is_ok());
+}
+
+#[test]
+fn archive_catalog_registration_obeys_the_enclosing_transaction() {
+    let (_directory, mut store, cas) = archive_store();
+    let object = cas.prepare_bytes(b"synthetic transactional archive body").unwrap();
+    let reader = Connection::open(&store.database_path).unwrap();
+    let tx = store.connection.transaction().unwrap();
+    super::super::asset_object_catalog::register_in_transaction(&tx, &[super::super::asset_object_catalog::AssetObjectRegistration {
+        object_hash: object.content_hash.clone(), byte_size: object.byte_size,
+    }], 5).unwrap();
+    assert_eq!(tx.query_row("SELECT count(*) FROM asset_objects WHERE object_hash=?1", [&object.content_hash], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(reader.query_row("SELECT count(*) FROM asset_objects WHERE object_hash=?1", [&object.content_hash], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    tx.rollback().unwrap();
+    assert_eq!(reader.query_row("SELECT count(*) FROM asset_objects WHERE object_hash=?1", [&object.content_hash], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn archive_reconciliation_cancellation_after_first_publication_keeps_recovery_candidates() {
+    use crate::asset_repository::job_pins::{collect_durable_cas_job_roots_read_only, durable_cas_job_ids};
+    let (directory, mut store, cas) = archive_store();
+    let mut request = reconcile_request(&mut store, "archive-reconcile-cancel");
+    request.unit_mutations.push(reconcile_unit(&["character", "middle-archived", "privateOwn"], json!("local only")));
+    let before = archived_object(&store, "middle-archived");
+    let published = std::cell::RefCell::new(Vec::new());
+    let error = store.reconcile_archived_character(&request, &|| {
+        let roots = collect_durable_cas_job_roots_read_only(directory.path());
+        let present = roots.object_hashes.iter().filter(|hash| cas.stat_object(hash).unwrap().is_some()).cloned().collect::<Vec<_>>();
+        if present.len() == 1 {
+            *published.borrow_mut() = present;
+            true
+        } else { false }
+    }).unwrap_err();
+    assert!(error.to_string().contains(super::super::archive::ARCHIVE_CANCELLED_MESSAGE));
+    assert_eq!(published.borrow().len(), 1);
+    assert_eq!(store.revision().unwrap(), request.expected_revision);
+    assert_eq!(archived_object(&store, "middle-archived"), before);
+    let hash = published.borrow()[0].clone();
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM asset_objects WHERE object_hash=?1", [&hash], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert!(cas.stat_object(&hash).unwrap().is_some());
+    assert!(durable_cas_job_ids(directory.path()).unwrap().is_empty());
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_requests WHERE request_id=?1", [&request.header.request_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert!(store.reconcile_archived_character(&request, &|| false).is_ok());
+}
+
+#[test]
+fn archive_reconciliation_delete_requires_unchanged_conversation_metadata() {
+    use super::super::archive_reconcile::ArchiveReconcileResult;
+    let (_directory, mut store, _cas) = archive_store();
+    let mut request = reconcile_request(&mut store, "archive-reconcile-delete-conflict");
+    request.conversations = vec![ConversationMutation::Delete { character_id: "middle-archived".into(), conversation_id: "middle-chat".into() }];
+    store.restore_character("middle-archived", store.revision().unwrap()).unwrap();
+    store.commit(&WorkingSetCommit { expected_revision: store.revision().unwrap(), unit_mutations: Some(vec![
+        reconcile_unit(&["conversation", "middle-archived", "middle-chat", "name"], json!("renamed remotely")),
+    ]), ..Default::default() }).unwrap();
+    store.archive_character("middle-archived", store.revision().unwrap(), 456).unwrap();
+    request.expected_revision = store.revision().unwrap();
+    let before = archived_object(&store, "middle-archived");
+    assert!(matches!(store.reconcile_archived_character(&request, &|| false).unwrap(), ArchiveReconcileResult::HistoryConflict { .. }));
+    assert_eq!(store.revision().unwrap(), request.expected_revision);
+    assert_eq!(archived_object(&store, "middle-archived"), before);
+    store.restore_character("middle-archived", store.revision().unwrap()).unwrap();
+    assert_eq!(store.read_conversation("middle-archived", "middle-chat", None).unwrap().unwrap().value["name"], "renamed remotely");
+}
+
+#[test]
+fn archive_reconciliation_rejects_other_owners_and_stale_selection() {
+    let (_directory, mut store, _cas) = archive_store();
+    let request = reconcile_request(&mut store, "archive-reconcile-scope");
+    let before = archived_object(&store, "middle-archived");
+    for unit in [
+        reconcile_unit(&["character", "first-active", "name"], json!("wrong owner")),
+        reconcile_unit(&["root", "username"], json!("outside owner")),
+        reconcile_unit(&["exists", "character", "middle-archived"], json!({"type":"character"})),
+        reconcile_unit(&["character", "middle-archived", "type"], json!("group")),
+    ] {
+        let mut invalid = request.clone();
+        invalid.unit_mutations = vec![unit];
+        assert!(store.reconcile_archived_character(&invalid, &|| false).is_err());
+    }
+    let mut stale = request.clone();
+    stale.selection_epoch = "stale-selection".into();
+    assert!(store.reconcile_archived_character(&stale, &|| false).unwrap_err().to_string().contains("Sync selection changed"));
+    assert_eq!(store.revision().unwrap(), request.expected_revision);
+    assert_eq!(archived_object(&store, "middle-archived"), before);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_requests WHERE request_id=?1", [&request.header.request_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+#[test]
+fn archive_reconciliation_holds_authority_and_selection_through_the_library_write() {
+    use crate::asset_repository::job_pins::durable_cas_job_ids;
+    let (directory, mut store, _cas) = archive_store();
+    let request = reconcile_request(&mut store, "archive-reconcile-guards");
+    let device = Connection::open(directory.path().join("persistent").join(super::super::device_store::DEVICE_DATABASE_FILE)).unwrap();
+    device.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let library = Connection::open(&store.database_path).unwrap();
+    library.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let attempted = std::cell::Cell::new(false);
+    store.reconcile_archived_character(&request, &|| {
+        if !attempted.get() && !durable_cas_job_ids(directory.path()).unwrap().is_empty() {
+            attempted.set(true);
+            let device_error = device.execute("UPDATE lww_clock SET binding_authority='999' WHERE singleton=1", []).unwrap_err();
+            assert_eq!(device_error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy));
+            let selection_error = library.execute("UPDATE library_sync_selection SET selection_epoch='concurrent-selection' WHERE singleton=1", []).unwrap_err();
+            assert_eq!(selection_error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy));
+        }
+        false
+    }).unwrap();
+    assert!(attempted.get());
+    assert_eq!(store.lww_binding_authority().unwrap(), request.header.binding_authority);
+    assert_eq!(store.lww_binding_state().unwrap().selection_epoch, request.selection_epoch);
+    assert_eq!(store.revision().unwrap(), request.expected_revision + 1);
 }

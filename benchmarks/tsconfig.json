@@ -15,6 +15,7 @@
     "./legacy-restore/**/*.ts",
     "./official-account/**/*.ts",
     "./plugin-review/**/*.ts",
+    "./rust-core-oracles/**/*.ts",
     "../src/**/*.d.ts"
   ],
   "exclude": [

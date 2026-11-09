@@ -6,11 +6,11 @@ import { getDatabase, setDatabase, setDatabaseLite } from "../storage/database.s
 import { alertConfirm, alertError } from "../alert";
 import { selectSingleFile } from "../util";
 import { markBootSuspect } from "../storage/bootAttempt";
-import type { BlobReadOptions } from "../storage/blobStore";
 import type { OpenAIChat } from "../process/index.svelte";
 import { fetchNative, globalFetch, readImage, saveAsset } from "../globalApi.svelte";
 import { DBState, hotReloading } from "../stores.svelte";
 import type { ScriptMode } from "../process/scripts";
+import { reconcilePluginListUpdate } from "./pluginListUpdate";
 import { areV3PluginsIdle, canInterruptV3Plugins, customV3ProviderMetaStore, loadV3Plugins, prepareV3PluginsForReload, subscribeV3PluginActivity } from "./apiV3/v3.svelte";
 import { pluginCodeTranspiler } from "./apiV3/transpiler";
 import {
@@ -27,7 +27,6 @@ import {
 import { getPersistentDataStore } from "../storage/persistentDataStoreFactory";
 import {
     createPluginStorageStore,
-    dropStaleColdPluginReferences,
     registerPluginStorageLifecycle,
 } from "./pluginStorageStore";
 import { UNOWNED_PLUGIN_OWNER } from "./pluginOwner";
@@ -551,8 +550,6 @@ export async function loadPlugins(whenIdle = false, isCurrent: () => boolean = (
     await reportUnsupportedPlugins(
         enabledPlugins.filter((plugin: RisuPlugin) => !isSupportedPluginVersion(plugin)),
     )
-    try { await dropStaleColdPluginReferences(getPersistentDataStore(), pluginStorageStore) }
-    catch (error) { console.warn('Stale cold plugin storage references were not removed', error) }
 
     await applyPluginLoad(enabledPlugins.filter(isSupportedPluginVersion), () => {
         if (!allowed()) return false
@@ -721,7 +718,7 @@ export const getV2PluginAPIs = () => {
             }
         },
         loadPlugins: loadPluginsFromPlugin,
-        readImage: (path:string, options?: BlobReadOptions) => {
+        readImage: (path:string) => {
             if(path.startsWith('assets/')){
                 //trim assets/ prefix temporarily
                 path = path.slice(7);
@@ -730,7 +727,7 @@ export const getV2PluginAPIs = () => {
                 throw new Error("readImage path cannot contain '/' or '\\' for security reasons, except assets/ prefix.");
             }
             //re-add assets/ prefix
-            return readImage('assets/' + path, options);
+            return readImage('assets/' + path);
         },
         saveAsset: (data:Uint8Array) => {
             return saveAsset(data);
@@ -788,72 +785,14 @@ export async function pluginProcess(arg: {
     }
 }
 
-// Answers to plugin-requested installs and replacements last until the app restarts.
-const declinedPluginRequests = new Set<string>()
-const carriedPluginApprovals = new Set<string>()
-const pendingPluginRequests = new Map<string, Promise<boolean>>()
+export async function handlePluginInstallViaPlugin(plugins: RisuPlugin[]){
 
-function canonicalPluginJson(value: unknown): string {
-    if (Array.isArray(value)) return `[${value.map(canonicalPluginJson).join(',')}]`
-    if (value && typeof value === 'object') {
-        return `{${Object.keys(value).sort().flatMap(key => {
-            const entry = (value as Record<string, unknown>)[key]
-            return entry === undefined ? [] : [`${JSON.stringify(key)}:${canonicalPluginJson(entry)}`]
-        }).join(',')}}`
-    }
-    return JSON.stringify(value) ?? 'null'
-}
-
-async function sha256Hex(text: string): Promise<string> {
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
-    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
-}
-
-// An answer covers one requester, one submitted record and the script it replaces (null for an install).
-async function pluginRequestKey(requester: string, plugin: RisuPlugin, replacedScript: string | null): Promise<string> {
-    return JSON.stringify([requester, plugin.name, await sha256Hex(canonicalPluginJson(plugin)), replacedScript === null ? null : await sha256Hex(replacedScript)])
-}
-
-/**
- * Asks before a plugin installs a plugin or replaces an installed plugin's script.
- * Returns the approved records; `installPlugin` approvals carry over once to the next matching `setDatabase`.
- */
-export async function handlePluginInstallViaPlugin(plugins: RisuPlugin[], requester: string, source: 'installPlugin' | 'setDatabase'){
+    const { additions } = reconcilePluginListUpdate(DBState.db.plugins, plugins)
     const approved: RisuPlugin[] = []
-    const seen = new Set<string>()
-    for (const plugin of plugins) {
-        if (plugin?.version !== '3.0' || typeof plugin.name !== 'string' || plugin.name === '*' || seen.has(plugin.name)) continue
-        seen.add(plugin.name)
-        const installedPlugins: RisuPlugin[] = DBState.db.plugins ?? []
-        const installed = installedPlugins.find(value => value.name === plugin.name)
-        if (installed && installed.script === plugin.script) continue
-        const key = await pluginRequestKey(requester, plugin, installed ? installed.script : null)
-        if (declinedPluginRequests.has(key)) continue
-        if (source === 'setDatabase' && carriedPluginApprovals.delete(key)) {
-            approved.push(plugin)
-            continue
-        }
-        let request = pendingPluginRequests.get(key)
-        if (!request) {
-            const installedName = (name: string) => {
-                const record = installedPlugins.find(value => value.name === name)
-                return record ? record.displayName ?? record.name : name
-            }
-            const messages = language.risuNest.plugins
-            const message = !installed
-                ? messages.installViaPlugin.replace('{source}', () => installedName(requester)).replaceAll('{plugin}', () => plugin.name)
-                : requester === plugin.name
-                    ? messages.replaceSelfViaPlugin.replaceAll('{plugin}', () => installedName(plugin.name))
-                    : messages.replaceViaPlugin.replace('{source}', () => installedName(requester)).replaceAll('{plugin}', () => installedName(plugin.name))
-            request = alertConfirm(message).then(confirmed => {
-                if (!confirmed) declinedPluginRequests.add(key)
-                return confirmed
-            }).finally(() => pendingPluginRequests.delete(key))
-            pendingPluginRequests.set(key, request)
-        }
-        if (!await request) continue
-        if (source === 'installPlugin') carriedPluginApprovals.add(key)
-        approved.push(plugin)
+    for (const plugin of additions) {
+        if (plugin.version !== '3.0' || plugin.name === '*') continue
+        const confirmation = await alertConfirm(language.confirmInstallPluginViaPlugin.replace('{plugin}', plugin.name))
+        if (confirmation) approved.push(plugin)
     }
-    return approved
+    return reconcilePluginListUpdate(DBState.db.plugins, approved).additions
 }

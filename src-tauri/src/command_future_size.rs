@@ -39,7 +39,6 @@ async_command_arity!(A, B, C, D, E);
 async_command_arity!(A, B, C, D, E, G);
 async_command_arity!(A, B, C, D, E, G, H);
 async_command_arity!(A, B, C, D, E, G, H, I);
-async_command_arity!(A, B, C, D, E, G, H, I, J);
 
 fn future_bytes<Args>(command: impl AsyncCommand<Args>) -> usize {
     command.future_bytes()
@@ -82,8 +81,6 @@ async_commands![
     external_storage::lww_commands::external_lww_inspect,
     external_storage::lww_commands::external_lww_stage_binding,
     external_storage::lww_commands::external_lww_publish,
-    external_storage::lww_commands::external_lww_check_format,
-    external_storage::lww_commands::external_lww_switch_format,
     external_storage::lww_commands::external_lww_receive,
     external_storage::lww_commands::external_lww_maintenance,
     external_storage::lww_commands::external_lww_fence,
@@ -110,6 +107,7 @@ async_commands![
     server_sync::commands::server_sync_configure,
     server_sync::commands::server_sync_lww_push,
     server_sync::commands::server_sync_lww_pull,
+    server_sync::commands::server_sync_lww_apply_receive,
     server_sync::commands::server_sync_lww_ack,
     server_sync::commands::server_sync_lww_fence,
     server_sync::commands::server_sync_lww_activate,
@@ -123,8 +121,6 @@ async_commands![
     server_sync::commands::server_sync_lww_prepare_fresh_writer,
     server_sync::commands::server_sync_lww_activate_new_device,
     server_sync::commands::server_sync_lww_retry,
-    server_sync::commands::server_sync_lww_check_format,
-    server_sync::commands::server_sync_lww_switch_format,
     server_sync::commands::server_sync_lww_drain,
     server_sync::commands::server_sync_cancel,
     server_sync::commands::server_sync_notify_start,
@@ -139,12 +135,12 @@ async_commands![
     #[cfg(desktop)]
     appimage_integration::appimage_integration_register,
     native_tokenizer::tokenize_batch,
+    render_display::render_display_start,
+    render_display::render_display_resume,
+    render_display::render_display_cancel,
     native_media::native_media_encode_inlay_image,
-    native_media::ipc::native_media_encode_canvas_webp,
-    native_media::ipc::native_media_encode_canvas_webp_finish,
     native_media::ipc::native_media_inlay_input_open,
     native_media::ipc::native_media_inlay_input_chunk,
-    native_media::ipc::native_media_inlay_input_chunk_raw,
     native_media::ipc::native_media_encode_inlay_finish,
     native_media::ipc::native_media_inlay_output_read,
     asset_repository::commands::asset_cas_read_bytes,
@@ -157,7 +153,6 @@ async_commands![
     asset_repository::commands::asset_cas_job_prepare,
     asset_repository::commands::asset_cas_job_upload_open,
     asset_repository::commands::asset_cas_job_upload_chunk,
-    asset_repository::commands::asset_cas_job_upload_chunk_raw,
     asset_repository::commands::asset_cas_job_upload_finish,
     asset_repository::commands::asset_cas_job_upload_cancel,
     asset_repository::commands::asset_cas_job_pin_existing,
@@ -167,6 +162,7 @@ async_commands![
     asset_repository::commands::asset_cas_job_release,
     native_file_jobs::native_content_source_metadata,
     native_file_jobs::native_file_job_prepared_content,
+    native_file_jobs::native_file_job_prepared_preset,
     native_file_jobs::native_file_job_stage_inline_asset,
     native_file_jobs::screenshot_output::native_file_job_screenshot_output_publish,
     persistent_store::commands::gallery::pds_gallery_page,
@@ -182,6 +178,8 @@ async_commands![
     persistent_store::commands::gallery::pds_gallery_usage_count,
     persistent_store::commands::pds_archive_character,
     persistent_store::commands::pds_restore_character,
+    persistent_store::commands::pds_hydrate_archive_reconcile,
+    persistent_store::commands::pds_reconcile_archived_character,
     persistent_store::commands::image_geometry::pds_read_image_geometry,
     persistent_store::commands::image_geometry::pds_write_image_geometry,
     persistent_store::commands::image_geometry::pds_compute_image_geometry,
@@ -206,6 +204,14 @@ async_commands![
     #[cfg(feature = "native-kei-upload-pilot")]
     persistent_store::commands::pds_kei_backup_upload,
     regex_shadow::regex_execute_batch,
+    native_generation::commands::native_generation_host_init,
+    native_generation::commands::native_generation_reserve_ollama,
+    native_generation::commands::native_generation_execute,
+    native_generation::commands::native_generation_cancel,
+    native_generation::commands::native_generation_status,
+    native_generation::commands::native_generation_active,
+    native_generation::commands::native_generation_capture_witness,
+    native_generation::commands::native_generation_proof,
 ];
 
 fn compact(path: &str) -> String {

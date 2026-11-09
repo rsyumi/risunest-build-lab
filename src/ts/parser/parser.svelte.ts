@@ -21,6 +21,9 @@ import { calcString } from '../process/infunctions';
 import { findCharacterbyId, getPersonaPrompt, getUserIcon, getUserName, pickHashRand, replaceAsync} from '../util';
 import { getInlayAssetMetadata } from '../process/files/inlays';
 import { DeferredInlayMarkerRegistry, getInlayRenderSources, renderDeferredInlaySourceMarkup, type InlayRenderSource } from '../process/files/inlayRenderSource';
+import { supportsImageReservation } from '../process/files/imageGeometryRender';
+import { routesDisplayNatively } from './nativeDisplayRouting';
+import { renderDisplayNatively, type NativeDisplayHost, type NativeDisplayMode, type NativeDisplayRequest, type NativeDisplayResult } from './nativeDisplayRender';
 import { getModuleAssets, getModuleLorebooks, getModules, type RisuModule } from '../process/modules';
 import hljs from 'highlight.js/lib/core'
 import 'highlight.js/styles/atom-one-dark.min.css'
@@ -489,10 +492,8 @@ $effect.root(() => {
 const imageCBS = ['img', 'image', 'emotion', 'asset', 'bg', 'raw', 'path']
 const videoExtensions = ['mp4', 'webm', 'avi', 'm4p', 'm4v']
 
-async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|character, mode:'normal'|'back', arg:{ch:number}, renderContext:ParseMarkdownRenderContext = {}){
-    const assetWidth = renderContext.assetWidth ?? DBState.db.assetWidth
-    const assetWidthString = (assetWidth && assetWidth !== -1 || assetWidth === 0) ? `max-width:${assetWidth}rem;` : ''
-
+/** The asset index of `char` for one render, built on first use. */
+function assetLookupFor(char:simpleCharacterArgument|character, renderContext:ParseMarkdownRenderContext): () => AssetLookupIndex {
     const characterAssets = char.additionalAssets ?? []
     const emotionAssets = char.emotionImages ?? []
     let canUseSelectedCache = false
@@ -517,6 +518,14 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
     // Most text has no asset tags, so build the index on the first tag. A reactive
     // caller still reads every asset here, so an asset edit re-runs it as before.
     if ($effect.tracking()) getAssetLookup()
+    return getAssetLookup
+}
+
+async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|character, mode:'normal'|'back', arg:{ch:number}, renderContext:ParseMarkdownRenderContext = {}){
+    const assetWidth = renderContext.assetWidth ?? DBState.db.assetWidth
+    const assetWidthString = (assetWidth && assetWidth !== -1 || assetWidth === 0) ? `max-width:${assetWidth}rem;` : ''
+
+    const getAssetLookup = assetLookupFor(char, renderContext)
 
     let needsSourceAccess = false
     let cx: number|null = null
@@ -770,6 +779,114 @@ function parseThoughtsAndTools(
     )
 }
 
+interface FirstAssetPassReads {
+    hideAllImages: boolean
+    mediaFindings: boolean
+}
+
+/**
+ * The settings the first asset pass reads before it waits, which a reactive caller of the TS stages tracks:
+ * `hideAllImages` for any tag, and the media matching settings for a tag it neither hides nor resolves as an emotion
+ * or a source image.
+ */
+function firstAssetPassReads(
+    data:string,
+    char:simpleCharacterArgument|character|undefined,
+    renderContext:ParseMarkdownRenderContext,
+): FirstAssetPassReads {
+    const reads = { hideAllImages: false, mediaFindings: false }
+    if (!char || !$effect.tracking()) return reads
+    for (const [, type, name] of data.matchAll(assetRegex)) {
+        reads.hideAllImages = true
+        const hidden = untrack(() => renderContext.hideAllImages ?? DBState.db.hideAllImages) && imageCBS.includes(type)
+        const sourceImage = type === 'source' && ['char', 'user'].includes(name.toLocaleLowerCase())
+        if (!hidden && type !== 'emotion' && !sourceImage) {
+            reads.mediaFindings = true
+            break
+        }
+    }
+    return reads
+}
+
+function tracked<T>(track:boolean, read:() => T): T {
+    return track ? read() : untrack(read)
+}
+
+/** What the native display render reads before the host answers anything, as the TS stages read it. */
+function nativeDisplayRequest(
+    data:string,
+    char:simpleCharacterArgument|character|undefined,
+    mode:NativeDisplayMode,
+    chatID:number,
+    renderContext:ParseMarkdownRenderContext,
+    reads:FirstAssetPassReads,
+): NativeDisplayRequest {
+    return {
+        text: data,
+        mode,
+        character: char ? {
+            assetWidth: renderContext.assetWidth ?? DBState.db.assetWidth ?? null,
+            chatId: chatID,
+            chaId: char.chaId,
+            // Untracked, as parseAdditionalAssets reads them after its first wait.
+            ...untrack(() => {
+                if (renderContext.characterImageSource !== undefined) {
+                    return { characterImage: renderContext.characterImageSource, userImage: renderContext.userImageSource ?? null, sourcesThrow: false }
+                }
+                const current = getCurrentCharacter()
+                return { characterImage: current?.image ?? null, userImage: getUserIcon() ?? null, sourcesThrow: !current }
+            }),
+        } : null,
+        hideAllImages: tracked(reads.hideAllImages, () => renderContext.hideAllImages ?? DBState.db.hideAllImages ?? false),
+        imageReservation: supportsImageReservation(),
+        thoughtMode: renderContext.streamingThoughtMode ?? 'off',
+        labels: { cot: language.cot, toolCalled: language.toolCalled, error: language.error },
+        // Untracked, as renderHighlightableMarkdown reads them after a wait.
+        quotes: untrack(() => {
+            const settings: MarkdownRenderSettings = renderContext.markdownSettings ?? DBState.db
+            return {
+                customQuotes: settings.customQuotes ?? false,
+                customQuotesData: settings.customQuotesData ?? null,
+                unformatQuotes: settings.unformatQuotes ?? false,
+                blockquoteStyling: settings.blockquoteStyling ?? false,
+            }
+        }),
+    }
+}
+
+/** The answers parseAdditionalAssets, parseInlayAssets and the scripts give the TS stages. */
+function nativeDisplayHost(
+    char:simpleCharacterArgument|character|undefined,
+    scripts:(text:string) => Promise<string>,
+    registry:DeferredInlayMarkerRegistry,
+    renderContext:ParseMarkdownRenderContext,
+    reads:FirstAssetPassReads,
+): NativeDisplayHost {
+    const getAssetLookup = char ? assetLookupFor(char, renderContext) : null
+    const maxDifference = tracked(reads.mediaFindings, () => {
+        const exactOnly = (renderContext.legacyMediaFindings ?? DBState.db.legacyMediaFindings) === true
+        return exactOnly ? -1 : (renderContext.assetMaxDifference ?? DBState.db.assetMaxDifference)
+    })
+    return {
+        lookup: (tag, name) => {
+            if (!getAssetLookup) return null
+            name = name.toLocaleLowerCase()
+            return tag === 'emotion'
+                ? resolveEmotionAsset(getAssetLookup(), name)
+                : resolveAdditionalAsset(getAssetLookup(), name, maxDifference, getAssetDistance)
+        },
+        url: async (path, image) => {
+            const source = image ? await getFileImageSource(path) : null
+            if (source) registry.rememberAssetImage(source)
+            return source?.url ?? await getFileSrcCached(path)
+        },
+        scripts,
+        inlays: (ids) => getInlayRenderSources(ids, true),
+        registry,
+        signal: renderContext.signal,
+    }
+}
+
 export async function ParseMarkdown(
     data:string,
     charArg:(character|simpleCharacterArgument | string) = null,
@@ -810,8 +927,49 @@ async function parseMarkdownForDisplay(
     let firstParsed = ''
     const additionalAssetMode = (mode === 'back') ? 'back' : 'normal'
     let char = (typeof(charArg) === 'string') ? (findCharacterbyId(charArg)) : (charArg)
+    const displayScripts = async (text:string) => (await processScriptFull(char, text, 'editdisplay', chatID, cbsConditions, {
+        captureContext: renderContext.scriptContext,
+        cache: renderContext.scriptContext ? 'bypass' : 'normal',
+        projectedChatID: renderContext.projectedChatID,
+        signal: renderContext.signal,
+        variableReads: renderContext.variableReads,
+        displayRequestOrder: renderContext.displayRequestOrder,
+    })).data
+    const trimDisplay = async (data:string, styleHistory:boolean) => {
+        if (prepareStyleHistory && styleHistory) {
+            const context = renderContext.scriptContext!
+            const historyAccess = await prepareStyleHistory(data, chatID, false)
+            renderContext = { ...renderContext, scriptContext: { ...context,
+                parserContext: { ...context.parserContext, historyAccess } } }
+        }
+        return recordChatVariableReads(renderContext.variableReads, () => trimMarkdown(data, {
+            hideAllImages: renderContext.hideAllImages,
+            returnCSSError: renderContext.returnCSSError,
+            parserContext: renderContext.scriptContext?.parserContext,
+            chatID,
+            projectedChatID: renderContext.projectedChatID,
+            cbsConditions,
+            deferredInlays: renderContext.deferredInlays,
+        }))
+    }
 
-    if(char){
+    // A message the app core declines renders here, from the script result once the scripts have run.
+    let native: NativeDisplayResult | null = null
+    if (routesDisplayNatively(data)) {
+        const reads = firstAssetPassReads(data, char, renderContext)
+        native = await renderDisplayNatively(nativeDisplayRequest(data, char, mode, chatID, renderContext, reads),
+            nativeDisplayHost(char, displayScripts, renderContext.deferredInlays!, renderContext, reads), recordStored)
+    }
+    if(native?.kind === 'done'){
+        return native.trim ? await trimDisplay(native.html, native.styleHistory) : native.html
+    }
+    const scripted = native?.scripted
+
+    if(scripted){
+        firstParsed = scripted.firstParsed
+        data = scripted.data
+    }
+    else if(char){
         // Started before waiting for the record, so a reactive caller still tracks the assets it reads.
         [data] = await Promise.all([parseAdditionalAssets(data, char, additionalAssetMode, {
             ch: chatID
@@ -821,15 +979,8 @@ async function parseMarkdownForDisplay(
     }
     else if (recordStored) await recordStored
 
-    if(char){
-        data = (await processScriptFull(char, data, 'editdisplay', chatID, cbsConditions, {
-            captureContext: renderContext.scriptContext,
-            cache: renderContext.scriptContext ? 'bypass' : 'normal',
-            projectedChatID: renderContext.projectedChatID,
-            signal: renderContext.signal,
-            variableReads: renderContext.variableReads,
-            displayRequestOrder: renderContext.displayRequestOrder,
-        })).data
+    if(char && !scripted){
+        data = await displayScripts(data)
     }
 
     renderContext.signal?.throwIfAborted()
@@ -854,21 +1005,7 @@ async function parseMarkdownForDisplay(
             return data
         }
     }
-    if (prepareStyleHistory && /<risu-style\b/i.test(data)) {
-        const context = renderContext.scriptContext!
-        const historyAccess = await prepareStyleHistory(data, chatID, false)
-        renderContext = { ...renderContext, scriptContext: { ...context,
-            parserContext: { ...context.parserContext, historyAccess } } }
-    }
-    return recordChatVariableReads(renderContext.variableReads, () => trimMarkdown(data, {
-        hideAllImages: renderContext.hideAllImages,
-        returnCSSError: renderContext.returnCSSError,
-        parserContext: renderContext.scriptContext?.parserContext,
-        chatID,
-        projectedChatID: renderContext.projectedChatID,
-        cbsConditions,
-        deferredInlays: renderContext.deferredInlays,
-    }))
+    return trimDisplay(data, Boolean(prepareStyleHistory) && /<risu-style\b/i.test(data))
 }
 
 const trimPurifyConfig = {

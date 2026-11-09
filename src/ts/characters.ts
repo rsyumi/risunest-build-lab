@@ -1,14 +1,12 @@
 import { imageAliases, imageFormatFromBytes, stripImageExtension } from './media/imageFormats'
 import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
-import { materializeAuthorNote } from './authorNotePresets'
 import DOMPurify from 'dompurify'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
 import { alertAddCharacter, alertCheckboxConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
 import { language } from "../lang";
 import { isArchivedCharacter } from "./storage/workingSetCatalog";
-import { fillLorebookText } from "./storage/lorebookText";
 import { restoreArchivedCharacterWithConfirmation } from "./storage/characterArchive";
 import { checkNullish, findCharacterbyId, getUserName, selectMultipleFile, selectSingleFile, mapSelectedFiles, fileAccept } from "./util";
 import { v4 as uuidv4, v4 } from 'uuid';
@@ -18,7 +16,7 @@ import { updateInlayScreen } from "./process/inlayScreen";
 import { parseMarkdownSafe } from "./parser/parser.svelte";
 import { translateHTML } from "./translator/translator";
 import { beginMobileBackgroundTask, type MobileBackgroundTask } from "./mobileBackgroundTask";
-import { doingChat } from "./process/index.svelte";
+import { doingChat, isNativeGenerationNavigationAllowed } from "./process/generationState";
 import { importCharacter } from "./characterCards";
 import { PngChunk } from "./pngChunk";
 import {
@@ -321,7 +319,7 @@ export async function exportChat(page:number){
             const stringl = Buffer.from(JSON.stringify({
                 type: 'risuChat',
                 ver: 2,
-                data: materializeAuthorNote(db.authorNotePresets, chat),
+                data: chat,
                 folders: folders
             }), 'utf-8')
     
@@ -638,7 +636,7 @@ export async function exportAllChats() {
             : null
         if (!char) throw new Error('Character was not found')
         const date = new Date().toISOString().replace(/[:.]/g, "-")
-        const allChats = char.chats.map((chat) => materializeAuthorNote(db.authorNotePresets, chat))
+        const allChats = char.chats
         const allFolders = char.chatFolders
         const stringl = Buffer.from(JSON.stringify({
             type: 'risuAllChats',
@@ -763,7 +761,6 @@ export function characterFormatUpdate(indexOrCharacter:number|character, arg:{
 }
 
 export function updateLorebooks(book:loreBook[]){
-    fillLorebookText(book)
     return book.map((v) => {
         v.bookVersion ??= 1
         if(v.bookVersion >= 2){
@@ -1038,7 +1035,7 @@ export async function changeChar(index: number, arg:{
         reseter()
         return true
     }
-    if(get(doingChat)){
+    if(get(doingChat) && !isNativeGenerationNavigationAllowed()){
       alertToast(language.navigationBlockedWhileGenerating)
       return false
     }

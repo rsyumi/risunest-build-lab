@@ -1,0 +1,720 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-openai-compatible.oracle.test.ts",
+  "fixtureSha256": "e7a22eb6d6eee4d070432824689ff6a479b9427266f5d30357d5f6aea2b109ce",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/process/request/openAI/requests.ts": "58901b6539a523bdab03e92aa5b9154c6a192912e32b423bc70ef442ce27f233",
+    "src/ts/process/request/openAI/shared.ts": "c5a595e64a72f2994dd4498129a9eb7e10380e545db07465999c16359cfb541a",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/globalApi.svelte.ts": "74c285e0038f8e1d033e267e1f3374fd925e1d3d73870cb97e811712e1ff2f0c",
+    "src/ts/process/templates/jsonSchema.ts": "3306d98d052e2972e0d38344c8174e3e5ff83798a2f6694496240d9a958abef7"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "text",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Synthetic answer."
+        }
+      }
+    },
+    {
+      "id": "subscription-provider-text",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/subscription/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ],
+              [
+                "X-Provider",
+                "synthetic-provider"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Subscription answer."
+        }
+      }
+    },
+    {
+      "id": "null-content",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": ""
+        }
+      }
+    },
+    {
+      "id": "reasoning",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "<Thoughts>\nSynthetic reasoning.\n</Thoughts>\nAnswer."
+        }
+      }
+    },
+    {
+      "id": "legacy-text",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Synthetic legacy text."
+        }
+      }
+    },
+    {
+      "id": "multiple-choices-stays-single",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "First."
+        }
+      }
+    },
+    {
+      "id": "extract-json",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"format\",\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"]}}},\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "success",
+          "result": "Synthetic extraction."
+        }
+      }
+    },
+    {
+      "id": "http-error",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "Error: error in request:Synthetic limit."
+        }
+      }
+    },
+    {
+      "id": "http-error-without-message",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "Error: error in request:{\"detail\":\"Synthetic failure.\"}"
+        }
+      }
+    },
+    {
+      "id": "missing-choices",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "Error: error in request:{\"result\":\"Synthetic absent choice.\"}"
+        }
+      }
+    },
+    {
+      "id": "transport-error",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "Error: error in request:\"TypeError: Synthetic network failure.\""
+        }
+      }
+    },
+    {
+      "id": "tool-round-false",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/subscription/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ],
+              [
+                "X-Provider",
+                "tool-provider"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"description\":\"Synthetic lookup.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}]}"
+          },
+          {
+            "url": "https://nano-gpt.com/api/subscription/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ],
+              [
+                "X-Provider",
+                "tool-provider"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"},{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"synthetic-call\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\\\"synthetic\\\"}\"}}]},{\"role\":\"tool\",\"content\":\"Synthetic tool reply.\",\"tool_call_id\":\"synthetic-call\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"description\":\"Synthetic lookup.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}]}"
+          }
+        ],
+        "toolCalls": [
+          {
+            "name": "lookup",
+            "args": {
+              "query": "synthetic"
+            }
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "\n\n\n\nSynthetic final."
+        }
+      }
+    },
+    {
+      "id": "tool-round-true",
+      "result": {
+        "httpError": "Error: error in request:",
+        "model": {
+          "id": "nanogpt",
+          "internalID": "nanogpt",
+          "format": 20,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasImageInput",
+            "hasStreaming",
+            "OAICompletionTokens"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 15,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://nano-gpt.com/api/subscription/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ],
+              [
+                "X-Provider",
+                "tool-provider"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"description\":\"Synthetic lookup.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}]}"
+          },
+          {
+            "url": "https://nano-gpt.com/api/subscription/v1/chat/completions",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer sk-synthetic-nano"
+              ],
+              [
+                "X-Provider",
+                "tool-provider"
+              ]
+            ],
+            "body": "{\"model\":\"synthetic/model\",\"messages\":[{\"role\":\"system\",\"content\":\"Synthetic system.\"},{\"role\":\"user\",\"content\":\"Synthetic question.\"},{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"synthetic-call\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\\\"synthetic\\\"}\"}}]},{\"role\":\"tool\",\"content\":\"Synthetic tool reply.\",\"tool_call_id\":\"synthetic-call\"}],\"stream\":false,\"max_completion_tokens\":300,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"description\":\"Synthetic lookup.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}]}"
+          }
+        ],
+        "toolCalls": [
+          {
+            "name": "lookup",
+            "args": {
+              "query": "synthetic"
+            }
+          }
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "\n\nSynthetic final."
+        }
+      }
+    }
+  ]
+}

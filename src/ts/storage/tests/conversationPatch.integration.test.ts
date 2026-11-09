@@ -137,7 +137,6 @@ async function setup(database = makeDatabase()) {
         chatView: { register: vi.fn(), unregister: vi.fn(), dispose: vi.fn() },
         generationEnd: { register: vi.fn(), unregister: vi.fn(), dispose: vi.fn() },
         hasDatabasePermission: async () => true,
-        hasHostToolPermission: async () => true,
         lifetimeSignal: new AbortController().signal,
     })
     const live = (target: GeneratingConversation) => adapter.current().characters

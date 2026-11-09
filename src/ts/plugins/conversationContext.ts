@@ -20,7 +20,6 @@ import {
     iterateUnarchivedPinnedCharacterSummaries,
 } from '../storage/persistentRecordIterator'
 import { defineOwnEnumerableProperty } from '../storage/ownEnumerableProperty'
-import { effectiveAuthorNote, matchingAuthorNotePresetId } from '../authorNotePresets'
 import { selectConversationModules } from '../process/moduleSelection'
 import {
     isPlainObject,
@@ -345,8 +344,7 @@ export async function readPinnedConversationContext(
 
     let root: PersistentRoot | null = null
     let preset: botPreset | null = null
-    const presetNote = matchingAuthorNotePresetId(conversation) !== null
-    if (include.lore || persona || globals || presetNote) {
+    if (include.lore || persona || globals) {
         const found = await reader.readRoot()
         throwIfAborted(options.signal)
         assertPinnedRevision(reader.revision, found.revision, 'Root')
@@ -367,11 +365,7 @@ export async function readPinnedConversationContext(
             && options.selected.conversationId === conversationId,
         messageCount: metadata.totalMessages,
         conversation: pickFields(
-            {
-                ...conversation,
-                id: conversation.id ?? conversationId,
-                note: effectiveAuthorNote(root?.authorNotePresets, conversation),
-            } as Record<string, unknown>,
+            { ...conversation, id: conversation.id ?? conversationId } as Record<string, unknown>,
             CONVERSATION_FIELDS,
         ),
     }

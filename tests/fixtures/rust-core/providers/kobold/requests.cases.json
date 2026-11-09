@@ -1,0 +1,1194 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "koboldURL": "http://kobold.example.test:5001",
+    "instructChatTemplate": "chatml",
+    "username": "Mina",
+    "maxContext": 4000,
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "proxyKey": "sk-synthetic-proxy",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 14,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "multi-turn",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "unicode-and-escapes",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "日本語 😀"
+        },
+        {
+          "role": "user",
+          "content": "\"quoted\" \\ back\nline  "
+        }
+      ]
+    },
+    {
+      "id": "empty-messages",
+      "model": "kobold",
+      "messages": []
+    },
+    {
+      "id": "max-tokens-argument",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "maxTokens": 77
+    },
+    {
+      "id": "url-with-path-kept",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "koboldURL": "http://kobold.example.test:5001/custom/generate"
+      }
+    },
+    {
+      "id": "url-two-unit-path-replaced",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "koboldURL": "http://kobold.example.test/ab"
+      }
+    },
+    {
+      "id": "url-three-unit-path-kept",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "koboldURL": "http://kobold.example.test/abc"
+      }
+    },
+    {
+      "id": "url-trailing-slash-replaced",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "koboldURL": "https://kobold.example.test/"
+      }
+    },
+    {
+      "id": "url-query-kept",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "koboldURL": "http://kobold.example.test/?key=1"
+      }
+    },
+    {
+      "id": "url-default-port-dropped",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "koboldURL": "HTTP://Kobold.Example.Test:80"
+      }
+    },
+    {
+      "id": "url-userinfo-declines",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form",
+      "db": {
+        "koboldURL": "http://user:pw@kobold.example.test/"
+      }
+    },
+    {
+      "id": "url-invalid-declines",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form",
+      "db": {
+        "koboldURL": "not a url"
+      }
+    },
+    {
+      "id": "max-context",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "maxContext": 8192
+      }
+    },
+    {
+      "id": "temperature-disabled",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "temperature": -1000
+      }
+    },
+    {
+      "id": "top-k-zero-kept",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "top_k": 0
+      }
+    },
+    {
+      "id": "repetition-penalty-disabled",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "repetition_penalty": -1000
+      }
+    },
+    {
+      "id": "separate-parameters-model",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1.2,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.5,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1.4,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.7,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "kobold": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": -1000,
+              "min_p": 0,
+              "top_a": 0.5,
+              "top_p": 0.3,
+              "frequency_penalty": 0,
+              "presence_penalty": 0,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "separate-parameters-submodel",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1.2,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.5,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1.4,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.7,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "kobold": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": -1000,
+              "min_p": 0,
+              "top_a": 0.5,
+              "top_p": 0.3,
+              "frequency_penalty": 0,
+              "presence_penalty": 0,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "mode": "submodel"
+    },
+    {
+      "id": "separate-parameters-memory",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1.2,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.5,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1.4,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.7,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "kobold": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": -1000,
+              "min_p": 0,
+              "top_a": 0.5,
+              "top_p": 0.3,
+              "frequency_penalty": 0,
+              "presence_penalty": 0,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "mode": "memory"
+    },
+    {
+      "id": "separate-parameters-by-model",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1.2,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.5,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1.4,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.7,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "kobold": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": -1000,
+              "min_p": 0,
+              "top_a": 0.5,
+              "top_p": 0.3,
+              "frequency_penalty": 0,
+              "presence_penalty": 0,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      }
+    },
+    {
+      "id": "separate-parameters-by-model-missing-throws",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1.2,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.5,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1.3,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.6,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1.4,
+            "min_p": 0,
+            "top_a": 0.5,
+            "top_p": 0.7,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {}
+        },
+        "seperateParametersByModel": true
+      }
+    },
+    {
+      "id": "additional-not-applied-without-flag",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "additional-number",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-string-and-bool",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "sampler_seed",
+            "\"abc\""
+          ],
+          [
+            "use_default_badwordsids",
+            "false"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-json",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "sampler_order",
+            "json::[6,0,1,3,4,2,5]"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-nested",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "grammar.root",
+            "\"x\""
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-overrides-prompt",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "prompt",
+            "replaced"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-removes-n",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "n",
+            "{{none}}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-header",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "header::X-Test",
+            "on"
+          ],
+          [
+            "header::content-type",
+            "text/plain"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-header-removed",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "header::content-type",
+            "{{none}}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "system-content-replacement",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      }
+    },
+    {
+      "id": "template-llama3",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "db": {
+        "instructChatTemplate": "llama3"
+      }
+    },
+    {
+      "id": "template-alpaca",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "db": {
+        "instructChatTemplate": "alpaca"
+      }
+    },
+    {
+      "id": "custom-model",
+      "model": "xcustom:::kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "customModels": [
+        {
+          "id": "xcustom:::kobold",
+          "name": "K",
+          "internalId": "k",
+          "url": "http://ignored.example.test/",
+          "key": "sk-synthetic-custom",
+          "format": 14,
+          "flags": [],
+          "tokenizer": 0,
+          "params": "seed=9"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-format",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "3"
+          ]
+        ]
+      }
+    }
+  ]
+}

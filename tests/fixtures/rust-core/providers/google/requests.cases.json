@@ -1,0 +1,4532 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "jsonSchemaEnabled": false,
+    "jsonSchema": "answer",
+    "extractJson": "",
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "simplifiedToolUse": false,
+    "antiServerOverloads": false,
+    "streamGeminiThoughts": false,
+    "saveSignatures": false,
+    "gptVisionQuality": "low",
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "proxyKey": "proxy-key-synthetic",
+    "customProxyRequestModel": "gemini-2.5-pro",
+    "customAPIFormat": 5,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false,
+    "google": {
+      "accessToken": "AIza-synthetic_key",
+      "projectId": "proj-synthetic"
+    },
+    "vertexRegion": "us-central1",
+    "vertexClientEmail": "synthetic@example-project.iam.gserviceaccount.com",
+    "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDVIdx1RJzNzC3M\nFcNiGx2VyIkGybmcaA1OR4A6RzCXs5Ham7SgRAvVpIBUqnZ/uwm9S/YWXf1Ff7Es\nV6BMJv7ib5NLB2SfKdiBAeKOTpiapPZObPLC1k+gQ/PdURhOjYxRpEwvysmg6FlK\n64oZk7dSw/1UI4nXfbAHuxm7mJReIs9v5ZbXbMofkTlnlhaIJV0yYyTa5toYY2gC\nKDM/ziNUUZYtxS1wX5/Jd04/yuEH5MJxiqbUtUjpstYByHXGYrB1O2R/daix60Ej\ntNc3/Z/Vn2BGaxj0LM4R30CZAFAUXlmz68y6uPO9ST1vZabC1oL05fRSQkpdJUoO\nuXBmEzOVAgMBAAECggEAItWzeik6Nbq6+4HNGuJSrhIGL2lWIHWzQwmVsDDFhO3x\nF1leptkoVAVcgjoQPyU7XMinEpXPGQZbV2OFDB1NiIXy/Y7aR9dnjwJXXKoE8DWp\nGj1dWjH79rZUi+Y+wkwJVKi1WRRcayO+wGuJ+U825dypsZBTbbiZxlGyzYINMetT\nB+pAOOc7E1DSz1Xx2Dvy/BrK2cyYqcnm5S3b1VzGEDdPvTwGjq/Kt8yN2KEn71P4\n813d2/7/JjDNrJAWC9m5635V+1h7AVoKwA75aB2+7RFPuqiDgSdgy9pPtjfvuOcv\nKwLcysb6eMKL67EaSjKXeXHdt2EnCFAzkta5OYE06wKBgQD79l6W0ISbAsn+8ZrY\nOeOziZdICdojxNpnJTgKcwQ0ZTTy9Z9vLCYtpF08SAD9RztOyh+mS8Av22stGrR0\na5piyZjg3GgCK95oeW3TFJ4nJBIS02Kv2KGWnkIknnTccLhjOUmP7+V2yAIXGV34\nr15xYSvQ5j7Gb6WqCoApNvyMWwKBgQDYjDK3Dte93QE0pkOtuJo6rjcEanxranoo\nSI09JSeiHwJx2ozsLCYyc1GMrP60xDaVecYyhjBB+rIEGDWa/o88nOUG+PkcxUmJ\nbH3g30qbLFF5kZIXi9/euBJGeKvKCjo1wqeABLRRMT3QCoHCYixNkGWdH993COTO\ndtzec18CzwKBgEHA/the3GxTowFsbduF5/1/p8I+B/aTted7GA/qCiveSZ4qKYxq\nuh/pKAfGRrPSdhDOwMm2NRaILYUc1gEX37duIv5zppUCe81J+zY9yDQwvqK5FaUM\nZMcYz+wciiTJKeWDGsZ8daa09Y6vqQ1wPrZaBIREwhcpJdOlX+LhnbDHAoGAfNU1\nVzoDPLxuuX8vfLHylulfZfhNCU80ZIyOfzUwB9GAg0nN+0foLSU1WbdQjbyfCsRM\ncUvR/fcbMCkUnekpgXOgw8g7M063+bTFTCDszU9bGI3GfjRwNeA/CMj/n1UOAXfZ\nP392w2dzjr6/1uLpTz1yloWNOP2ziSIUaVhw6RkCgYBfelHF42Wop/3XTEN1RUE8\n8kX9Bh5fgjSY+sXkA9zlGIEikzQNuJf2Fvtmuffq8yiilE8IRIaHeJohfB3+uf21\njLS5ZlUvmjKk+qQu3woNdKcnOShGeLPT9cd+AVZEKIwai9tPu/vB+zpIUzy4MNGg\njQsRJV7HGHlc0hWx9uc0tQ==\n-----END PRIVATE KEY-----\n",
+    "vertexAccessToken": "ya29.cached-synthetic",
+    "vertexAccessTokenExpires": 1767326645000
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "vertex-basic",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "stream",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "vertex-stream",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "max-tokens",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "maxTokens": 777,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "no-system",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "multi-turn",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "system-only",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Only a system prompt."
+        }
+      ]
+    },
+    {
+      "id": "empty-messages-throws",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": []
+    },
+    {
+      "id": "system-prompt-keeps-whitespace",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "  padded  "
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "empty-system-prompt-is-dropped",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "consecutive-users-merge",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "One"
+        },
+        {
+          "role": "user",
+          "content": "Two"
+        },
+        {
+          "role": "user",
+          "content": "Three"
+        }
+      ]
+    },
+    {
+      "id": "consecutive-assistants-merge",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "One"
+        },
+        {
+          "role": "assistant",
+          "content": "Two"
+        },
+        {
+          "role": "assistant",
+          "content": "Three"
+        },
+        {
+          "role": "user",
+          "content": "Four"
+        }
+      ]
+    },
+    {
+      "id": "system-after-user-merges",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "One"
+        },
+        {
+          "role": "system",
+          "content": "Reminder"
+        },
+        {
+          "role": "assistant",
+          "content": "Two"
+        }
+      ]
+    },
+    {
+      "id": "system-after-assistant-becomes-user",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "One"
+        },
+        {
+          "role": "assistant",
+          "content": "Two"
+        },
+        {
+          "role": "system",
+          "content": "Reminder"
+        },
+        {
+          "role": "user",
+          "content": "Three"
+        }
+      ]
+    },
+    {
+      "id": "system-first-after-leading-system",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "First."
+        },
+        {
+          "role": "system",
+          "content": "Second."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "function-role-becomes-user",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "function",
+          "content": "result",
+          "name": "lookup"
+        },
+        {
+          "role": "assistant",
+          "content": "Done"
+        }
+      ]
+    },
+    {
+      "id": "assistant-first",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "assistant",
+          "content": "I begin."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "empty-content-message",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": ""
+        }
+      ]
+    },
+    {
+      "id": "system-content-replacement",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "systemContentReplacement": "[{{slot}}]",
+        "systemRoleReplacement": "user"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "unicode-content",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Café 😀   end"
+        }
+      ]
+    },
+    {
+      "id": "image",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "two-images",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            },
+            {
+              "type": "image",
+              "base64": "data:image/jpeg;base64,BBBB"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "audio",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Listen.",
+          "multimodals": [
+            {
+              "type": "audio",
+              "base64": "data:audio/wav;base64,CCCC"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "video",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Watch.",
+          "multimodals": [
+            {
+              "type": "video",
+              "base64": "data:video/mp4;base64,DDDD"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-unsupported-model",
+      "model": "gemini-2.5-flash-image-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "enableCustomFlags": true,
+        "customFlags": [
+          7
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "video",
+              "base64": "data:video/mp4;base64,DDDD"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-on-assistant",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Here.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-without-comma",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-without-colon",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-three-commas",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AA,AA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "media-on-system-is-model-role",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "system",
+          "content": "Note."
+        }
+      ]
+    },
+    {
+      "id": "media-chat-merges-with-next",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Again."
+        }
+      ]
+    },
+    {
+      "id": "signature-ignored-without-setting",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "multimodals": [
+            {
+              "type": "signature",
+              "base64": "e30="
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "signature-with-setting-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "saveSignatures": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "multimodals": [
+            {
+              "type": "signature",
+              "base64": "e30="
+            }
+          ]
+        }
+      ],
+      "declines": "signature-multimodal"
+    },
+    {
+      "id": "tools-declared",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "marker-decoded",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "Before <tool_call>one</tool_call> after"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {
+              "query": "x"
+            }
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-only-text",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "<tool_call>one</tool_call>"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {
+              "query": "x"
+            }
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-two",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>one</tool_call>B<tool_call>two</tool_call>C"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {
+              "query": "x"
+            }
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        },
+        "two": {
+          "call": {
+            "id": "t2",
+            "name": "clock",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "clock done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-unknown-tool",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>one</tool_call>B"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "missing",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "missing done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-not-decoded",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>zzz</tool_call>B"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {}
+    },
+    {
+      "id": "marker-no-tools-declared",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>one</tool_call>B"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-unclosed",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>one"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-across-line",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>o\nne</tool_call>B"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "o\nne": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-in-user-message",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go <tool_call>one</tool_call>"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {
+              "query": "x"
+            }
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-first-chat-only",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "assistant",
+          "content": "<tool_call>one</tool_call>"
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-whitespace-segments",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "  A  <tool_call>one</tool_call>   <tool_call>two</tool_call>  "
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        },
+        "two": {
+          "call": {
+            "id": "t2",
+            "name": "clock",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "clock done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-in-media-chat-drops-media",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "<tool_call>one</tool_call>",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-with-media-and-text",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "Lead <tool_call>one</tool_call>",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-response-image-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "<tool_call>one</tool_call>"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AAAA"
+            },
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-merges-with-following-user",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Go."
+        },
+        {
+          "role": "assistant",
+          "content": "<tool_call>one</tool_call>"
+        },
+        {
+          "role": "user",
+          "content": "Next."
+        },
+        {
+          "role": "user",
+          "content": "And."
+        }
+      ],
+      "decodings": {
+        "one": {
+          "call": {
+            "id": "t1",
+            "name": "lookup",
+            "arg": {}
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "lookup done"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "block-off-model",
+      "model": "gemini-2.0-flash",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "no-civil-integrity-model",
+      "model": "gemini-2.0-pro-exp",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "block-off-and-no-civil",
+      "model": "gemini-2.0-flash-lite-preview-02-05",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "thinking-tokens",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "thinking-tokens-zero",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "thinkingTokens": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "top-k-zero-is-ignored",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "top_k": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "penalties-unset",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "frequencyPenalty": -1000,
+        "PresensePenalty": -1000,
+        "temperature": -1000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-model",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 2048,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 0,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "overrides": {
+            "gemini-2.5-pro": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": 5,
+              "presence_penalty": 5,
+              "thinking_tokens": 4096,
+              "reasoning_effort": 0,
+              "verbosity": 0
+            }
+          }
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-submodel",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 2048,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 0,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "overrides": {
+            "gemini-2.5-pro": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": 5,
+              "presence_penalty": 5,
+              "thinking_tokens": 4096,
+              "reasoning_effort": 0,
+              "verbosity": 0
+            }
+          }
+        }
+      },
+      "mode": "submodel",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 2048,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 0,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "overrides": {
+            "gemini-2.5-pro": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": 5,
+              "presence_penalty": 5,
+              "thinking_tokens": 4096,
+              "reasoning_effort": 0,
+              "verbosity": 0
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model-missing",
+      "model": "gemini-2.0-flash",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 2048,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 0,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "overrides": {
+            "gemini-2.5-pro": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": 5,
+              "presence_penalty": 5,
+              "thinking_tokens": 4096,
+              "reasoning_effort": 0,
+              "verbosity": 0
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort--1-3-pro",
+      "model": "gemini-3-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": -1
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-0-3-pro",
+      "model": "gemini-3-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-1-3-pro",
+      "model": "gemini-3-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": 1
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-2-3-pro",
+      "model": "gemini-3-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": 2
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-3-3-pro",
+      "model": "gemini-3-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": 3
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort--1-no-minimal",
+      "model": "gemini-3.1-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": -1
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-0-no-minimal",
+      "model": "gemini-3.1-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-2-no-minimal",
+      "model": "gemini-3.1-pro-preview",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "reasoningEffort": 2
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-only-flash-latest",
+      "model": "gemini-flash-latest",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "effort-flash-3-6",
+      "model": "gemini-3.6-flash",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "thinking-model-without-thinking-parameters",
+      "model": "gemini-2.0-flash-thinking-exp-01-21",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "non-thinking-model",
+      "model": "gemini-2.0-flash",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "vision-high",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "gptVisionQuality": "high"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "image-output-model-never-streams",
+      "model": "gemini-2.5-flash-image",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "image-output-vertex",
+      "model": "gemini-2.5-flash-image-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "image-response-argument",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "imageResponse": true,
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "audio-output-flag",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8,
+            3
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "image-and-audio-output",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8,
+            3,
+            1
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "tools-and-thinking",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "json-schema-enabled-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "jsonSchemaEnabled": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "json-schema"
+    },
+    {
+      "id": "schema-argument-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "schema": "answer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "json-schema"
+    },
+    {
+      "id": "additional-body-key",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "generation_config.candidateCount",
+            "2"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-header",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "header::x-synthetic",
+            "value"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-header-authorization-vertex",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "header::Authorization",
+            "Bearer other"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-none-deletes",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "safetySettings",
+            "{{none}}"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-json",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "generation_config.stopSequences",
+            "json::[\"END\"]"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-model-override",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "contents",
+            "json::[]"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-not-applied-without-flag",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "additionalParams": [
+          [
+            "top_k",
+            "5"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-tools-after-undefined",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "tools",
+            "json::{\"codeExecution\":{}}"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "region-us-west1",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexRegion": "us-west1"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "region-global-setting",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexRegion": "global"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "region-empty",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexRegion": ""
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-3-pro-preview",
+      "model": "gemini-3-pro-preview-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-3-flash-preview",
+      "model": "gemini-3-flash-preview-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-3-7-flash",
+      "model": "gemini-3.7-flash-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-3-5-flash-lite",
+      "model": "gemini-3.5-flash-lite-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-custom-gemini-3-8-flash",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-3.8-flash",
+          "key": "custom-key-synthetic",
+          "format": 6,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-custom-gemini-3-9-flash",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-3.9-flash",
+          "key": "custom-key-synthetic",
+          "format": 6,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-custom-gemini-3-4-flash",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-3.4-flash",
+          "key": "custom-key-synthetic",
+          "format": 6,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "global-only-3-1-pro-preview-is-not-matched",
+      "model": "gemini-3.1-pro-preview-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "project-with-unsafe-character-declines",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "google": {
+          "accessToken": "k",
+          "projectId": "a/b"
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "google-url-form"
+    },
+    {
+      "id": "region-with-unsafe-character-declines",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexRegion": "us central"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "google-url-form"
+    },
+    {
+      "id": "key-from-database",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "google": {
+          "accessToken": "AIza-other_key",
+          "projectId": "p"
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "key-with-ampersand-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "google": {
+          "accessToken": "a&b",
+          "projectId": "p"
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "google-key-form"
+    },
+    {
+      "id": "key-with-space-declines",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "google": {
+          "accessToken": "a b",
+          "projectId": "p"
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "google-key-form"
+    },
+    {
+      "id": "key-with-tilde",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "google": {
+          "accessToken": "a~b*c",
+          "projectId": "p"
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "empty-key",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "google": {
+          "accessToken": "",
+          "projectId": "p"
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-url",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-url-stream",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "stream": true,
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-url-trailing-slash",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta/",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-url-port-and-case",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "HTTPS://LLM.Example.test:443/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-key-encoded",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "a b&c=d/é*",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-empty-key-falls-back",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-empty-url-uses-default",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-url-with-query-declines",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta?x=1",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "google-custom-url"
+    },
+    {
+      "id": "custom-model-url-with-fragment-declines",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta#x",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "google-custom-url"
+    },
+    {
+      "id": "custom-model-vertex-format",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 6,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-vertex-with-url",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 6,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-unsafe-id-declines",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gem ini/x",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "google-custom-url"
+    },
+    {
+      "id": "custom-model-params",
+      "model": "xcustom:::one",
+      "clock": "2026-01-02T03:04:05Z",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "gemini-proxy-model",
+          "url": "https://llm.example.test/v1beta",
+          "key": "custom-key-synthetic",
+          "format": 5,
+          "flags": [
+            7,
+            8
+          ],
+          "tokenizer": 0,
+          "params": "generation_config.candidateCount=3\nheader::x-custom=yes"
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy",
+      "model": "reverse_proxy",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/gemini"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-vertex",
+      "model": "reverse_proxy",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "customAPIFormat": 6,
+        "forceReplaceUrl": "https://proxy.example.test/gemini"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-no-url",
+      "model": "reverse_proxy",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-cached",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-expiry-equals-now-is-cached",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323045000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-minted",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-minted-stream",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "stream": true,
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-minted-literal-backslash-n-key",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDVIdx1RJzNzC3M\\nFcNiGx2VyIkGybmcaA1OR4A6RzCXs5Ham7SgRAvVpIBUqnZ/uwm9S/YWXf1Ff7Es\\nV6BMJv7ib5NLB2SfKdiBAeKOTpiapPZObPLC1k+gQ/PdURhOjYxRpEwvysmg6FlK\\n64oZk7dSw/1UI4nXfbAHuxm7mJReIs9v5ZbXbMofkTlnlhaIJV0yYyTa5toYY2gC\\nKDM/ziNUUZYtxS1wX5/Jd04/yuEH5MJxiqbUtUjpstYByHXGYrB1O2R/daix60Ej\\ntNc3/Z/Vn2BGaxj0LM4R30CZAFAUXlmz68y6uPO9ST1vZabC1oL05fRSQkpdJUoO\\nuXBmEzOVAgMBAAECggEAItWzeik6Nbq6+4HNGuJSrhIGL2lWIHWzQwmVsDDFhO3x\\nF1leptkoVAVcgjoQPyU7XMinEpXPGQZbV2OFDB1NiIXy/Y7aR9dnjwJXXKoE8DWp\\nGj1dWjH79rZUi+Y+wkwJVKi1WRRcayO+wGuJ+U825dypsZBTbbiZxlGyzYINMetT\\nB+pAOOc7E1DSz1Xx2Dvy/BrK2cyYqcnm5S3b1VzGEDdPvTwGjq/Kt8yN2KEn71P4\\n813d2/7/JjDNrJAWC9m5635V+1h7AVoKwA75aB2+7RFPuqiDgSdgy9pPtjfvuOcv\\nKwLcysb6eMKL67EaSjKXeXHdt2EnCFAzkta5OYE06wKBgQD79l6W0ISbAsn+8ZrY\\nOeOziZdICdojxNpnJTgKcwQ0ZTTy9Z9vLCYtpF08SAD9RztOyh+mS8Av22stGrR0\\na5piyZjg3GgCK95oeW3TFJ4nJBIS02Kv2KGWnkIknnTccLhjOUmP7+V2yAIXGV34\\nr15xYSvQ5j7Gb6WqCoApNvyMWwKBgQDYjDK3Dte93QE0pkOtuJo6rjcEanxranoo\\nSI09JSeiHwJx2ozsLCYyc1GMrP60xDaVecYyhjBB+rIEGDWa/o88nOUG+PkcxUmJ\\nbH3g30qbLFF5kZIXi9/euBJGeKvKCjo1wqeABLRRMT3QCoHCYixNkGWdH993COTO\\ndtzec18CzwKBgEHA/the3GxTowFsbduF5/1/p8I+B/aTted7GA/qCiveSZ4qKYxq\\nuh/pKAfGRrPSdhDOwMm2NRaILYUc1gEX37duIv5zppUCe81J+zY9yDQwvqK5FaUM\\nZMcYz+wciiTJKeWDGsZ8daa09Y6vqQ1wPrZaBIREwhcpJdOlX+LhnbDHAoGAfNU1\\nVzoDPLxuuX8vfLHylulfZfhNCU80ZIyOfzUwB9GAg0nN+0foLSU1WbdQjbyfCsRM\\ncUvR/fcbMCkUnekpgXOgw8g7M063+bTFTCDszU9bGI3GfjRwNeA/CMj/n1UOAXfZ\\nP392w2dzjr6/1uLpTz1yloWNOP2ziSIUaVhw6RkCgYBfelHF42Wop/3XTEN1RUE8\\n8kX9Bh5fgjSY+sXkA9zlGIEikzQNuJf2Fvtmuffq8yiilE8IRIaHeJohfB3+uf21\\njLS5ZlUvmjKk+qQu3woNdKcnOShGeLPT9cd+AVZEKIwai9tPu/vB+zpIUzy4MNGg\\njQsRJV7HGHlc0hWx9uc0tQ==\\n-----END PRIVATE KEY-----"
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-minted-crlf-key",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\r\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDVIdx1RJzNzC3M\r\nFcNiGx2VyIkGybmcaA1OR4A6RzCXs5Ham7SgRAvVpIBUqnZ/uwm9S/YWXf1Ff7Es\r\nV6BMJv7ib5NLB2SfKdiBAeKOTpiapPZObPLC1k+gQ/PdURhOjYxRpEwvysmg6FlK\r\n64oZk7dSw/1UI4nXfbAHuxm7mJReIs9v5ZbXbMofkTlnlhaIJV0yYyTa5toYY2gC\r\nKDM/ziNUUZYtxS1wX5/Jd04/yuEH5MJxiqbUtUjpstYByHXGYrB1O2R/daix60Ej\r\ntNc3/Z/Vn2BGaxj0LM4R30CZAFAUXlmz68y6uPO9ST1vZabC1oL05fRSQkpdJUoO\r\nuXBmEzOVAgMBAAECggEAItWzeik6Nbq6+4HNGuJSrhIGL2lWIHWzQwmVsDDFhO3x\r\nF1leptkoVAVcgjoQPyU7XMinEpXPGQZbV2OFDB1NiIXy/Y7aR9dnjwJXXKoE8DWp\r\nGj1dWjH79rZUi+Y+wkwJVKi1WRRcayO+wGuJ+U825dypsZBTbbiZxlGyzYINMetT\r\nB+pAOOc7E1DSz1Xx2Dvy/BrK2cyYqcnm5S3b1VzGEDdPvTwGjq/Kt8yN2KEn71P4\r\n813d2/7/JjDNrJAWC9m5635V+1h7AVoKwA75aB2+7RFPuqiDgSdgy9pPtjfvuOcv\r\nKwLcysb6eMKL67EaSjKXeXHdt2EnCFAzkta5OYE06wKBgQD79l6W0ISbAsn+8ZrY\r\nOeOziZdICdojxNpnJTgKcwQ0ZTTy9Z9vLCYtpF08SAD9RztOyh+mS8Av22stGrR0\r\na5piyZjg3GgCK95oeW3TFJ4nJBIS02Kv2KGWnkIknnTccLhjOUmP7+V2yAIXGV34\r\nr15xYSvQ5j7Gb6WqCoApNvyMWwKBgQDYjDK3Dte93QE0pkOtuJo6rjcEanxranoo\r\nSI09JSeiHwJx2ozsLCYyc1GMrP60xDaVecYyhjBB+rIEGDWa/o88nOUG+PkcxUmJ\r\nbH3g30qbLFF5kZIXi9/euBJGeKvKCjo1wqeABLRRMT3QCoHCYixNkGWdH993COTO\r\ndtzec18CzwKBgEHA/the3GxTowFsbduF5/1/p8I+B/aTted7GA/qCiveSZ4qKYxq\r\nuh/pKAfGRrPSdhDOwMm2NRaILYUc1gEX37duIv5zppUCe81J+zY9yDQwvqK5FaUM\r\nZMcYz+wciiTJKeWDGsZ8daa09Y6vqQ1wPrZaBIREwhcpJdOlX+LhnbDHAoGAfNU1\r\nVzoDPLxuuX8vfLHylulfZfhNCU80ZIyOfzUwB9GAg0nN+0foLSU1WbdQjbyfCsRM\r\ncUvR/fcbMCkUnekpgXOgw8g7M063+bTFTCDszU9bGI3GfjRwNeA/CMj/n1UOAXfZ\r\nP392w2dzjr6/1uLpTz1yloWNOP2ziSIUaVhw6RkCgYBfelHF42Wop/3XTEN1RUE8\r\n8kX9Bh5fgjSY+sXkA9zlGIEikzQNuJf2Fvtmuffq8yiilE8IRIaHeJohfB3+uf21\r\njLS5ZlUvmjKk+qQu3woNdKcnOShGeLPT9cd+AVZEKIwai9tPu/vB+zpIUzy4MNGg\r\njQsRJV7HGHlc0hWx9uc0tQ==\r\n-----END PRIVATE KEY-----\r\n"
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-minted-key-with-padding-spaces",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "-----BEGIN PRIVATE KEY----- MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDVIdx1RJzNzC3M FcNiGx2VyIkGybmcaA1OR4A6RzCXs5Ham7SgRAvVpIBUqnZ/uwm9S/YWXf1Ff7Es V6BMJv7ib5NLB2SfKdiBAeKOTpiapPZObPLC1k+gQ/PdURhOjYxRpEwvysmg6FlK 64oZk7dSw/1UI4nXfbAHuxm7mJReIs9v5ZbXbMofkTlnlhaIJV0yYyTa5toYY2gC KDM/ziNUUZYtxS1wX5/Jd04/yuEH5MJxiqbUtUjpstYByHXGYrB1O2R/daix60Ej tNc3/Z/Vn2BGaxj0LM4R30CZAFAUXlmz68y6uPO9ST1vZabC1oL05fRSQkpdJUoO uXBmEzOVAgMBAAECggEAItWzeik6Nbq6+4HNGuJSrhIGL2lWIHWzQwmVsDDFhO3x F1leptkoVAVcgjoQPyU7XMinEpXPGQZbV2OFDB1NiIXy/Y7aR9dnjwJXXKoE8DWp Gj1dWjH79rZUi+Y+wkwJVKi1WRRcayO+wGuJ+U825dypsZBTbbiZxlGyzYINMetT B+pAOOc7E1DSz1Xx2Dvy/BrK2cyYqcnm5S3b1VzGEDdPvTwGjq/Kt8yN2KEn71P4 813d2/7/JjDNrJAWC9m5635V+1h7AVoKwA75aB2+7RFPuqiDgSdgy9pPtjfvuOcv KwLcysb6eMKL67EaSjKXeXHdt2EnCFAzkta5OYE06wKBgQD79l6W0ISbAsn+8ZrY OeOziZdICdojxNpnJTgKcwQ0ZTTy9Z9vLCYtpF08SAD9RztOyh+mS8Av22stGrR0 a5piyZjg3GgCK95oeW3TFJ4nJBIS02Kv2KGWnkIknnTccLhjOUmP7+V2yAIXGV34 r15xYSvQ5j7Gb6WqCoApNvyMWwKBgQDYjDK3Dte93QE0pkOtuJo6rjcEanxranoo SI09JSeiHwJx2ozsLCYyc1GMrP60xDaVecYyhjBB+rIEGDWa/o88nOUG+PkcxUmJ bH3g30qbLFF5kZIXi9/euBJGeKvKCjo1wqeABLRRMT3QCoHCYixNkGWdH993COTO dtzec18CzwKBgEHA/the3GxTowFsbduF5/1/p8I+B/aTted7GA/qCiveSZ4qKYxq uh/pKAfGRrPSdhDOwMm2NRaILYUc1gEX37duIv5zppUCe81J+zY9yDQwvqK5FaUM ZMcYz+wciiTJKeWDGsZ8daa09Y6vqQ1wPrZaBIREwhcpJdOlX+LhnbDHAoGAfNU1 VzoDPLxuuX8vfLHylulfZfhNCU80ZIyOfzUwB9GAg0nN+0foLSU1WbdQjbyfCsRM cUvR/fcbMCkUnekpgXOgw8g7M063+bTFTCDszU9bGI3GfjRwNeA/CMj/n1UOAXfZ P392w2dzjr6/1uLpTz1yloWNOP2ziSIUaVhw6RkCgYBfelHF42Wop/3XTEN1RUE8 8kX9Bh5fgjSY+sXkA9zlGIEikzQNuJf2Fvtmuffq8yiilE8IRIaHeJohfB3+uf21 jLS5ZlUvmjKk+qQu3woNdKcnOShGeLPT9cd+AVZEKIwai9tPu/vB+zpIUzy4MNGg jQsRJV7HGHlc0hWx9uc0tQ== -----END PRIVATE KEY-----"
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-not-needed-for-google-cloud-format",
+      "model": "gemini-2.5-pro",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-missing-email",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexClientEmail": ""
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-missing-key",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": ""
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-invalid-email",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexClientEmail": "someone@example.com"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-invalid-key-markers",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "not a key"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-missing-end-marker",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\nAAAA"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-key-not-base64-declines",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\n@@@@\n-----END PRIVATE KEY-----"
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "vertex-key-base64"
+    },
+    {
+      "id": "token-key-bad-length-declines",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\nAAAAA\n-----END PRIVATE KEY-----"
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "vertex-key-base64"
+    },
+    {
+      "id": "token-key-not-der-declines",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000,
+        "vertexPrivateKey": "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----"
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": "ya29.minted-synthetic",
+            "expires_in": 3599,
+            "token_type": "Bearer"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "vertex-key-import"
+    },
+    {
+      "id": "token-status-400-json",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "status": 400,
+          "json": {
+            "error": "invalid_grant",
+            "error_description": "Bad."
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-status-500-text",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "status": 500,
+          "text": "oops"
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-status-302-empty",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "status": 302,
+          "text": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-status-200-not-json",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "text": "not json"
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-status-200-empty",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "text": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-reply-null",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": null
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-reply-array",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": []
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-reply-without-token",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": {
+            "expires_in": 1
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-reply-empty-token",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": ""
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-reply-null-token",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": null
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-reply-zero-token",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": 0
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-reply-number-token-declines",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "json": {
+            "access_token": 5
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "vertex-token-not-text"
+    },
+    {
+      "id": "token-reply-bom",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "text": "﻿{\"access_token\":\"ya29.bom\"}"
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "token-transport-error",
+      "model": "gemini-2.5-pro-vertex",
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "vertexAccessTokenExpires": 1767323044000
+      },
+      "mint": [
+        {
+          "throws": "fetch failed"
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    }
+  ]
+}

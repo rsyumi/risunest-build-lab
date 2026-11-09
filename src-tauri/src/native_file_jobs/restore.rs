@@ -4,7 +4,6 @@ mod upstream_import;
 pub(super) mod pocket_features;
 mod historical;
 mod cold_plugin_storage;
-pub(crate) mod cold_keys;
 use super::{
     ImportCounts, JobControl, JobDetail, JobPhase, JobProgress, JobResultSummary, JobStage,
     NativeJobError, OpenedJobSource, StageUnit,
@@ -23,8 +22,6 @@ use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 const RISU_SAVE_HEADER: &[u8] = b"RISUSAVE\0";
 const LEGACY_RISU_SAVE_PREFIX: &[u8] = b"\0RISUSAVE\0";
@@ -79,9 +76,8 @@ pub(crate) trait ReplacementSink: Send + Sync {
     fn expands_cold_payloads(&self) -> bool {
         false
     }
-    /// A staged payload for the key; an error stops the restore.
-    fn cold_payload_path(&self, _key: &str) -> StoreResult<Option<PathBuf>> {
-        Ok(None)
+    fn cold_payload_path(&self, _key: &str) -> Option<PathBuf> {
+        None
     }
     /// Set for a key whose entry the archive holds but could not stage.
     fn unavailable_cold_payload_reason(&self, _key: &str) -> Option<ColdPayloadUnavailable> {
@@ -144,8 +140,7 @@ pub(crate) trait ReplacementSink: Send + Sync {
     fn incomplete_restore_preview(&self) -> StoreResult<super::IncompleteRestorePreview> {
         Ok(super::IncompleteRestorePreview::default())
     }
-    /// `binding_authority` is the authority `prepare_activation_receipt` recorded, which the commit keeps.
-    fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult>;
+    fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult>;
     fn abort(&self, staging_id: &str) -> StoreResult<()>;
 }
 
@@ -186,38 +181,15 @@ impl RestoreControl for JobControl {
 pub(crate) struct RestoreProgressScale {
     pub(crate) result_source: Option<(u64, String)>,
     pub(crate) spool_directory: Option<PathBuf>,
+    pub(crate) reject_cold_references: bool,
     /// Bytes already counted before the database read started.
     pub(crate) base_bytes: u64,
     /// Fixed total for the whole job; `None` uses the database size.
     pub(crate) total_bytes: Option<u64>,
     /// Keeps the top-level item counter at this value instead of counting blocks.
     pub(crate) fixed_items: Option<(u64, Option<u64>)>,
-    /// Cold payloads the sink has read from outside the source, counted with the blocks.
-    pub(crate) cold_payloads: Option<Arc<ColdPayloadProgress>>,
     /// Counters gathered before the database read, carried into every report.
     pub(crate) counts: ImportCounts,
-}
-
-/// What a sink has read from outside the source: items count with the blocks and
-/// bytes with the database read.
-#[derive(Debug, Default)]
-pub(crate) struct ColdPayloadProgress {
-    pub(crate) items: AtomicU64,
-    pub(crate) bytes: AtomicU64,
-    /// The source bytes read so far; staging looks up only keys named before them.
-    pub(crate) source: AtomicU64,
-}
-
-/// Reports cold payload bytes read while the database read waits for the sink,
-/// so a block with many references keeps moving. The read's detail then has no
-/// known total, matching what the reader reports next.
-pub(crate) fn report_cold_payload_bytes(job: &JobControl, bytes: u64) -> Result<(), NativeJobError> {
-    let Some(mut detail) = job.status().detail.filter(|detail| detail.stage_unit == StageUnit::Bytes) else {
-        return Ok(());
-    };
-    detail.stage_completed = detail.stage_completed.saturating_add(bytes);
-    detail.stage_total = None;
-    job.set_detail(detail).map_err(|error| job_error(job, error))
 }
 
 pub(crate) fn restore_block_risu_save(
@@ -397,6 +369,7 @@ fn restore_risu_save_reader_controlled<R: Read>(
             .map_err(|error| job_error(job, error))?;
     }
     let spool_directory = scale.spool_directory.clone();
+    let reject_cold_references = scale.reject_cold_references;
     let mut prefix = [0; 2];
     source.read_exact(&mut prefix).map_err(|_| invalid_source("could not read database header"))?;
     let unframed = if is_zlib_header(&prefix) { Some(RisuSaveFormat::HistoricalCompressed) }
@@ -407,7 +380,7 @@ fn restore_risu_save_reader_controlled<R: Read>(
     let staging_id = sink.begin().map_err(store_error)?.staging_id;
     let outcome = (|| {
         let parsed = match format {
-            RisuSaveFormat::Block => parse_and_stage(&mut reader, &staging_id, job, sink, limits, spool_directory.as_deref().ok_or_else(|| store_error(StoreError::Store { message: "Restore spool directory is unavailable".into() }))?)?,
+            RisuSaveFormat::Block => parse_and_stage(&mut reader, &staging_id, job, sink, limits, spool_directory.as_deref().ok_or_else(|| store_error(StoreError::Store { message: "Restore spool directory is unavailable".into() }))?, reject_cold_references)?,
             RisuSaveFormat::LegacyRaw => {
                 parse_and_stage_legacy(&mut reader, &staging_id, job, sink, limits)?
             }
@@ -472,7 +445,7 @@ fn restore_risu_save_reader_controlled<R: Read>(
             publication: None,
         };
         let authority = sink.prepare_activation_receipt(&staging_id, job, &result).map_err(store_error)?;
-        result.revision = match sink.commit(&staging_id, activation_revision, authority.as_deref()) {
+        result.revision = match sink.commit(&staging_id, activation_revision) {
             Ok(committed) => committed.revision,
             Err(error) => {
                 if let Some(authority) = authority.as_deref() {
@@ -785,7 +758,7 @@ fn stream_legacy_characters<S: TrackedSource>(
         let start = decoded_position(input);
         let packed = rmpv::decode::read_value_with_max_depth(input, LEGACY_CHARACTER_DEPTH)
             .map_err(|error| messagepack_error(error, job))?;
-        let bytes = (decoded_position(input) - start).saturating_add(binary_json_growth(&packed));
+        let bytes = decoded_position(input) - start;
         let mut character = match messagepack_to_json(packed, job)? {
             JsonSlot::Value(value) => value,
             JsonSlot::Undefined => Value::Null,
@@ -1092,22 +1065,6 @@ fn legacy_chat_id(value: Option<&Value>) -> Option<String> {
     }
 }
 
-// Each `bin` byte at index i becomes `"i":byte,` once converted, so a batch
-// charges that JSON text rather than the one MessagePack byte.
-fn binary_json_growth(value: &MessagePackValue) -> u64 {
-    let digits = |value: usize| u64::from(value.checked_ilog10().unwrap_or(0)) + 1;
-    match value {
-        MessagePackValue::Binary(bytes) => bytes
-            .iter()
-            .enumerate()
-            .map(|(index, byte)| digits(index) + digits(usize::from(*byte)) + 3)
-            .sum(),
-        MessagePackValue::Array(values) => values.iter().map(binary_json_growth).sum(),
-        MessagePackValue::Map(entries) => entries.iter().map(|(_, value)| binary_json_growth(value)).sum(),
-        _ => 0,
-    }
-}
-
 fn messagepack_to_json(value: MessagePackValue, job: &JobControl) -> Result<JsonSlot, NativeJobError> {
     match value {
         MessagePackValue::Nil => Ok(JsonSlot::Value(Value::Null)),
@@ -1344,6 +1301,16 @@ impl<S: TrackedSource> TrackedSource for GzDecoder<BufReader<S>> {
     }
 }
 
+fn cold_expansion_required() -> NativeJobError {
+    NativeJobError::new("cold-expansion-required", "Official snapshot requires cold payload expansion before activation")
+}
+
+fn has_cold_references(character: &Value) -> bool {
+    character.get("coldstorage").and_then(Value::as_str).is_some_and(|key| !key.is_empty()) ||
+    character.get("chats").and_then(Value::as_array).is_some_and(|chats| chats.iter().any(|chat|
+        chat.get("message").and_then(Value::as_array).and_then(|messages| messages.first()).and_then(|message| message.get("data")).and_then(Value::as_str).is_some_and(|data| data.starts_with("\u{ef01}COLDSTORAGE\u{ef01}"))))
+}
+
 fn omit_unavailable_cold(character: &mut Value, job: &dyn RestoreControl) -> Result<(), NativeJobError> {
     let mut missing = 0;
     if let Some(object) = character.as_object_mut() {
@@ -1367,7 +1334,9 @@ fn parse_and_stage<R: Read>(
     sink: &dyn ReplacementSink,
     limits: RestoreLimits,
     spool_directory: &Path,
+    reject_cold_references: bool,
 ) -> Result<ParsedCounts, NativeJobError> {
+    let cold_detected = Cell::new(false);
     let mut excluded = HashSet::new();
     let mut loaded = HashSet::new();
     let mut directory = None;
@@ -1434,7 +1403,9 @@ fn parse_and_stage<R: Read>(
                 job,
                 sink,
                 spool_directory,
+                &cold_detected,
             )?;
+            if reject_cold_references && cold_detected.get() { return Err(cold_expansion_required()); }
             if retained { character_count += 1; } else { excluded.insert(name.clone()); }
             reader.counts.characters = character_count;
             reader.counts.blocks += 1;
@@ -1478,6 +1449,9 @@ fn parse_and_stage<R: Read>(
                 if let Some(value) = object.shift_remove("__directory") {
                     directory = Some(parse_directory(Some(value))?);
                 }
+                if reject_cold_references && object.get("pluginCustomStorage").and_then(Value::as_object).is_some_and(cold_plugin_storage::storage_references) {
+                    return Err(cold_expansion_required());
+                }
                 root = Some(object);
             }
             2 | 7 => {
@@ -1503,6 +1477,7 @@ fn parse_and_stage<R: Read>(
                     reader.complete_item()?;
                     continue;
                 }
+                if reject_cold_references && has_cold_references(&value) { return Err(cold_expansion_required()); }
                 if !sink.expands_cold_payloads() { omit_unavailable_cold(&mut value, job)?; }
                 assign_legacy_chat_ids(std::slice::from_mut(&mut value));
                 character_batch_bytes = character_batch_bytes.saturating_add(decoded_bytes);
@@ -1545,8 +1520,11 @@ fn parse_and_stage<R: Read>(
                 loadouts = Some(value);
             }
             11 if name == "pluginStorage" => {
-                if !value.is_object() {
+                let Some(storage) = value.as_object() else {
                     return Err(invalid("pluginStorage block must be a JSON object"));
+                };
+                if reject_cold_references && cold_plugin_storage::storage_references(storage) {
+                    return Err(cold_expansion_required());
                 }
                 plugin_storage = Some(value);
             }
@@ -1594,7 +1572,6 @@ fn parse_and_stage<R: Read>(
             if markers != 0 { job.record_restore_omission("pluginStorage", markers).map_err(|error| job_error(job, error))?; }
         } else if cold_plugin_storage::references(pointer.as_ref(), legacy.as_ref()) {
             cold_plugin_storage::import(storage, pointer, legacy, sink, job, limits)?;
-            reader.report_progress()?;
         }
     }
     if let Some(meta) = plugin_storage_meta {
@@ -1747,6 +1724,7 @@ fn read_character_block<R: Read>(
     job: &dyn RestoreControl,
     sink: &dyn ReplacementSink,
     spool_directory: &Path,
+    cold_detected: &Cell<bool>,
 ) -> Result<bool, NativeJobError> {
     let block = EncodedBlockReader {
         reader,
@@ -1761,6 +1739,7 @@ fn read_character_block<R: Read>(
         limits,
         record_bytes: &record_bytes,
         character_name: "",
+        cold_detected,
         spool_directory,
         staging_id,
         expected_id: name,
@@ -1997,11 +1976,8 @@ fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Resu
     let mut envelope_occurrence = 0;
     let mut wrapped = false;
     if let Some(key) = metadata.cold_key {
-        let path = seed.sink.cold_payload_path(&key).map_err(|error| {
-            *seed.staging_error.borrow_mut() = Some(error);
-            <serde_json::Error as de::Error>::custom("cold payload lookup failed")
-        })?;
-        if let Some(path) = path {
+        seed.cold_detected.set(true);
+        if let Some(path) = seed.sink.cold_payload_path(&key) {
             let mut payload = File::open(path).map_err(|error| staging_io(error, seed.staging_error))?;
             if let Some(metadata) = read_character_metadata(&mut payload, &seed, true)? {
                 if upstream_import::excluded_character(metadata.kind.as_deref(), metadata.character_id.as_deref()) {
@@ -2156,6 +2132,7 @@ struct CharacterSeed<'a> {
     limits: RestoreLimits,
     record_bytes: &'a RecordBudget,
     character_name: &'a str,
+    cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
     staging_id: &'a str,
     expected_id: &'a str,
@@ -2211,6 +2188,7 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
                     limits: self.0.limits,
                     record_bytes: self.0.record_bytes,
                     character_name: self.0.character_name,
+                    cold_detected: self.0.cold_detected,
                     spool_directory: self.0.spool_directory,
                     staging_id: self.0.staging_id,
                     character_id: self.0.expected_id,
@@ -2224,6 +2202,7 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
                 insert_detail::<A::Error>(&mut detail, self.0.record_bytes.limit, key, value)?;
             }
         }
+        if detail.get("coldstorage").and_then(Value::as_str).is_some_and(|key| !key.is_empty()) { self.0.cold_detected.set(true); }
         detail.remove("coldstorage");
         detail.remove("coldStoragedChats");
         let character_id = detail
@@ -2252,6 +2231,7 @@ struct ChatsSeed<'a> {
     limits: RestoreLimits,
     record_bytes: &'a RecordBudget,
     character_name: &'a str,
+    cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
     staging_id: &'a str,
     character_id: &'a str,
@@ -2292,6 +2272,7 @@ impl<'de> Visitor<'de> for ChatsVisitor<'_> {
                 limits: self.0.limits,
                 record_bytes: self.0.record_bytes,
                 character_name: self.0.character_name,
+                cold_detected: self.0.cold_detected,
                 spool_directory: self.0.spool_directory,
                 seen_ids: &seen_ids,
                 staging_id: self.0.staging_id,
@@ -2318,6 +2299,7 @@ struct ConversationSeed<'a> {
     limits: RestoreLimits,
     record_bytes: &'a RecordBudget,
     character_name: &'a str,
+    cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
     seen_ids: &'a RefCell<HashSet<String>>,
     staging_id: &'a str,
@@ -2378,6 +2360,7 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
                 saw_messages = true;
                 messages = map.next_value_seed(MessagesSeed {
                     record_bytes: self.0.record_bytes,
+                    cold_detected: self.0.cold_detected,
                     spool_directory: self.0.spool_directory,
                     staging_error: self.0.staging_error,
                     job: self.0.job,
@@ -2389,11 +2372,7 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
         }
         {
             if let Some(key) = messages.cold_key.take() {
-                let path = self.0.sink.cold_payload_path(&key).map_err(|error| {
-                    *self.0.staging_error.borrow_mut() = Some(error);
-                    de::Error::custom("cold payload lookup failed")
-                })?;
-                let payload = match path {
+                let payload = match self.0.sink.cold_payload_path(&key) {
                     Some(path) => read_cold_chat(&path, &self.0).map_err(de::Error::custom)?,
                     None => None,
                 };
@@ -2469,6 +2448,7 @@ fn read_cold_chat(path: &Path, seed: &ConversationSeed<'_>) -> Result<Option<Col
     let mut deserializer = serde_json::Deserializer::from_reader(reader);
     let payload = deserializer.deserialize_any(ColdChatVisitor(MessagesSeed {
         record_bytes: seed.record_bytes,
+        cold_detected: seed.cold_detected,
         spool_directory: seed.spool_directory,
         staging_error: seed.staging_error,
         job: seed.job,
@@ -2606,6 +2586,7 @@ impl MessageSpool {
 
 struct MessagesSeed<'a> {
     record_bytes: &'a RecordBudget,
+    cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
     staging_error: &'a RefCell<Option<StoreError>>,
     job: &'a dyn RestoreControl,
@@ -2641,7 +2622,7 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
             de::Error::custom(message)
         };
         let mut spool = MessageSpool::new(self.0.spool_directory, self.0.record_bytes.limit).map_err(&spool_error)?;
-        let mut file = io::BufWriter::with_capacity(READ_CHUNK_BYTES, spool.file.take().expect("created message spool"));
+        let file = spool.file.as_mut().expect("created message spool");
         while let Some(message) = sequence.next_element_seed(BoundedValueSeed(self.0.record_bytes))? {
             if self.0.job.is_cancel_requested() {
                 return Err(de::Error::custom("restore cancelled while reading messages"));
@@ -2649,6 +2630,7 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
             if spool.count == 0 {
                 spool.cold_key = message.get("data").and_then(Value::as_str)
                     .and_then(|data| data.strip_prefix("\u{ef01}COLDSTORAGE\u{ef01}")).map(str::to_owned);
+                if spool.cold_key.is_some() { self.0.cold_detected.set(true); }
             }
             let bytes = serde_json::to_vec(&message).map_err(|error| {
                 *self.0.staging_error.borrow_mut() = Some(StoreError::Store { message: error.to_string() });
@@ -2660,8 +2642,6 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
             spool.count = spool.count.checked_add(1).ok_or_else(|| de::Error::custom("message count overflow"))?;
             spool.last_time = message.get("time").and_then(Value::as_i64);
         }
-        // Replay rewinds and reads the file, so every buffered record must reach it first.
-        spool.file = Some(file.into_inner().map_err(|error| spool_error(error.into_error()))?);
         Ok(spool)
     }
 
@@ -2775,10 +2755,7 @@ impl<'a, R: Read> TrackedReader<'a, R> {
         let total = self.scale.total_bytes.unwrap_or(self.total);
         let (completed_items, total_items) = match self.scale.fixed_items {
             Some((completed, total)) => (completed, total),
-            None => {
-                let cold = self.scale.cold_payloads.as_ref().map_or(0, |cold| cold.items.load(Ordering::Acquire));
-                (self.completed_items.saturating_add(cold), None)
-            }
+            None => (self.completed_items, None),
         };
         JobProgress {
             completed_bytes: self
@@ -2794,25 +2771,17 @@ impl<'a, R: Read> TrackedReader<'a, R> {
 
     /// Reports the byte-level database read under the current stage.
     fn report(&mut self) -> Result<(), NativeJobError> {
-        self.report_progress()?;
-        let cold = self.scale.cold_payloads.as_ref().map_or(0, |cold| cold.bytes.load(Ordering::Acquire));
+        self.job
+            .set_progress(self.top_level_progress())
+            .map_err(|error| job_error(self.job, error))?;
         self.job
             .set_detail(JobDetail::new(
                 self.stage,
                 StageUnit::Bytes,
-                self.completed.saturating_add(cold),
-                // Cold payloads not read yet have no known size.
-                (cold == 0).then_some(self.total),
+                self.completed,
+                Some(self.total),
                 self.counts.clone(),
             ))
-            .map_err(|error| job_error(self.job, error))
-    }
-
-    /// Reports the top-level counters alone, for cold payloads read after the
-    /// database bytes, so the item stage keeps its detail.
-    fn report_progress(&self) -> Result<(), NativeJobError> {
-        self.job
-            .set_progress(self.top_level_progress())
             .map_err(|error| job_error(self.job, error))
     }
 
@@ -2871,9 +2840,6 @@ impl<'a, R: Read> TrackedReader<'a, R> {
         }
         self.hasher.update(&buffer[..read]);
         self.completed += read as u64;
-        if let Some(cold) = &self.scale.cold_payloads {
-            cold.source.store(self.completed, Ordering::Release);
-        }
         self.report()?;
         Ok(read)
     }
@@ -3037,12 +3003,7 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
         StoreError::SnapshotReleased => {
             NativeJobError::new("store-error", "persistent snapshot was released")
         }
-        StoreError::RawBodyUnavailable | StoreError::CommitBusy => NativeJobError::new("store-error", error.to_string()),
-        StoreError::AssetInventoryBusy => NativeJobError::new("library-operation-busy", error.to_string()),
-        // A sync binding switch before activation refuses the commit like a concurrent revision.
-        StoreError::Validation { message } if message == "binding-authority-changed" => {
-            NativeJobError::new("revision-conflict", message)
-        }
+        StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::SnapshotPinned { .. } => NativeJobError::new("store-error", error.to_string()),
         StoreError::Committed { message, .. } | StoreError::CommitDecode { message } | StoreError::Validation { message } | StoreError::SchemaMismatch { message } | StoreError::Store { message } => {
             NativeJobError::new("store-error", message)
         }
@@ -3053,7 +3014,7 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
 mod legacy_stream_tests;
 
 #[cfg(test)]
-pub(super) mod tests {
+mod tests {
     use super::super::*;
     use super::*;
     use crate::persistent_store::{PersistentStore, RevisionResult, StagingResult, StoreResult};
@@ -3088,15 +3049,14 @@ pub(super) mod tests {
         "../../../src/ts/storage/tests/roadmap14/adapters/fixtures/legacy/risusave-raw-v4.expected.json"
     );
 
-    pub(crate) struct StoreSink {
-        pub(crate) store: Mutex<PersistentStore>,
+    struct StoreSink {
+        store: Mutex<PersistentStore>,
         incremental: bool,
         prepared_characters: std::collections::HashMap<String, Value>,
         fail_character_batches: bool,
         record_activation: bool,
         lose_commit_reply: bool,
-        switch_binding_before_commit: bool,
-        pub(crate) abort_calls: AtomicUsize,
+        abort_calls: AtomicUsize,
         preserve_calls: AtomicUsize,
         full_character_calls: AtomicUsize,
         incremental_character_calls: AtomicUsize,
@@ -3106,8 +3066,6 @@ pub(super) mod tests {
         unavailable_cold_payloads: std::collections::HashMap<String, ColdPayloadUnavailable>,
         unavailable_cold: Mutex<Vec<(String, String)>>,
         cancel_after_page: Option<(Arc<JobRegistry>, String)>,
-        /// Called with each conversation row as it is staged.
-        pub(crate) on_conversation_row: Option<Box<dyn Fn(&Value) + Send + Sync>>,
     }
 
     impl ReplacementSink for StoreSink {
@@ -3166,8 +3124,8 @@ pub(super) mod tests {
 
         fn expands_cold_payloads(&self) -> bool { self.cold_payloads.is_some() }
 
-        fn cold_payload_path(&self, key: &str) -> StoreResult<Option<PathBuf>> {
-            Ok(self.cold_payloads.as_ref().and_then(|payloads| payloads.get(key)).cloned())
+        fn cold_payload_path(&self, key: &str) -> Option<PathBuf> {
+            self.cold_payloads.as_ref().and_then(|payloads| payloads.get(key)).cloned()
         }
 
         fn unavailable_cold_payload_reason(&self, key: &str) -> Option<ColdPayloadUnavailable> {
@@ -3221,7 +3179,6 @@ pub(super) mod tests {
                     message: "simulated disk full".to_owned(),
                 });
             }
-            if let Some(observe) = &self.on_conversation_row { observe(detail); }
             self.store.lock().unwrap().replace_put_conversation_row(
                 staging_id,
                 character_id,
@@ -3271,19 +3228,11 @@ pub(super) mod tests {
                 .map(|_| ())
         }
 
-        fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
-            let mut store = self.store.lock().unwrap();
-            if self.switch_binding_before_commit {
-                use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
-                let before = store.lww_binding_state().unwrap();
-                store.switch_lww_binding(&SwitchBindingRequest {
-                    initial_publication: false,
-                    header: crate::persistent_store::lww::Header { binding_authority: before.target_authority, request_id: "synthetic-switch-before-restore".into() },
-                    expected_selection_epoch: before.selection_epoch, target: SyncTarget::None, inspection_id: None,
-                }).unwrap();
-            }
-            let prepared = store.prepare_replace_commit(staging_id, Some(expected_revision))?;
-            let result = store.finish_prepared_replace_under(prepared, binding_authority)?;
+        fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
+            let result = self.store
+                .lock()
+                .unwrap()
+                .replace_commit(staging_id, Some(expected_revision))?;
             if self.lose_commit_reply { return Err(StoreError::Store { message: "Synthetic post-commit cleanup failure".into() }); }
             Ok(result)
         }
@@ -3294,7 +3243,7 @@ pub(super) mod tests {
         }
     }
 
-    pub(crate) fn fixture() -> (TempDir, StoreSink) {
+    fn fixture() -> (TempDir, StoreSink) {
         let directory = TempDir::new().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let staging = store.replace_begin().unwrap().staging_id;
@@ -3313,7 +3262,6 @@ pub(super) mod tests {
                 fail_character_batches: false,
                 record_activation: false,
                 lose_commit_reply: false,
-                switch_binding_before_commit: false,
                 abort_calls: AtomicUsize::new(0),
                 preserve_calls: AtomicUsize::new(0),
                 full_character_calls: AtomicUsize::new(0),
@@ -3324,7 +3272,6 @@ pub(super) mod tests {
                 unavailable_cold_payloads: Default::default(),
                 unavailable_cold: Mutex::new(Vec::new()),
                 cancel_after_page: None,
-                on_conversation_row: None,
             },
         )
     }
@@ -3345,13 +3292,13 @@ pub(super) mod tests {
         bytes
     }
 
-    pub(crate) fn block(block_type: u8, compressed: bool, name: &str, value: &Value) -> Vec<u8> {
+    fn block(block_type: u8, compressed: bool, name: &str, value: &Value) -> Vec<u8> {
         let json = serde_json::to_vec(value).unwrap();
         let payload = if compressed { gzip(&json) } else { json };
         raw_block(block_type, u8::from(compressed), name, &payload)
     }
 
-    pub(crate) fn valid_blocks() -> Vec<Vec<u8>> {
+    fn valid_blocks() -> Vec<Vec<u8>> {
         let character = json!({
             "type": "character",
             "chaId": "char-1",
@@ -3389,7 +3336,7 @@ pub(super) mod tests {
         ]
     }
 
-    pub(crate) fn save_bytes(blocks: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+    fn save_bytes(blocks: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
         let mut bytes = b"RISUSAVE\0".to_vec();
         for block in blocks {
             bytes.extend(block);
@@ -4227,6 +4174,42 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn official_cold_references_fail_before_activation() {
+        let mut saves = Vec::new();
+        for cold in [
+            json!({"chaId":"char-1","name":"Stub","chats":[],"coldstorage":"missing-character"}),
+            json!({"chaId":"char-1","name":"Synthetic","chats":[{"id":"chat-1","name":"Chat","message":[{"role":"char","data":"\u{ef01}COLDSTORAGE\u{ef01}missing-chat"}]}]}),
+        ] {
+            let mut blocks = valid_blocks();
+            blocks[6] = block(2, false, "char-1", &cold);
+            saves.push(blocks);
+        }
+        // Plugin values are the only cold data, in the pluginStorage block or in the root.
+        for storage in [json!({"inline":true,"_coldpluginIndex":"index"}), json!({"_coldplugin":{"plugin":"value"}})] {
+            let mut blocks = valid_blocks();
+            blocks[5] = block(11, false, "pluginStorage", &storage);
+            saves.push(blocks);
+            let mut blocks = valid_blocks();
+            blocks.remove(5);
+            blocks[0] = block(1, true, "root", &json!({"username":"Imported","pluginCustomStorage":storage}));
+            saves.push(blocks);
+        }
+        for blocks in saves {
+            let (directory, sink) = fixture();
+            let bytes = save_bytes(blocks);
+            let registry = JobRegistry::default();
+            let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
+            let error = restore_risu_save_reader_controlled(
+                bytes.as_slice(), bytes.len() as u64, 1, &job, &sink, RestoreLimits::default(), true,
+                RestoreProgressScale { spool_directory: Some(directory.path().to_owned()), reject_cold_references: true, ..Default::default() },
+            ).unwrap_err();
+            assert_eq!(error.code, "cold-expansion-required");
+            assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+            assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+        }
+    }
+
+    #[test]
     fn block_restore_assigns_missing_and_duplicate_chat_ids() {
         let (directory, sink) = fixture();
         let mut blocks = valid_blocks();
@@ -4295,31 +4278,6 @@ pub(super) mod tests {
         assert_eq!(store.revision().unwrap(), 2);
         assert_eq!(store.materialize(None).unwrap()["username"], "Imported");
         }
-    }
-
-    #[test]
-    fn a_binding_switch_after_the_activation_receipt_refuses_the_commit_and_leaves_the_receipt_resolvable() {
-        let (directory, mut sink) = fixture();
-        sink.record_activation = true;
-        sink.switch_binding_before_commit = true;
-        let path = directory.path().join("switched.risudat");
-        fs::write(&path, save_bytes(valid_blocks())).unwrap();
-        let registry = JobRegistry::default();
-        let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
-
-        let error = restore_block_risu_save_path(&path, 1, &job, &sink).unwrap_err();
-
-        assert_eq!(error.code, "revision-conflict", "{error:?}");
-        assert!(error.message.contains("binding-authority-changed"), "{error:?}");
-        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
-        let store = sink.store.lock().unwrap();
-        assert_eq!(store.revision().unwrap(), 1);
-        assert_eq!(store.materialize(None).unwrap()["username"], "Old");
-        let restarted = JobRegistry::default();
-        super::super::restore_receipts::reconcile(&store, &restarted).unwrap();
-        let recovered = restarted.status(&job.id()).unwrap();
-        assert_eq!(recovered.state, JobState::Cancelled);
-        assert_eq!(recovered.activation_revision, None);
     }
 
     fn msgpackr_parity_fixture() -> Value {
@@ -4645,7 +4603,7 @@ pub(super) mod tests {
         job.start(JobPhase::ReadingSource).unwrap();
         let staging_id = sink.begin().unwrap().staging_id;
         stage_legacy_json(&database, &staging_id, &job, &sink).unwrap();
-        sink.commit(&staging_id, 1, None).unwrap();
+        sink.commit(&staging_id, 1).unwrap();
         let restored = sink.store.lock().unwrap().materialize(None).unwrap();
         let chats = restored["characters"][0]["chats"].as_array().unwrap();
         assert_eq!(chats.len(), 3);
@@ -4680,7 +4638,7 @@ pub(super) mod tests {
         job.start(JobPhase::ReadingSource).unwrap();
         let staging_id = sink.begin().unwrap().staging_id;
         stage_legacy_json(&database, &staging_id, &job, &sink).unwrap();
-        sink.commit(&staging_id, 1, None).unwrap();
+        sink.commit(&staging_id, 1).unwrap();
 
         let exported_path = {
             let mut store = sink.store.lock().unwrap();
@@ -5240,7 +5198,6 @@ pub(super) mod tests {
             fail_character_batches: false,
             record_activation: false,
             lose_commit_reply: false,
-            switch_binding_before_commit: false,
             abort_calls: AtomicUsize::new(0),
             preserve_calls: AtomicUsize::new(0),
             full_character_calls: AtomicUsize::new(0),
@@ -5251,7 +5208,6 @@ pub(super) mod tests {
             unavailable_cold_payloads: Default::default(),
             unavailable_cold: Mutex::new(Vec::new()),
             cancel_after_page: None,
-            on_conversation_row: None,
         };
         let job = JobRegistry::default()
             .create(JobKind::RestoreBlockRisuSave)
@@ -5607,8 +5563,8 @@ pub(super) mod tests {
             self.inner.add_characters(staging_id, characters)
         }
 
-        fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
-            self.inner.commit(staging_id, expected_revision, binding_authority)
+        fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
+            self.inner.commit(staging_id, expected_revision)
         }
 
         fn abort(&self, staging_id: &str) -> StoreResult<()> {
@@ -5923,8 +5879,8 @@ pub(super) mod tests {
             self.inner.add_characters(staging_id, characters)
         }
 
-        fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
-            self.inner.commit(staging_id, expected_revision, binding_authority)
+        fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
+            self.inner.commit(staging_id, expected_revision)
         }
 
         fn abort(&self, staging_id: &str) -> StoreResult<()> {

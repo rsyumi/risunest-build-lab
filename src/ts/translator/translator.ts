@@ -45,12 +45,6 @@ function rememberTranslation(key: string, value: string): void {
     if (cache.get(key) === undefined) cache.set(key, value)
 }
 
-// Requests still in flight, so overlapping parses of one row pay for a text once.
-// A translation reports its failure in one error mode, so its key carries the mode;
-// an LLM request returns its failure for each caller to report.
-const pendingTranslations = new Map<string, Promise<string>>()
-const pendingLLMTranslations = new Map<string, Promise<string>>()
-
 let bergamotTranslate: (text: string, from: string, to: string, html?: boolean) => Promise<string>|null = null
 
 export const LLMCacheStorage = localforage.createInstance({
@@ -58,11 +52,6 @@ export const LLMCacheStorage = localforage.createInstance({
 })
 
 let waitTrans = 0
-
-// Google refuses some client names with 429 in some regions while it still answers others.
-const googleTranslateClients = ['dict-chrome-ex', 'at', 'gtx']
-// The client that answered last, which later requests ask first.
-let googleTranslateClient = 0
 
 export interface TranslateHTMLContext {
     scriptContext: ProcessScriptCaptureContext
@@ -97,14 +86,6 @@ export async function translate(text:string, reverse:boolean, captureContext?: T
         if(cached !== undefined){
             return cached
         }
-        const key = errorMode + translationCacheKey(db, db.translator, target, reverse, text)
-        let pending = pendingTranslations.get(key)
-        if(!pending){
-            pending = runTranslator(text, reverse, db.translator, target, undefined, captureContext, errorMode)
-                .finally(() => pendingTranslations.delete(key))
-            pendingTranslations.set(key, pending)
-        }
-        return pending
     }
 
     return runTranslator(
@@ -156,7 +137,7 @@ export async function runTranslator(text:string, reverse:boolean, from:string,ta
                 fullResult.push(chunk[0])
                 continue
             }
-            const result = await translateMain(trimed, arg, captureContext);
+            const result = await translateMain(trimed, arg, captureContext, errorMode);
 
             if(result.startsWith('ERR::')){
                 if (errorMode === 'throw') throw new Error(result)
@@ -187,11 +168,11 @@ export async function runTranslator(text:string, reverse:boolean, from:string,ta
 
 }
 
-async function translateMain(text:string, arg:{from:string, to:string, host:string, translatorNote?:string}, captureContext?: TranslateHTMLContext){
+async function translateMain(text:string, arg:{from:string, to:string, host:string, translatorNote?:string}, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert'){
     let db = captureContext?.scriptContext.parserContext.database ?? getDatabase()
     if(db.translatorType === 'llm'){
         const tr = arg.to || 'en'
-        return translateLLM(text, {to: tr, from: arg.from, translatorNote: arg.translatorNote}, captureContext)
+        return translateLLM(text, {to: tr, from: arg.from, translatorNote: arg.translatorNote}, captureContext, errorMode)
     }
     if(db.translatorType === 'deepl'){
         const body = {
@@ -267,16 +248,12 @@ async function translateMain(text:string, arg:{from:string, to:string, host:stri
                         "Accept": "*/*",
                     },
                     method: "GET",
-                    // The page is HTML, which the default JSON response would fail to parse.
-                    rawResponse: true,
                 })
-                if(d.ok){
-                    const parser = new DOMParser()
-                    const dom = parser.parseFromString(new TextDecoder().decode(d.data), 'text/html')
-                    const result = dom.querySelector('.result-container')?.textContent?.trim()
-                    if(result){
-                        return result
-                    }
+                const parser = new DOMParser()
+                const dom = parser.parseFromString(d.data, 'text/html')
+                const result = dom.querySelector('.result-container')?.textContent?.trim()
+                if(result){
+                    return result
                 }
             } catch (error) {
                 
@@ -285,44 +262,24 @@ async function translateMain(text:string, arg:{from:string, to:string, host:stri
     }
 
 
+    const url = `https://${arg.host}/translate_a/single?client=gtx&dt=t&sl=${db.translatorInputLanguage}&tl=${arg.to}`
+
     // The text goes in the body, which has no URL length limit.
     const request = {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
         body: 'q=' + encodeURIComponent(text),
     }
+    // Google can refuse one HTTP client while it still answers another, and a refusal
+    // may reach the WebView only as a network error.
     let f: Response | null = null
-    let networkError: unknown
-    // Another translation may change the remembered client while this one walks the list.
-    const firstClient = googleTranslateClient
-    for(let attempt = 0; attempt < googleTranslateClients.length; attempt++){
-        // Release the refused response before asking the next client.
-        await f?.body?.cancel().catch(() => {})
-        f = null
-        const client = (firstClient + attempt) % googleTranslateClients.length
-        const url = `https://${arg.host}/translate_a/single?client=${googleTranslateClients[client]}&dt=t&sl=${db.translatorInputLanguage}&tl=${arg.to}`
-        // Google can refuse one HTTP client while it still answers another, and a refusal
-        // may reach the WebView only as a network error.
-        try {
-            f = await fetch(url, request)
-        } catch (error) {
-            networkError = error
-        }
-        if(isTauri && (f === null || f.status === 429)){
-            await f?.body?.cancel().catch(() => {})
-            try {
-                f = await fetchNative(url, { ...request, logFetch: false })
-            } catch (error) {
-                networkError = error
-            }
-        }
-        if(f !== null && f.status !== 429){
-            googleTranslateClient = client
-            break
-        }
+    try {
+        f = await fetch(url, request)
+    } catch (error) {
+        if(!isTauri) throw error
     }
-    if(f === null){
-        throw networkError
+    if(isTauri && (f === null || f.status === 429)){
+        f = await fetchNative(url, { ...request, logFetch: false })
     }
 
     if(!f.ok){
@@ -423,12 +380,8 @@ export async function translateHTML(
     if(db.translatorType === 'llm'){
         const tr = db.translator || 'en'
         const from = db.translatorInputLanguage
-        let r = await translateLLM(html, {to: tr, from: from, regenerate}, captureContext)
+        const r = await translateLLM(html, {to: tr, from: from, regenerate}, captureContext)
         signal?.throwIfAborted()
-        if(r.startsWith('ERR::')){
-            alertError(r)
-            r = html
-        }
         if(db.playMessageOnTranslateEnd){
             const audio = new Audio(sendSound);
             audio.play().catch(() => {});
@@ -680,22 +633,7 @@ function normalizeLLMCacheKey(key:string):string{
     return key.replace(inlaySlotMarkerRegex, '')
 }
 
-/** The translation, or an `ERR::` message that the caller reports like the other translators' errors. */
-function translateLLM(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext):Promise<string>{
-    if(arg.regenerate){
-        return requestLLMTranslation(text, arg, captureContext)
-    }
-    const key = normalizeLLMCacheKey(text)
-    let pending = pendingLLMTranslations.get(key)
-    if(!pending){
-        pending = requestLLMTranslation(text, arg, captureContext)
-            .finally(() => pendingLLMTranslations.delete(key))
-        pendingLLMTranslations.set(key, pending)
-    }
-    return pending
-}
-
-async function requestLLMTranslation(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext):Promise<string>{
+async function translateLLM(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert'):Promise<string>{
     if(!arg.regenerate){
         const cacheMatch = await LLMCacheStorage.getItem(normalizeLLMCacheKey(text))
         if(cacheMatch !== null){
@@ -758,10 +696,14 @@ async function requestLLMTranslation(text:string, arg:{to:string, from:string, r
     }, 'translate')
 
     if(rq.type === 'fail'){
-        return 'ERR::' + rq.result
+        if (errorMode === 'throw') throw new Error(rq.result)
+        alertError(rq.result)
+        return text
     }
     if(rq.type === 'streaming' || rq.type === 'multiline'){
-        return 'ERR::Unexpected response type'
+        if (errorMode === 'throw') throw new Error('Unexpected response type')
+        alertError('Unexpected response type')
+        return text
     }
     const result = rq.result.replace(/<style-data style-index="(\d+)" ?\/?>/g, (match, p1) => {
         return styleDecodes[parseInt(p1)] ?? ''

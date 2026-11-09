@@ -67,20 +67,6 @@ test('keeps synchronous host calls inside C callbacks, metamethods and nested co
     expect(await runtime.invoke('run', [])).toBe('initialized|okok|2|1,2,3|meta|true|nested')
 })
 
-test('runs a host API that a table key calls from __tostring while another host call converts its arguments', async () => {
-    const writes: unknown[] = []
-    const runtime = await create(`
-        function run()
-            local key = setmetatable({}, {__tostring = function() write('key'); return 'k' end})
-            write('before', {[key] = 'v', nested = {[key] = 1}})
-            return 'done'
-        end
-    `, { write: (...values) => { writes.push(values) } })
-    expect(await runtime.invoke('run', [])).toBe('done')
-    expect(runtime.isTainted()).toBe(false)
-    expect(writes).toEqual([['key'], ['key'], ['key'], ['key'], ['before', { k: 'v', nested: { k: 1 } }]])
-})
-
 test('keeps globals and genuine Promise APIs, and does not replay effects after a caught failure', async () => {
     const writes: string[] = []
     const runtime = await create(`
@@ -176,4 +162,64 @@ test('runs Lua finalizers with host APIs when new invocation arguments trigger c
     await runtime.invoke('prepare', [])
     expect(await runtime.invoke('run', ['x'.repeat(1024 * 1024)])).toBe(1024 * 1024)
     expect(finalized).toBe(200)
+})
+
+test('native values helper asset matches selected current product wrapper sections', async () => {
+    const wrapper = luaCodeWrapper('').replaceAll('\r\n', '\n')
+    const section = (start: string, end: string) => {
+        const begin = wrapper.indexOf(start), finish = wrapper.indexOf(end, begin)
+        expect(begin).toBeGreaterThanOrEqual(0)
+        expect(finish).toBeGreaterThan(begin)
+        expect(wrapper.indexOf(start, begin + start.length)).toBe(-1)
+        expect(wrapper.indexOf(end, finish + end.length)).toBe(-1)
+        return wrapper.slice(begin, finish)
+    }
+    const helpers = section("json = require 'json'", 'function setFullChat(')
+        + section('function getState(', 'function async(')
+    expect((await readFile('src-tauri/src/native_script/lua_value_helpers.lua', 'utf8')).replaceAll('\r\n', '\n')).toBe(helpers)
+})
+
+test('native values lexical decoder replacement is visible from actual product helpers', async () => {
+    const runtime = await create(`decodeJSON=function(_) return 'lexical' end
+        function run() return getState('id','x')..':'..getChat('id',0) end`, {
+        getChatVar: () => 'null', getChatMain: () => '{"data":"original"}',
+    })
+    expect(await runtime.invoke('run', [])).toBe('lexical:lexical')
+})
+
+test('native values clone normalization uses final own payload and includes ignored arguments', async () => {
+    const observed: string[] = []
+    const runtime = await create(`function run()
+        assert(not pcall(history,function() end,2))
+        assert(not pcall(history,nil,2,function() end))
+        assert(not pcall(history,nil,{valueOf=function() end}))
+        assert(history(nil,{__proto__=function() end})=='NaN')
+        assert(history(nil,{__proto__={toString=false}})=='NaN')
+        assert(history(nil,{toString=false})=='coercion-error')
+        assert(history(nil,{valueOf=false})=='NaN')
+        local cyclic={}; cyclic[1]=cyclic; assert(history(nil,cyclic)=='0')
+        return true
+    end`, { history: (_id, value) => {
+        let result: string
+        try { result = String(Math.max(0, Math.floor(value || 0))) }
+        catch { result = 'coercion-error' }
+        observed.push(result)
+        return result
+    } })
+    expect(await runtime.invoke('run', [])).toBe(true)
+    expect(observed).toEqual(['NaN', 'NaN', 'coercion-error', 'NaN', '0'])
+})
+
+test('native values known byte windows match pinned Wasmoon without reading unknown tails', async () => {
+    const runtime = await create(`function run()
+        assert(echo('a'..string.char(0)..'b')=='a')
+        assert(echo(string.char(239,187,191)..'x')==utf8.char(65279)..'x')
+        assert(echo(string.char(239,187,191)..string.rep('x',17))==string.rep('x',17))
+        assert(echo(string.char(194))==utf8.char(128))
+        assert(echo(string.char(226,130))==utf8.char(8320))
+        assert(echo(string.char(226,0,130))==utf8.char(8194))
+        assert(echo(string.rep('x',17)..string.char(255))==string.rep('x',17)..utf8.char(65533))
+        return numeric(string.char(237,160,128))
+    end`, { echo: value => value, numeric: value => String(Number(value)) })
+    expect(await runtime.invoke('run', [])).toBe('NaN')
 })

@@ -130,6 +130,7 @@ destination_controlled_writer!(
     write_risu_module_destination_controlled,
     SourceKind::RisuModule
 );
+destination_controlled_writer!(write_preset_destination_controlled, SourceKind::Preset);
 destination_controlled_writer!(
     write_dataset_destination_controlled,
     SourceKind::Dataset
@@ -251,6 +252,7 @@ enum SourceKind {
     CharacterCharX,
     CharacterCard,
     RisuModule,
+    Preset,
     Dataset,
     Gallery,
 }
@@ -268,6 +270,7 @@ impl SourceKind {
             Self::CharacterCharX => Some(&["character.charx", "character.jpeg"]),
             Self::CharacterCard => Some(&["character.json", "character.png"]),
             Self::RisuModule => Some(&["module.risum"]),
+            Self::Preset => Some(&["preset.json", "preset.risup"]),
             Self::Dataset => Some(&["dataset.json"]),
             Self::Gallery => Some(&["gallery-output.bin"]),
         }
@@ -521,7 +524,7 @@ fn close_file(file: File) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "kernel32")]
@@ -561,7 +564,7 @@ pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()
 }
 
 #[cfg(not(windows))]
-pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)
 }
 

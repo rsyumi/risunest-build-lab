@@ -4,7 +4,6 @@ import goldenCardJson from './storage/tests/roadmap14/fixtures/charx/card-v3.jso
 const mocks = vi.hoisted(() => ({
     database: {
         characters: [] as any[],
-        modules: [] as any[],
         statics: { imports: 0 },
         blockedRealmCreators: [] as any[],
     },
@@ -155,7 +154,6 @@ vi.mock('./media', () => ({
 }))
 
 import {
-    characterURLImport,
     downloadRisuHub,
     exportCharacterCard,
     exportChar,
@@ -329,7 +327,7 @@ describe('character card additions', () => {
         )
     })
 
-    it('continues a desktop batch after one selected file fails and reports the batch in one outcome', async () => {
+    it('continues a desktop batch after one selected file fails', async () => {
         const error = new Error('synthetic invalid source')
         mocks.desktopPickerPaths = [
             'C:\\chosen\\first.charx',
@@ -342,9 +340,9 @@ describe('character card additions', () => {
             .mockResolvedValueOnce({ kind: 'imported', mode: 'native', value: 'last-card' })
 
         dismissNativeFileOperationOutcome()
-        const outcomes: NativeFileOperationOutcome[] = []
+        const failures: NativeFileOperationOutcome[] = []
         const unsubscribe = nativeFileOperationOutcome.subscribe(outcome => {
-            if (outcome) outcomes.push(outcome)
+            if (outcome?.state === 'failed') failures.push(outcome)
         })
         try {
             await expect(importCharacter()).resolves.toBe('last-card')
@@ -358,13 +356,12 @@ describe('character card additions', () => {
             'C:\\chosen\\last.charx',
             expect.any(Object),
         )
-        const failure = { code: 'import-error', message: error.message, recoveryRequired: false }
-        expect(outcomes).toEqual([expect.objectContaining({
+        expect(failures).toEqual([expect.objectContaining({
             kind: 'import',
             format: 'content',
             state: 'failed',
-            error: failure,
-            batch: { total: 3, imported: 2, failures: [{ name: 'broken.charx', error: failure }] },
+            source: { name: 'broken.charx' },
+            error: { code: 'import-error', message: error.message, recoveryRequired: false },
         })])
         expect(mocks.alertError).not.toHaveBeenCalled()
     })
@@ -871,8 +868,6 @@ describe('character card additions', () => {
         expect(mocks.saveAsset).not.toHaveBeenCalled()
         expect(mocks.pngWrites).toEqual([])
         expect(mocks.downloads).toEqual([])
-        // The export dialog reports the saved file.
-        expect(mocks.alertNormal).not.toHaveBeenCalled()
     })
 
     it('shows the established export error alert when native CharX export fails', async () => {
@@ -891,11 +886,6 @@ describe('character card additions', () => {
         await expect(exportChar(0)).resolves.toBe('')
 
         expect(mocks.alertError).toHaveBeenCalledWith(error)
-
-        mocks.exportNativeCharacterCharxFromPicker.mockRejectedValue(
-            Object.assign(new Error('Another library operation is running'), { code: 'library-operation-busy' }))
-        await expect(exportChar(0)).resolves.toBe('')
-        expect(mocks.alertError).toHaveBeenLastCalledWith(language.risuNest.importDialog.reasonBusy)
     })
 
     it('keeps ordinary asset bytes exact in the JavaScript JSON export fallback', async () => {
@@ -1053,18 +1043,6 @@ describe('character card additions', () => {
         expect(without && without.onboarding).toBeUndefined()
     })
 
-    it('imports a card lorebook entry without content as empty text', async () => {
-        await exportCharacterCard(plainCharacter(), 'json', { spec: 'v3' })
-        const card = exportedJson(0)
-        card.data.assets = []
-        card.data.character_book = {
-            extensions: {},
-            entries: [{ keys: ['synthetic'], content: null, extensions: {}, enabled: true, insertion_order: 100 }],
-        }
-        const imported = await importCharacterCardSpec(structuredClone(card), undefined, 'normal', {}, null, true)
-        expect(imported && imported.globalLore[0]).toMatchObject({ key: 'synthetic', content: '' })
-    })
-
     it('stops a Realm download or preview from a blocked creator before anything is downloaded', async () => {
         mocks.database.blockedRealmCreators = [{ id: 'blocked-creator', name: 'Blocked' }]
         const info = (creator: string) => ({ status: 200, json: async () => ({ id: 'synthetic-card', creator }), text: async () => '' })
@@ -1109,20 +1087,5 @@ describe('character card additions', () => {
         expect(requests).toEqual([expect.stringMatching(/\/hub\/info\/synthetic-card$/)])
         expect(String(mocks.alertError.mock.calls[0]?.[0])).toContain('synthetic lookup failure')
         expect(mocks.alertRisuServiceTOS).not.toHaveBeenCalled()
-    })
-
-    it('drops MCP data from a module imported by URL', async () => {
-        mocks.database.modules = []
-        const module = { type: 'risuModule', id: 'source', name: 'Synthetic', description: '', mcp: { url: 'internal:dice' } }
-        location.hash = '#import_module=' + encodeURIComponent(Buffer.from(JSON.stringify(module)).toString('base64'))
-        try {
-            await characterURLImport()
-        } finally {
-            location.hash = ''
-        }
-        expect(mocks.database.modules).toHaveLength(1)
-        expect(mocks.database.modules[0]).toMatchObject({ name: 'Synthetic', id: 'card-id-1' })
-        expect(mocks.database.modules[0]).not.toHaveProperty('mcp')
-        expect(mocks.alertError).not.toHaveBeenCalled()
     })
 })

@@ -10,7 +10,6 @@ import { cloneConversationMetadata } from './storage/selectedConversationLifecyc
 import { isConversationSummaryStub } from './storage/conversationResidency'
 import {
     applyConversationBindingPatch,
-    conversationBindingHolds,
     type ConversationBindingPatch,
 } from './storage/conversationBinding'
 import {
@@ -24,7 +23,6 @@ import {
 } from './storage/persistentDataRuntime.svelte'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
 import { requestScriptDisplayRefresh } from './process/scriptDisplayRefresh'
-import { authorNotePresetLinkPatch, linkedAuthorNotePreset } from './authorNotePresets'
 
 /** A binding edit during a generation would discard its response, so it waits for it. */
 export function chatBindingBlockedByGeneration(): boolean {
@@ -68,15 +66,12 @@ export function captureChatBindingTarget() {
  * Persists persona or toggle bindings of a conversation. A complete selected conversation goes
  * through its session; anything else (a summary stub or the windowed selected shell) is committed
  * as metadata by the save coordinator, which also advances the baseline so the in-memory record
- * stays clean without reading message bodies. With `expected`, the patch is dropped unless the
- * conversation still holds those fields now and, for a coordinator commit, when it is stored.
+ * stays clean without reading message bodies.
  */
 export async function updateChatBinding(
     conversation: Chat,
     patch: ConversationBindingPatch,
-    expected?: ConversationBindingPatch,
 ): Promise<void> {
-    if (expected && !conversationBindingHolds(conversation, expected)) return
     const owner = DBState.db.characters.find((character) => character.chats.includes(conversation))
     const session = getActiveConversationSession()
     if (owner && session?.matchesConversation(owner.chaId, conversation)) {
@@ -104,7 +99,6 @@ export async function updateChatBinding(
                 ?.chats.find((chat) => chat.id === conversationId)
             if (current) applyConversationBindingPatch(current, committedPatch)
         },
-        expected,
     )
 }
 
@@ -117,20 +111,6 @@ export async function bindPersona(conversation: Chat, index: number): Promise<vo
 
 export async function saveChatBinding(): Promise<void> {
     await flushPendingData('chat-binding')
-}
-
-/** Rewrites the stored note of the selected conversation to its linked preset, for readers that do not resolve presets. */
-export async function refreshAuthorNoteCopy(): Promise<void> {
-    const target = captureChatBindingTarget()
-    if (!target || get(doingChat)) return
-    const conversation = target.conversation
-    if (conversation.id && get(activeRerollConversations).includes(conversation.id)) return
-    const preset = linkedAuthorNotePreset(DBState.db.authorNotePresets, conversation)
-    if (!preset || conversation.note === preset.text) return
-    // An edit queued before this copy wins: the copy commits only over the note and link read here.
-    const read = { note: conversation.note, authorNotePreset: conversation.authorNotePreset }
-    await updateChatBinding(conversation, authorNotePresetLinkPatch(preset), read)
-    await saveChatBinding()
 }
 
 export interface OnboardingTarget {

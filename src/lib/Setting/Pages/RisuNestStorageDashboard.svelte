@@ -7,14 +7,6 @@
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
     import SettingProgress from '../RisuNest/SettingProgress.svelte'
-    import SettingToggle from '../RisuNest/SettingToggle.svelte'
-    import NumberInput from 'src/lib/UI/GUI/NumberInput.svelte'
-    import {
-        getDeviceSettings,
-        MAX_SNAPSHOT_KEEP_COUNT,
-        subscribeDeviceSettings,
-        updateDeviceSettings,
-    } from 'src/ts/storage/deviceSettings'
     import {
         getServerSyncCacheUsage,
         cleanupServerSyncCache,
@@ -28,7 +20,6 @@
         previewNativePersistentAssetGc,
         restoreNativePersistentSnapshot,
     } from 'src/ts/storage/nativePersistentMaintenance'
-    import { requestStoreCompaction } from 'src/ts/storage/storeCompaction'
     import { getSyncConflictBackupStore } from 'src/ts/storage/sync/syncConflictBackup'
     import { assetAliasCleanupTarget, flushPendingData } from 'src/ts/storage/persistentDataRuntime.svelte'
     import { deleteUnusedAssetAliases } from 'src/ts/storage/deletedOwnerAssetCleanup'
@@ -63,12 +54,11 @@
     let view = $state(dashboard.snapshot())
     // Restoring restarts the app, so the flag only ever clears on cancel or failure.
     let restoringSnapshot: string | null = $state(null)
-    let requestingCompaction = $state(false)
-    // The snapshot list is not part of the totals, so they show without it.
     let rollup = $derived(
-        view.stats && view.loadedSources.includes('conflictBackups') && view.loadedSources.includes('tempUsage')
+        view.stats && view.loadedSources.length === 4
             ? storageDashboardRollup(
                   view.stats,
+                  view.snapshots,
                   view.conflictBackups,
                   view.tempUsage,
               )
@@ -154,21 +144,14 @@
         return ""
     }
 
-    // Another operation holding the library refused the action; it works once that operation ends.
-    const refusedAsBusy = (error: unknown): boolean =>
-        typeof error === 'object' && error !== null && 'code' in error
-        && (error.code === 'library-operation-busy' || error.code === 'commit-busy')
-
     function showActionError(error: unknown, fallback = strings.actionFailed): void {
-        alertError(refusedAsBusy(error) ? language.risuNest.importDialog.reasonBusy : fallback)
+        void error
+        alertError(fallback)
     }
 
     // Creating a snapshot or reading an image fails on the same damage the data check names.
     async function showStorageFailure(error: unknown): Promise<void> {
-        if (refusedAsBusy(error)) {
-            showActionError(error)
-            return
-        }
+        void error
         if (await alertConfirm(`${strings.actionFailed} ${language.risuNest.dataHealth.openResult}`))
             openDataHealthScreen()
     }
@@ -263,51 +246,13 @@
         try { await dashboard.cleanupTemp() } catch (error) { showActionError(error) }
     }
 
-    async function compactDatabase(): Promise<void> {
-        if (requestingCompaction || !await alertConfirm(strings.compactConfirm)) return
-        requestingCompaction = true
-        try { await requestStoreCompaction() } catch (error) { showActionError(error) } finally { requestingCompaction = false }
-    }
-
     async function createSnapshot(): Promise<void> {
         try { await dashboard.createSnapshot() } catch (error) { await showStorageFailure(error) }
     }
 
-    const initialSettings = getDeviceSettings()
-    let automaticSnapshots = $state(initialSettings.automaticSnapshotsEnabled)
-    let storedKeepCount = initialSettings.snapshotKeepCount
-    let keepCount = $state(initialSettings.snapshotKeepCount)
-    const unsubscribeSettings = subscribeDeviceSettings((settings) => {
-        automaticSnapshots = settings.automaticSnapshotsEnabled
-        storedKeepCount = settings.snapshotKeepCount
-        keepCount = settings.snapshotKeepCount
-    })
-
-    function setAutomaticSnapshots(next: boolean): void {
-        if (next === automaticSnapshots) return
-        automaticSnapshots = next
-        updateDeviceSettings({ automaticSnapshotsEnabled: next })
-    }
-
-    function commitKeepCount(): void {
-        const value = Number(keepCount)
-        if (keepCount === null || !Number.isFinite(value)) {
-            keepCount = storedKeepCount
-            return
-        }
-        const next = Math.min(MAX_SNAPSHOT_KEEP_COUNT, Math.max(1, Math.round(value)))
-        keepCount = next
-        if (next === storedKeepCount) return
-        storedKeepCount = next
-        updateDeviceSettings({ snapshotKeepCount: next })
-    }
-
     const unsubscribe = dashboard.subscribe((next) => { view = next })
     onMount(() => { void dashboard.load() })
-    onDestroy(() => {
-        unsubscribe()
-        unsubscribeSettings()
-    })
+    onDestroy(unsubscribe)
 </script>
 
 {#snippet listHeader(label: string, summary: string)}
@@ -440,20 +385,6 @@
         </details>
         {/if}
 
-    <SettingRow inline data-storage-setting="automatic-snapshots" label={strings.automaticSnapshots} help={strings.automaticSnapshotsHelp}>
-        <SettingToggle checked={automaticSnapshots} onchange={setAutomaticSnapshots} label={strings.automaticSnapshots} />
-    </SettingRow>
-    <SettingRow data-storage-setting="snapshot-keep-count" label={strings.snapshotKeepCount} help={strings.snapshotKeepCountHelp.replace('{0}', formatCount(MAX_SNAPSHOT_KEEP_COUNT))}>
-        <NumberInput
-            size="sm"
-            min={1}
-            max={MAX_SNAPSHOT_KEEP_COUNT}
-            ariaLabel={strings.snapshotKeepCount}
-            className="w-28 text-right"
-            bind:value={keepCount}
-            onChange={commitKeepCount}
-        />
-    </SettingRow>
     {#if view.stats}
         <SettingRow data-storage-action="snapshot" label={strings.createSnapshotTitle} help={strings.createSnapshotHelp}>
             <SettingButton busy={isBusy('create-snapshot')} onclick={createSnapshot}>{strings.createSnapshot}</SettingButton>
@@ -522,10 +453,6 @@
                     {/if}
                 {/if}
             {/snippet}
-        </SettingRow>
-        <SettingRow data-storage-action="compact" label={strings.compactTitle} help={strings.compactHelp}>
-            <span class="text-sm text-textcolor2 tabular-nums">{strings.compactReclaimable.replace('{0}', formatRisuNestStorageBytes(view.stats.databaseReclaimableBytes))}</span>
-            <SettingButton variant="secondary" busy={requestingCompaction} disabled={view.stats.databaseReclaimableBytes === 0} onclick={compactDatabase}>{strings.compact}</SettingButton>
         </SettingRow>
     {/if}
 </SettingGroup>

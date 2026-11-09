@@ -1,0 +1,12 @@
+{
+  "node": "v24.12.0",
+  "v8": "13.6.233.17-node.37",
+  "unicode": "16.0",
+  "tsSourceSha256": {
+    "src/ts/process/memory/hypamemory.ts": "faeba0e8b215247f2fe5e80c105d0e6a222e16af92a7e5bb20ff2c2428abf16f",
+    "src/ts/globalApi.svelte.ts": "153d6ecb403c35b61154860bb7bde49ddf891d4ee56400f995cec885d8b552d1",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/process/memory/hypaCacheKey.ts": "a6c42ed599c02102fd790299e9b60e06a2d4aa61c031e42f993e243dd1ba5738",
+    "src/ts/platform.ts": "22980b9f686bc6d1f6cb0b9fb0ae0f94e920b11170d1e76717b7e5eb8248a160"
+  }
+}

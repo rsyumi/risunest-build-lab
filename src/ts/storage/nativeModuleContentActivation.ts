@@ -37,6 +37,57 @@ function requireRisum(content: PreparedNativeContent): PreparedNativeRisumConten
     return content as PreparedNativeRisumContent
 }
 
+// The module the native mapping produced, or undefined where the TS steps below run instead: on every decline, so a
+// module that needs the low-level access confirmation or fails a check gets the TS dialog or error.
+function nativeMappedModule(content: PreparedNativeRisumContent): RisuModule | undefined {
+    const mapping = content.nativeMapping
+    return mapping?.outcome === 'mapped' ? mapping.module as unknown as RisuModule : undefined
+}
+
+// The module the native conversion produced from the native character, or undefined where TS converts: on its decline,
+// and wherever the TS mapping produced the character, which is not the one the native module was converted from.
+function nativeConvertedModule(content: PreparedNativeContent, character: object): RisuModule | undefined {
+    const mapping = content.nativeMapping
+    const moduleMapping = content.nativeModuleMapping
+    return mapping?.outcome === 'mapped' && 'character' in mapping && mapping.character === character &&
+        moduleMapping?.outcome === 'mapped'
+        ? moduleMapping.module as unknown as RisuModule
+        : undefined
+}
+
+async function mapPreparedRisumModule(
+    content: PreparedNativeRisumContent,
+    dependencies: NativeModuleContentActivationDependencies,
+): Promise<RisuModule | null> {
+    const module = structuredClone(content.metadata) as unknown as RisuModule
+    assertModuleMCPImportAllowed(module)
+    if (module.lowLevelAccess && !(await dependencies.confirmLowLevelAccess()))
+        return null
+
+    module.id = dependencies.createId()
+    if (Object.hasOwn(module, 'assets')) {
+        if (
+            !Array.isArray(module.assets) ||
+            module.assets.length !== content.assets.length
+        ) {
+            throw new TypeError(
+                'Prepared RISUM asset metadata does not match its descriptors',
+            )
+        }
+        module.assets = module.assets.map((tuple, position) => {
+            if (!Array.isArray(tuple) || tuple.length < 3) {
+                throw new TypeError(
+                    `Prepared RISUM asset tuple ${position} is invalid`,
+                )
+            }
+            const retained = structuredClone(tuple)
+            retained[1] = content.assets[position].logicalId
+            return retained
+        })
+    }
+    return module
+}
+
 export async function activatePreparedNativeModuleContent(
     prepared: PreparedNativeContent,
     lifecycle: PreparedNativeContentActivationLifecycle,
@@ -62,8 +113,11 @@ export async function activatePreparedNativeModuleContent(
             lifecycle,
         )
         if (!character) return null
-        const module = convertCharacterToModule(character)
-        module.id = dependencies.createId()
+        let module = nativeConvertedModule(prepared, character)
+        if (!module) {
+            module = convertCharacterToModule(character)
+            module.id = dependencies.createId()
+        }
         const assetAliases = preparedAliases(prepared)
         signal?.throwIfAborted()
         const head = await prepareAdditionalAssetOwnerHead(
@@ -99,34 +153,8 @@ export async function activatePreparedNativeModuleContent(
         return { moduleId: module.id }
     }
     const content = requireRisum(prepared)
-    const module = structuredClone(content.metadata) as unknown as RisuModule
-    assertModuleMCPImportAllowed(module)
-    if (module.lowLevelAccess && !(await dependencies.confirmLowLevelAccess()))
-        return null
-
-    const moduleId = dependencies.createId()
-    module.id = moduleId
-    delete module.mcp
-    if (Object.hasOwn(module, 'assets')) {
-        if (
-            !Array.isArray(module.assets) ||
-            module.assets.length !== content.assets.length
-        ) {
-            throw new TypeError(
-                'Prepared RISUM asset metadata does not match its descriptors',
-            )
-        }
-        module.assets = module.assets.map((tuple, position) => {
-            if (!Array.isArray(tuple) || tuple.length < 3) {
-                throw new TypeError(
-                    `Prepared RISUM asset tuple ${position} is invalid`,
-                )
-            }
-            const retained = structuredClone(tuple)
-            retained[1] = content.assets[position].logicalId
-            return retained
-        })
-    }
+    const module = nativeMappedModule(content) ?? await mapPreparedRisumModule(content, dependencies)
+    if (!module) return null
 
     const assetAliasesByKey = new Map<
         string,
@@ -184,5 +212,5 @@ export async function activatePreparedNativeModuleContent(
         }
         throw error
     }
-    return { moduleId }
+    return { moduleId: module.id }
 }

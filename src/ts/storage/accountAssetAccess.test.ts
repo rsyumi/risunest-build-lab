@@ -30,7 +30,7 @@ describe('account asset access', () => {
             tauri: false,
         })).resolves.toEqual(new Uint8Array([1, 2, 3]))
 
-        expect(local.read).toHaveBeenCalledWith('assets/local.png', undefined, undefined)
+        expect(local.read).toHaveBeenCalledWith('assets/local.png')
         expect(readRemote).not.toHaveBeenCalled()
     })
 
@@ -44,7 +44,7 @@ describe('account asset access', () => {
             tauri: false,
         })).resolves.toEqual(new Uint8Array([9, 8, 7]))
 
-        expect(local.read).toHaveBeenCalledWith('assets/remote.png', undefined, undefined)
+        expect(local.read).toHaveBeenCalledWith('assets/remote.png')
         expect(readRemote).toHaveBeenCalledWith('assets/remote.png')
     })
 
@@ -58,7 +58,7 @@ describe('account asset access', () => {
             tauri: true,
         })).resolves.toEqual(new Uint8Array([6, 5, 4]))
 
-        expect(local.read).toHaveBeenCalledWith('assets/remote.ogg', undefined, undefined)
+        expect(local.read).toHaveBeenCalledWith('assets/remote.ogg')
         expect(readRemote).toHaveBeenCalledWith('assets/remote.ogg')
     })
 
@@ -70,7 +70,7 @@ describe('account asset access', () => {
             tauri: false,
         })).resolves.toEqual(new Uint8Array([1, 2, 3]))
 
-        expect(local.read).toHaveBeenCalledWith('assets/local.png', undefined, undefined)
+        expect(local.read).toHaveBeenCalledWith('assets/local.png')
     })
 
     it('reads the active BlobStore root for local Tauri assets and rejects missing bytes', async () => {

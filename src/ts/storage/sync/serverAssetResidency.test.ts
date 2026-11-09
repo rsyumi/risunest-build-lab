@@ -10,7 +10,6 @@ import { get } from 'svelte/store'
 import { clearExternalProgress, externalProgressFor, subscribeExternalProgress, type ExternalOperationProgress } from './external/progress'
 import { reserveLibraryFileOperation, waitForLibraryFileOperation } from '../libraryFileOperation'
 import { assetResidencyStatus } from './serverAssetResidency.testSupport'
-import { RepresentativeImageList } from '../../ui/representativeImagePriority'
 
 const status = assetResidencyStatus({ localBytes: 2, remoteBytes: 1, remoteObjects: 1, serverBytes: 1, serverObjects: 1 })
 beforeEach(() => { vi.resetAllMocks(); mock.selectedIndex = 0; assetCleanupProgress.set(undefined) })
@@ -178,18 +177,14 @@ describe('asset residency mobile lifetime', () => {
         expect(mock.begin).toHaveBeenCalledExactlyOnceWith('sync', undefined, true)
         expect(task.dispose).toHaveBeenCalledTimes(2)
     })
-    it('downloads one connection or every holder without a policy, keeping the selected character and listed images first', async () => {
+    it('downloads one connection or every holder without a policy, keeping the selected character first', async () => {
         const dispose = vi.fn(async () => {})
         mock.begin.mockResolvedValue({ dispose, progress: vi.fn() })
         mock.invoke.mockResolvedValue(status)
         await downloadRemoteAssets('receiver')
         expect(mock.invoke).toHaveBeenCalledWith('asset_residency_download_remote', { connectionId: 'receiver', selectedCharacterId: 'selected-policy-character', operationId: expect.any(String), progress: expect.objectContaining({ onmessage: expect.any(Function) }), transferProgress: expect.objectContaining({ onmessage: expect.any(Function) }) })
-        const list = new RepresentativeImageList()
-        try {
-            list.setOrder(['assets/listed-first.png', 'assets/listed-second.png'])
-            await downloadRemoteAssets()
-        } finally { list.dispose() }
-        expect(mock.invoke).toHaveBeenCalledWith('asset_residency_download_remote', { connectionId: null, selectedCharacterId: 'selected-policy-character', operationId: expect.any(String), iconPriority: { ordered: ['assets/listed-first.png', 'assets/listed-second.png'], visible: [] } })
+        await downloadRemoteAssets()
+        expect(mock.invoke).toHaveBeenCalledWith('asset_residency_download_remote', { connectionId: null, selectedCharacterId: 'selected-policy-character', operationId: expect.any(String) })
         expect(mock.begin).toHaveBeenCalledTimes(2)
         expect(dispose).toHaveBeenCalledTimes(2)
     })

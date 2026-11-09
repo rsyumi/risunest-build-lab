@@ -17,7 +17,6 @@ mod ios;
 
 mod class;
 pub use class::wry_web_view::WryWebView;
-pub use navigation::web_content_process_termination_reason;
 #[cfg(target_os = "macos")]
 use class::wry_web_view_parent::WryWebViewParent;
 use class::{

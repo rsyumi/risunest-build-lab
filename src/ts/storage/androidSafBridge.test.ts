@@ -10,7 +10,8 @@ import {
     listenAndroidSpoolBatches,
     materializeAndroidBackupSource,
     pickAndroidLegacyBackupSource,
-    pickAndroidContentSources,
+    pickAndroidContentSource,
+    pickAndroidPresetSource,
     pickAndroidBackupSource,
     pickAndroidPortableBackupSource,
     type AndroidSafDestinationEvent,
@@ -80,7 +81,7 @@ describe('Android SAF bridge', () => {
 
     it('keeps the source picker reserved until its correlated native result', async () => {
         const listeners = new Map<string, (event: Event) => void>()
-        const pending = pickAndroidContentSources({ destination: 'module' }, {
+        const pending = pickAndroidContentSource({ destination: 'module' }, {
             createRequestId: () => 'selection',
             bridge: { copyExport: vi.fn(), pickContentSource: vi.fn() },
             addEventListener: (name, listener) => { listeners.set(name, listener) },
@@ -922,72 +923,111 @@ describe('Android SAF bridge', () => {
     })
 })
 
-function contentPickerDependencies(detail: { ready: unknown[]; failures: unknown[] }, discardSource = vi.fn(() => true)) {
+it('selects a 500 MiB content spool without passing bytes through the WebView', async () => {
     const listeners = new Set<(event: Event) => void>()
     const destinations: string[] = []
-    return {
-        listeners,
-        destinations,
-        discardSource,
-        dependencies: {
+    const onSource = vi.fn()
+    const source = await pickAndroidContentSource(
+        { destination: 'module', onSource },
+        {
             createRequestId: () => 'request',
             bridge: {
                 copyExport: vi.fn(),
-                discardSource,
-                pickContentSource: (requestId: string, destination: string) => {
+                pickContentSource: (requestId, destination) => {
                     destinations.push(destination)
                     queueMicrotask(() => {
-                        for (const listener of listeners) {
-                            listener(new CustomEvent('risu-android-content-source-picked', { detail: { requestId, ...detail } }))
-                        }
+                        for (const listener of listeners)
+                            listener(
+                                new CustomEvent(
+                                    'risu-android-content-source-picked',
+                                    {
+                                        detail: {
+                                            requestId,
+                                            ready: [
+                                                {
+                                                    token: '11111111-1111-4111-8111-111111111111',
+                                                    displayName: 'large.CHARX',
+                                                    bytes: 500 * 1024 * 1024,
+                                                    importDestination: 'module',
+                                                },
+                                            ],
+                                            failures: [],
+                                        },
+                                    },
+                                ),
+                            )
                     })
                 },
             },
-            addEventListener: (_name: string, listener: (event: Event) => void) => { listeners.add(listener) },
-            removeEventListener: (_name: string, listener: (event: Event) => void) => { listeners.delete(listener) },
+            addEventListener: (_name, listener) => {
+                listeners.add(listener)
+            },
+            removeEventListener: (_name, listener) => {
+                listeners.delete(listener)
+            },
         },
-    }
-}
-
-it('selects several content spools without passing bytes through the WebView and refuses other files', async () => {
-    const large = {
+    )
+    expect(source).toEqual({
+        type: 'androidSpool',
         token: '11111111-1111-4111-8111-111111111111',
+    })
+    expect(destinations).toEqual(['module'])
+    expect(onSource).toHaveBeenCalledExactlyOnceWith({
         displayName: 'large.CHARX',
         bytes: 500 * 1024 * 1024,
-        importDestination: 'module',
-    }
-    const card = { token: '22222222-2222-4222-8222-222222222222', displayName: 'card.png', bytes: 64, importDestination: 'module' }
-    const notes = { token: '33333333-3333-4333-8333-333333333333', displayName: 'notes.txt', bytes: 8, importDestination: 'module' }
-    const picker = contentPickerDependencies({
-        ready: [large, notes, card],
-        failures: [{ displayName: 'program.exe', code: 'unsupported-source' }],
     })
-
-    await expect(pickAndroidContentSources({ destination: 'module' }, picker.dependencies)).resolves.toEqual({
-        sources: [large, card],
-        failures: [
-            { displayName: 'program.exe', code: 'unsupported-source' },
-            { displayName: 'notes.txt', code: 'unsupported-format' },
-        ],
-    })
-    expect(picker.destinations).toEqual(['module'])
-    expect(picker.discardSource).toHaveBeenCalledExactlyOnceWith(notes.token)
-    expect(picker.listeners.size).toBe(0)
+    expect(listeners.size).toBe(0)
 })
 
-it('rejects a single refused file and lists several refused files together', async () => {
-    const single = contentPickerDependencies({ ready: [], failures: [{ displayName: 'program.exe', code: 'unsupported-source' }] })
-    await expect(pickAndroidContentSources({ destination: 'character' }, single.dependencies)).rejects.toMatchObject({
-        code: 'unsupported-source',
-        message: 'program.exe: unsupported-source',
-    })
-    expect(single.listeners.size).toBe(0)
+it.each(['json', 'preset', 'risupreset', 'RISUP'])('selects a preset %s as an owned spool descriptor', async (extension) => {
+    const listeners = new Map<string, (event: Event) => void>()
+    const onSource = vi.fn()
+    const destinations: string[] = []
+    await expect(pickAndroidPresetSource({ onSource }, {
+        createRequestId: () => 'preset-request',
+        bridge: {
+            copyExport: vi.fn(),
+            pickContentSource(requestId, destination) {
+                destinations.push(destination)
+                queueMicrotask(() => listeners.get('risu-android-content-source-picked')?.(
+                    new CustomEvent('risu-android-content-source-picked', { detail: {
+                        requestId, ready: [{ token: 'owned-preset', displayName: `synthetic.${extension}`, bytes: 7, importDestination: destination }], failures: [],
+                    } }),
+                ))
+            },
+        },
+        addEventListener: (name, listener) => { listeners.set(name, listener) },
+        removeEventListener: name => { listeners.delete(name) },
+    })).resolves.toEqual({ source: { type: 'androidSpool', token: 'owned-preset' }, displayName: `synthetic.${extension}` })
+    expect(destinations).toEqual(['preset'])
+    expect(onSource).toHaveBeenCalledWith({ displayName: `synthetic.${extension}`, bytes: 7 })
+    expect(listeners.size).toBe(0)
+})
 
-    const failures = [
-        { displayName: 'program.exe', code: 'unsupported-source' },
-        { displayName: 'card.png', code: 'storage-full' },
-    ]
-    const several = contentPickerDependencies({ ready: [], failures })
-    await expect(pickAndroidContentSources({ destination: 'character' }, several.dependencies)).resolves.toEqual({ sources: [], failures })
-    expect(several.listeners.size).toBe(0)
+it.each(['cancelled', 'unsupported'])('handles a %s preset selection without returning a source', async (outcome) => {
+    const listeners = new Map<string, (event: Event) => void>()
+    const discardSource = vi.fn(() => true)
+    const pending = pickAndroidPresetSource({}, {
+        createRequestId: () => 'preset-selection',
+        bridge: {
+            copyExport: vi.fn(), discardSource,
+            pickContentSource(requestId) {
+                queueMicrotask(() => listeners.get('risu-android-content-source-picked')?.(
+                    new CustomEvent('risu-android-content-source-picked', { detail: {
+                        requestId, ready: outcome === 'cancelled' ? [] : [{ token: 'rejected-preset', displayName: 'synthetic.charx', bytes: 7 }], failures: [],
+                    } }),
+                ))
+            },
+        },
+        addEventListener: (name, listener) => { listeners.set(name, listener) },
+        removeEventListener: name => { listeners.delete(name) },
+    })
+    if (outcome === 'cancelled') {
+        await expect(pending).resolves.toBeNull()
+        expect(discardSource).not.toHaveBeenCalled()
+    } else {
+        await expect(pending).rejects.toMatchObject({ code: 'unsupported-format' })
+        expect(discardSource).toHaveBeenCalledWith('rejected-preset')
+    }
+    expect(listeners.size).toBe(0)
 })

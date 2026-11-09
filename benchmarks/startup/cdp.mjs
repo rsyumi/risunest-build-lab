@@ -1,12 +1,24 @@
-import { REALM_BLOCKED_URL_PATTERNS } from '../../scripts/realmBlocklist.mjs'
+import { REALM_BLOCKED_URL_PATTERNS, isRealmPath } from '../../scripts/realmBlocklist.mjs'
 import { execFileSync } from 'node:child_process'
+import { assertAgentDataRoot } from './runtime.mjs'
+
+export function isAllowedStartupUrl(input) {
+    try {
+        const url = new URL(input)
+        if (isRealmPath(url)) return false
+        if (['data:', 'blob:', 'about:'].includes(url.protocol)) return true
+        if (['tauri:', 'ipc:', 'asset:'].includes(url.protocol)) return true
+        return ['http:', 'https:'].includes(url.protocol)
+            && ['tauri.localhost', 'ipc.localhost', 'asset.localhost'].includes(url.hostname)
+    } catch { return false }
+}
 
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // Never retain console events, exception details, request bodies, or page text.
-export async function connect(port, identifier, timeoutMs = 120_000) {
+export async function connect(port, identifier, timeoutMs = 120_000, profile) {
     if (!identifier.startsWith('RisuNest.phase3benchmark.')) throw new Error('Unsafe identifier')
-    return connectVerifiedIdentity(port, identifier, timeoutMs)
+    return connectVerifiedIdentity(port, identifier, timeoutMs, profile)
 }
 
 // Check the selected disposable AVD again before opening its WebView.
@@ -21,7 +33,7 @@ export async function connectSyntheticAndroid(port, android) {
     return connectVerifiedIdentity(port, 'io.github.rsyumi.risunest', 120_000)
 }
 
-export async function connectVerifiedIdentity(port, identifier, timeoutMs = 120_000) {
+export async function connectVerifiedIdentity(port, identifier, timeoutMs = 120_000, profile) {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
         let targets
@@ -46,6 +58,12 @@ export async function connectVerifiedIdentity(port, identifier, timeoutMs = 120_
             const pending = new Map()
             ws.onmessage = ({ data }) => {
                 const message = JSON.parse(data)
+                if (message.method === 'Fetch.requestPaused') {
+                    const permitted = isAllowedStartupUrl(message.params.request.url)
+                    void call(permitted ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+                        { requestId: message.params.requestId, ...(permitted ? {} : { errorReason: 'BlockedByClient' }) }).catch(() => {})
+                    return
+                }
                 const entry = pending.get(message.id)
                 if (!entry) return
                 pending.delete(message.id)
@@ -87,6 +105,7 @@ export async function connectVerifiedIdentity(port, identifier, timeoutMs = 120_
                     '*update.rsyumi.workers.dev/translator/prompt-presets.json*',
                 ],
             })
+            if (profile) await call('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] })
             await call('Runtime.enable')
             await call('Page.enable')
             try {
@@ -94,8 +113,20 @@ export async function connectVerifiedIdentity(port, identifier, timeoutMs = 120_
                     const invoke = window.__TAURI_INTERNALS__?.invoke;
                     return !!invoke && await invoke('plugin:app|identifier') === ${JSON.stringify(identifier)};
                 })()`)
-                if (matches) return { call, evaluate, close }
-            } catch {
+                if (matches) {
+                    if (profile) {
+                        try {
+                            const roots = await evaluate("window.__TAURI_INTERNALS__.invoke('app_paths_roots')")
+                            assertAgentDataRoot(roots?.data, profile)
+                        } catch {
+                            close()
+                            throw new Error('Native synthetic data root mismatch')
+                        }
+                    }
+                    return { call, evaluate, close }
+                }
+            } catch (error) {
+                if (error.message === 'Native synthetic data root mismatch') throw error
                 /* No page data is exposed when identity cannot be established. */
             }
             close()
@@ -117,11 +148,6 @@ export async function waitForInteractive(client, timeoutMs = 120_000) {
 
 export const instrumentation = `(() => {
     performance.mark('startup:observer');
-    const commands = new Set(['pds_open', 'pds_materialize', 'pds_commit', 'pds_replace_commit',
-        'pds_read_root', 'pds_read_revision', 'pds_query_characters', 'pds_snapshot_create', 'pds_snapshot_list',
-        'pds_read_character', 'pds_query_conversations', 'pds_read_conversation_window', 'pds_read_conversation',
-        'pds_asset_gc_maintenance', 'plugin:fs|read_dir', 'plugin:fs|stat',
-        'asset_cas_read_bytes', 'asset_cas_stat_object']);
     const state = window.__startupMetrics = { calls: [], longTasks: [], operations: [], phases: [], active: {}, elapsedSeen: false, firstRevision: null, interaction: null };
     state.peakHeapBytes = 0; state.mediaInFlight = 0; state.maxMediaInFlight = 0; state.cleanChunksReason = 0;
     const heap = () => state.peakHeapBytes = Math.max(state.peakHeapBytes, performance.memory?.usedJSHeapSize ?? 0);
@@ -129,7 +155,12 @@ export const instrumentation = `(() => {
     window.__startupRecord = (stage, start, success) => {
         state.active[stage] = Math.max(0, (state.active[stage] ?? 1) - 1);
         heap();
-        if (performance.now() < 120000) state.operations.push({stage, start, ms: performance.now() - start, success});
+        if (stage === 'store-commit' && state.operations.length >= 10000) {
+            state.observerFailure = 'recording-limit';
+            return;
+        }
+        if (performance.now() < 120000 || stage === 'store-commit')
+            state.operations.push({stage, start, ms: performance.now() - start, success});
     };
     window.__startupTrackPromise = (stage, start, promise) => {
         window.__startupBegin(stage);
@@ -221,40 +252,4 @@ export const instrumentation = `(() => {
     new PerformanceObserver(list => {
         for (const entry of list.getEntries()) state.longTasks.push({start: entry.startTime, ms: entry.duration});
     }).observe({type: 'longtask', buffered: true});
-    const original = window.fetch;
-    window.fetch = function(input, options) {
-        const url = typeof input === 'string' ? input : input.url;
-        let entry;
-        try {
-            const parsed = new URL(url);
-            const command = decodeURIComponent(parsed.pathname.slice(1));
-            if ((parsed.hostname === 'ipc.localhost' || parsed.protocol === 'ipc:') && commands.has(command)) {
-                entry = {command, start: performance.now(), ms: null, bytes: null, success: false};
-                state.calls.push(entry);
-                if (command === 'asset_cas_read_bytes') {
-                    state.mediaInFlight++;
-                    state.maxMediaInFlight = Math.max(state.maxMediaInFlight, state.mediaInFlight);
-                }
-            }
-        } catch {}
-        return original.call(this, input, options).then(response => {
-            if (entry) {
-                entry.ms = performance.now() - entry.start;
-                entry.success = response.ok;
-                if (entry.command === 'asset_cas_read_bytes') state.mediaInFlight--;
-                if (entry.command === 'pds_open') response.clone().text().then(text => {
-                    entry.bytes = new TextEncoder().encode(text).byteLength;
-                    const revision = JSON.parse(text).revision;
-                    if (state.firstRevision === null && Number.isSafeInteger(revision)) state.firstRevision = revision;
-                });
-            }
-            return response;
-        }, error => {
-            if (entry) {
-                entry.ms = performance.now() - entry.start;
-                if (entry.command === 'asset_cas_read_bytes') state.mediaInFlight--;
-            }
-            throw error;
-        });
-    };
 })()`

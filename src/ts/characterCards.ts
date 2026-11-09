@@ -25,10 +25,7 @@ import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_SITE_URL } from "./realmEnd
 import { registerOpenedFileListeners } from "./openedFiles"
 import { type DeviceMarkerStorage } from './storage/deviceMarkers'
 import { importDesktopNativeCharacterPathInOperation } from './storage/nativeCharacterImportOperation'
-import { importDesktopNativeCharacterPath } from './storage/nativeCharacterFileRoute'
-import { importContentBatch } from './storage/contentImportBatch'
-import { runSharedNativeFileOperation, type SharedNativeFileOperationContext } from './storage/nativeFileJobManager'
-import { NativeFileJobError, type NativeFileJobOptions, type NativeFileJobSource } from './storage/nativeFileJobs'
+import type { NativeFileJobOptions, NativeFileJobSource } from './storage/nativeFileJobs'
 import {
     decodePreparedNativePngCardMetadata,
     type PreparedNativePngCardMetadata,
@@ -36,7 +33,6 @@ import {
 } from './storage/nativePngCardAdapter'
 import { exportNativeCharacterCharxFromPicker } from './storage/nativeCharacterCharxExportRoute'
 import { exportNativeCharacterCardFromPicker } from './storage/nativeCharacterCardExportRoute'
-import { presentContentExportError } from './storage/fileOperationErrorPresentation'
 import { beginMobileBackgroundTask, type MobileBackgroundTask } from './mobileBackgroundTask'
 import { filterBlockedRealmCards, isRealmCreatorBlocked } from './realmBlocking'
 import { normalizeOnboarding } from './onboarding'
@@ -128,18 +124,42 @@ export async function importCharacter() {
             const selected = await open({ multiple: true, directory: false })
             const paths =
                 typeof selected === 'string' ? [selected] : (selected ?? [])
-            if (!paths.length) return null
-            return await runSharedNativeFileOperation(
-                'import',
-                'content-picker',
-                (context) => importContentBatch(
-                    context,
-                    paths,
-                    (path) => ({ name: path.split(/[\\/]/).at(-1) || path }),
-                    (path) => importDesktopCharacterPath(path, context),
-                ),
-                { presentation: 'dialog', format: 'content' },
-            )
+            const importErrors: Array<string | Error> = []
+            for (const path of paths) {
+                try {
+                    const result = await importDesktopNativeCharacterPathInOperation(path, {
+                        readDesktopPath: readFile,
+                        nativeEnabled: () => nativeCharacterContentImportEnabled,
+                        nativeImport: importPreparedNativeCharacterContent,
+                        legacyImport: async ({ name, data }) => {
+                            const importedIndex = await importCharacterProcess({
+                                name,
+                                data,
+                            })
+                            return typeof importedIndex === 'number'
+                                ? (getDatabase().characters[importedIndex]?.chaId ??
+                                      null)
+                                : null
+                        },
+                    })
+                    if (result.kind === 'imported') {
+                        checkCharOrder()
+                        lastImportedCharacterId = result.value
+                    }
+
+                } catch (error) {
+                    importErrors.push(error instanceof Error ? error : String(error))
+                }
+            }
+            const firstImportError = importErrors[0]
+            if (firstImportError && importErrors.length === 1) alertError(firstImportError)
+            if (importErrors.length > 1) {
+                alertError(new AggregateError(
+                    importErrors,
+                    `Failed to import ${importErrors.length} of ${paths.length} selected character files`,
+                ))
+            }
+            return lastImportedCharacterId
         }
 
         const files = await selectFileByDom(['*'], 'multiple')
@@ -159,33 +179,13 @@ export async function importCharacter() {
         }
         return lastImportedCharacterId
     } catch (error) {
-        if (isTauri) {
+        if (isTauriIOS || isTauriAndroid) {
             // The picker import shows how it ended, so only a failure to start is reported here.
             const { presentFileOperationError } = await import('./storage/fileOperationErrorPresentation')
             presentFileOperationError('import', error, callStartedAt)
         } else alertError(error)
         return null
     }
-}
-
-async function importDesktopCharacterPath(path: string, context: SharedNativeFileOperationContext): Promise<string | null> {
-    const outcome = await importDesktopNativeCharacterPath(path, {
-        readDesktopPath: readFile,
-        nativeEnabled: () => nativeCharacterContentImportEnabled,
-        nativeImport: (input) => importPreparedNativeCharacterContent(input, { signal: context.signal, onStatus: context.onStatus }),
-        legacyImport: async ({ name, data }) => {
-            const importedIndex = await importCharacterProcess({ name, data })
-            return typeof importedIndex === 'number'
-                ? (getDatabase().characters[importedIndex]?.chaId ?? null)
-                : null
-        },
-    })
-    if (outcome.kind === 'destination-required') {
-        throw new NativeFileJobError('destination-required', language.risuNest.importDialog.reasonPlainJpeg)
-    }
-    if (outcome.kind !== 'imported') return null
-    checkCharOrder()
-    return outcome.value
 }
 
 export async function importCharacterProcess<T extends boolean = false>(f: {
@@ -660,7 +660,6 @@ export async function characterURLImport() {
         try { assertModuleMCPImportAllowed(importData) }
         catch (error) { alertError(error); return false }
         importData.id = v4()
-        delete importData.mcp
 
         if (importData.lowLevelAccess) {
             const conf = await alertConfirm(language.lowLevelAccessConfirm)
@@ -911,7 +910,6 @@ export async function exportChar(charaID:number):Promise<string> {
     const option = await alertCardExport()
     if(option.type === ''){
         if(option.type2 === 'charx' || option.type2 === 'charxJpeg'){
-            const startedAt = Date.now()
             try {
                 const appendedJpeg = option.type2 === 'charxJpeg'
                 const nativeResult = await exportNativeCharacterCharxFromPicker({
@@ -941,16 +939,16 @@ export async function exportChar(charaID:number):Promise<string> {
                     },
                 })
                 if(nativeResult !== undefined){
+                    if(nativeResult) alertNormal(language.successExport)
                     return ''
                 }
             }
             catch(error){
-                presentContentExportError(error, startedAt)
+                alertError(error)
                 return ''
             }
         }
         if(option.type2 === 'json' || option.type2 === 'png'){
-            const startedAt = Date.now()
             try {
                 const nativeResult = await exportNativeCharacterCardFromPicker({
                     characterId: char.chaId,
@@ -962,11 +960,12 @@ export async function exportChar(charaID:number):Promise<string> {
                     } as character) as unknown as Record<string, unknown>,
                 })
                 if(nativeResult !== undefined){
+                    if(nativeResult) alertNormal(language.successExport)
                     return ''
                 }
             }
             catch(error){
-                presentContentExportError(error, startedAt)
+                alertError(error)
                 return ''
             }
         }
@@ -1579,7 +1578,7 @@ function convertCharbook(arg:{
     loreExt = charbook.extensions
 
     for(const book of charbook.entries){
-        let content = book.content ?? ''
+        let content = book.content
 
         if(book.use_regex && !book.keys?.[0]?.startsWith('/')){
             book.use_regex = false

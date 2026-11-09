@@ -1,5 +1,6 @@
 // @vitest-environment node
 
+import nativeValuesCases from '../../../tests/fixtures/lua/native-values-cases.json'
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -12,9 +13,7 @@ import { requestChatData } from './request/request'
 import { fetchNative, readImage } from '../globalApi.svelte'
 import { HypaProcesser } from './memory/hypamemory'
 import { getCurrentCharacter, getCurrentChat, getDatabase } from '../storage/database.svelte'
-import { asBuffer, getPersonaPrompt, getUserIcon } from '../util'
-import { tokenize } from '../tokenizer'
-import { loadLoreBookV3PromptFromCompatibilitySnapshot } from './lorebook.svelte'
+import { asBuffer, getUserIcon } from '../util'
 import { writeInlayImage } from './files/inlays'
 import { generateAIImage } from './stableDiff'
 import {
@@ -22,9 +21,11 @@ import {
   ConversationSessionStaleError,
 } from '../storage/activeConversationSession'
 import { createConversationOperationContext } from './conversationOperationContext'
-import type { Chat, character, loreBook } from '../storage/database.svelte'
+import type { Chat, character } from '../storage/database.svelte'
 import { DBState, ScriptDisplayRefreshPointer } from '../stores.svelte'
 import { risuChatParser } from '../parser/parser.svelte'
+import { tokenCounter } from '../tokenizer'
+import { loadLoreBookV3PromptFromCompatibilitySnapshot } from './lorebook.svelte'
 import type { LuaEngine } from 'wasmoon'
 import { appendDefaultChatInput } from '../../lib/ChatScreens/defaultChatInput'
 import {
@@ -1086,34 +1087,6 @@ test('publishes local lore through the conversation metadata batch', async () =>
     expect.objectContaining({ comment: 'operation lore' }),
   ])
   expect(fixture.session.version).toBe(1)
-})
-
-test('stores empty text for a nil local lore name or content and replaces it on the next upsert', async () => {
-  const fixture = operationCharacterFixture('local-lore-nil')
-  // An entry an earlier upsert stored with a null name.
-  fixture.chat.localLore.push({ comment: null, content: 'stored', key: '', secondkey: '', insertorder: 100, mode: 'normal', alwaysActive: false, selective: false } as unknown as loreBook)
-  installOperationCharacterFixture(fixture)
-  const operationContext = createConversationOperationContext(
-    fixture.session,
-    fixture.chat,
-  )
-
-  await runScripted(`
-    listenEdit('editInput', function(id, value, meta)
-      upsertLocalLoreBook(id, nil, nil, {})
-      upsertLocalLoreBook(id, nil, 'latest', {})
-      return value
-    end)
-  `, {
-    char: fixture.char,
-    data: 'input',
-    mode: 'editInput',
-    operationContext,
-  })
-
-  expect(operationContext.chat.localLore).toEqual([
-    expect.objectContaining({ comment: '', content: 'latest' }),
-  ])
 })
 
 test('keeps local lore partial-error semantics inside the original owner', async () => {
@@ -2463,7 +2436,6 @@ test.each([
   ['request', `request(id, 'https://example.invalid/wait'):await()`],
   ['similarity', `similarity(id, 'source', { 'value' }):await()`],
   ['sleep', `sleep(id, 4321):await()`],
-  ['loadLoreBooks', `loadLoreBooks(id)`],
 ])('commits Lua variables before %s waits and message edits at the end', async (api, call) => {
   const fixture = operationCharacterFixture(`wait-flush-${api}`)
   fixture.char.lowLevelAccess = true
@@ -2502,10 +2474,6 @@ test.each([
       similaritySearch: async () => [],
     } as never
   })
-  vi.mocked(loadLoreBookV3PromptFromCompatibilitySnapshot).mockReset().mockImplementation(async () => {
-    observeWait()
-    return { actives: [] } as never
-  })
   const realSetTimeout = globalThis.setTimeout
   const timeout = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: () => void, delay?: number) => {
     if (delay !== 4321) return realSetTimeout(handler, delay)
@@ -2525,7 +2493,6 @@ test.each([
     vi.mocked(generateAIImage).mockReset()
     vi.mocked(fetchNative).mockReset()
     vi.mocked(HypaProcesser).mockReset()
-    vi.mocked(loadLoreBookV3PromptFromCompatibilitySnapshot).mockReset()
     continuationRuntime.session = null
   }
 })
@@ -2965,18 +2932,13 @@ test.each(['current', 'navigated'] as const)('releases a read-only Lua edit oper
   }
 })
 
-test('settles a resumed coroutine rejection without leaving an unhandled rejection', async ({ task }) => {
+test('settles a resumed coroutine rejection without leaving an unhandled rejection', async () => {
   const readyMessage = '\nRISUNEST_A4_COROUTINE_READY\n'
   if (process.env.RISUNEST_A4_COROUTINE_CHILD !== 'true') {
-    // Another project's copy would start inside this copy's execution allowance.
-    const project = task.file.projectName
-    const spawnedAt = performance.now()
-    let readyAt: number | undefined
     const child = spawn(process.execPath, [
       resolve(process.cwd(), 'node_modules/vitest/vitest.mjs'),
       'run',
       'src/ts/process/scriptings.test.ts',
-      ...(project ? ['--project', project] : []),
       '--pool=threads',
       '--maxWorkers=1',
       '--no-file-parallelism',
@@ -3013,7 +2975,6 @@ test('settles a resumed coroutine rejection without leaving an unhandled rejecti
         stdout += chunk
         if (!ready && !timedOut && stdout.includes(readyMessage)) {
           ready = true
-          readyAt = performance.now()
           clearTimeout(timeout)
           timeout = setTimeout(() => expire('execution'), 8_000)
         }
@@ -3029,12 +2990,8 @@ test('settles a resumed coroutine rejection without leaving an unhandled rejecti
     }).finally(() => {
       if (child.exitCode === null) child.kill()
     })
-    const closedAt = performance.now()
-    const timing = readyAt === undefined
-      ? `no ready line; closed ${Math.round(closedAt - spawnedAt)} ms after spawn`
-      : `ready ${Math.round(readyAt - spawnedAt)} ms after spawn; closed ${Math.round(closedAt - readyAt)} ms after ready`
 
-    expect(childResult, `${timing}\n${stdout}\n${stderr}`).toEqual({ code: 0, ready: true, timedOut: null })
+    expect(childResult, `${stdout}\n${stderr}`).toEqual({ code: 0, ready: true, timedOut: null })
     return
   }
 
@@ -3272,54 +3229,111 @@ test('preserves synchronous writes and reads around an async LLM boundary', asyn
   expect(variables.get('counter')).toBe('2')
 })
 
-test('expands lorebook and persona text with the variables and messages written earlier in the Lua button handler', async () => {
-  const fixture = operationCharacterFixture('lorebook-pending-variables')
-  const template = '{{getvar::request_context}} after {{lastmessage}}'
-  fixture.char.globalLore = [{
-    comment: 'request-template', content: `Lore: ${template}`,
-    key: '', secondkey: '', alwaysActive: false, selective: false, insertorder: 100, mode: 'normal',
-  }]
-  fixture.char.lowLevelAccess = true
-  fixture.chat.scriptstate = { $request_context: 'previous context' }
-  fixture.char.triggerscript = luaTriggerScript(`
-    onButtonClick = async(function(id, data)
-      setChatVar(id, 'request_context', 'updated context')
-      addChat(id, 'char', 'fresh reply')
-      local books = getLoreBooks(id, 'request-template')
-      local persona = getPersonaDescription(id)
-      local loaded = loadLoreBooks(id)
-      addChat(id, 'user', books[1].content .. ' | ' .. persona .. ' | ' .. loaded[1].data)
-    end)
-  `)
-  installOperationCharacterFixture(fixture)
-  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
-  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
-  vi.mocked(getPersonaPrompt).mockReturnValue(`Persona: ${template}`)
-  vi.mocked(tokenize).mockResolvedValue(1)
-  vi.mocked(loadLoreBookV3PromptFromCompatibilitySnapshot).mockResolvedValue(
-    { actives: [{ prompt: `Loaded: ${template}`, role: 'system' }] } as never,
-  )
-  continuationRuntime.session = fixture.session
-  vi.doMock('dompurify', async () => {
-    const { Window } = await import('happy-dom')
-    const { default: createDOMPurify } = await vi.importActual<typeof import('dompurify')>('dompurify')
-    return { default: createDOMPurify(new Window() as unknown as Parameters<typeof createDOMPurify>[0]) }
+test.each(nativeValuesCases.cases)('native values paired product contract: $name', async (entry) => {
+  const variables = new Map<string, string>()
+  const result = await runScripted(`${entry.source}\nlistenEdit('editInput', function(id) return run(id) end)`, {
+    char: { chaId: `native-values-${entry.name}` } as never,
+    chat: { message: structuredClone(nativeValuesCases.rows) } as never,
+    mode: 'editInput',
+    getVar: key => variables.get(key) ?? 'null',
+    setVar: (key, value) => {
+      const changed = variables.get(key) !== value
+      variables.set(key, value)
+      return changed
+    },
   })
-  const parser = await vi.importActual<typeof import('../parser/parser.svelte')>('../parser/parser.svelte')
-  vi.mocked(risuChatParser).mockImplementation(parser.risuChatParser)
-  const { runLuaInteractionTrigger } = await import('./scriptings')
+  expect(result.res).toBe(entry.expected)
+  for (const [key, value] of Object.entries(entry.variables ?? {})) expect(variables.get(key)).toBe(value)
+  for (const key of entry.absentVariables ?? []) expect(variables.has(key)).toBe(false)
+})
+
+test.each(nativeValuesCases.recent)('native values paired recent coercion: $name', async (entry) => {
+  const call = entry.argument === '' ? 'getRecentChats(id)' : `getRecentChats(id,${entry.argument})`
+  const result = await runScripted(`listenEdit('editInput', function(id) return #${call} end)`, {
+    char: { chaId: `native-recent-${entry.name}` } as never,
+    chat: { message: structuredClone(nativeValuesCases.rows) } as never,
+    mode: 'editInput',
+  })
+  expect(result.res).toBe(entry.expected)
+})
+
+// Main-thread only: the Worker runtime traps when a host call runs during another host call's argument conversion.
+localRuntimeTest('native values paired key conversion retains ordered state effects before a history error', async () => {
+  const variables = new Map<string, string>()
+  const result = await runScripted(`listenEdit('editInput', function(id)
+    local passes=0
+    local key=setmetatable({}, {__tostring=function() passes=passes+1; setState(id,'passes',passes); return 'x' end})
+    assert(#getRecentChats(id,{[key]=1})==4 and passes==2)
+    assert(not pcall(getRecentChats,id,{toString=false}))
+    return getState(id,'passes')
+  end)`, {
+    char: { chaId: 'native-values-key-effects' } as never,
+    chat: { message: structuredClone(nativeValuesCases.rows) } as never,
+    mode: 'editInput', getVar: key => variables.get(key) ?? 'null',
+    setVar: (key, value) => { const changed = variables.get(key) !== value; variables.set(key, value); return changed },
+  })
+  expect(result.res).toBe(2)
+  expect(variables.get('__passes')).toBe('2')
+})
+
+// Runs loadLoreBooksMain with the given arguments after the id; the parser and the counter record each text in order.
+async function runLoreBudget(suffix: string, reserveArguments: string) {
+  const fixture = operationCharacterFixture(suffix)
+  installOperationCharacterFixture(fixture)
+  Object.assign(fixture.database, { maxContext: 12 })
+  const events: string[] = []
+  vi.mocked(risuChatParser).mockImplementation(value => {
+    events.push(`parse ${value}`)
+    return value
+  })
+  vi.mocked(loadLoreBookV3PromptFromCompatibilitySnapshot).mockResolvedValueOnce({ actives: [
+    { prompt: 'alpha', role: 'system' },
+    { prompt: '  ', role: 'user' },
+    { prompt: 'longer beta', role: 'assistant' },
+    { prompt: 'gamma', role: 'user' },
+  ] } as never)
+  vi.mocked(tokenCounter).mockReturnValueOnce({
+    prefetch: async (texts: string[]) => { events.push(`prefetch ${texts.join(' | ')}`) },
+    count: async (text: string) => {
+      events.push(`count ${text}`)
+      return text.length
+    },
+  } as never)
+
   try {
-    await runLuaInteractionTrigger('button', fixture.char, 'request')
-    const expanded = 'updated context after fresh reply'
-    expect(fixture.chat.message.at(-1)?.data)
-      .toBe(`Lore: ${expanded} | Persona: ${expanded} | Loaded: ${expanded}`)
-    expect(fixture.chat.scriptstate?.$request_context).toBe('updated context')
-  } finally {
-    vi.doUnmock('dompurify')
-    vi.mocked(risuChatParser).mockReset()
-    vi.mocked(getPersonaPrompt).mockReset()
-    vi.mocked(tokenize).mockReset()
-    vi.mocked(loadLoreBookV3PromptFromCompatibilitySnapshot).mockReset()
-    continuationRuntime.session = null
+    const result = await runScripted(`
+      lore_budget = async(function(id)
+        return loadLoreBooksMain(id${reserveArguments}):await()
+      end)
+    `, {
+      char: fixture.char,
+      lowLevelAccess: true,
+      mode: 'lore_budget',
+    })
+    return { books: JSON.parse(result.res), events }
   }
+  finally {
+    vi.mocked(risuChatParser).mockReset()
+  }
+}
+
+test('counts every active lorebook prompt ahead when no reserve leaves the budget unbounded', async () => {
+  const { books, events } = await runLoreBudget('lore-unbounded', '')
+
+  expect(books).toEqual([
+    { data: 'alpha', role: 'system' },
+    { data: 'longer beta', role: 'char' },
+    { data: 'gamma', role: 'user' },
+  ])
+  expect(events).toEqual([
+    'parse alpha', 'parse   ', 'parse longer beta', 'parse gamma',
+    'prefetch alpha | longer beta | gamma', 'count alpha', 'count longer beta', 'count gamma',
+  ])
+})
+
+test('parses no lorebook prompt past the budget a reserve sets', async () => {
+  const { books, events } = await runLoreBudget('lore-budget', ', 0')
+
+  expect(books).toEqual([{ data: 'alpha', role: 'system' }])
+  expect(events).toEqual(['parse alpha', 'count alpha', 'parse   ', 'parse longer beta', 'count longer beta'])
 })

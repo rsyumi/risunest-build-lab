@@ -14,7 +14,6 @@ fn descriptor_indexes_flush_bounded_groups_and_reuse_pending_reference_nodes() {
     let store = Store::init(root.path()).unwrap();
     let actor = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let payload = b"synthetic payload";
     store.put_object(&actor, &hash(payload), payload).unwrap();
@@ -84,7 +83,6 @@ fn admission_accepts_the_exact_future_boundary_and_rejects_the_next_millisecond(
     let store = Store::init(root.path()).unwrap();
     let actor = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let writer = "00000000-0000-4000-8000-000000000001";
     let mut request = PushRequest {
@@ -103,7 +101,7 @@ fn admission_accepts_the_exact_future_boundary_and_rejects_the_next_millisecond(
     };
     assert_eq!(
         store
-            .push_at(&actor, &request, false, || Ok(1_000_000))
+            .push_at(&actor, &request, || Ok(1_000_000))
             .unwrap()
             .seq
             .0,
@@ -113,7 +111,7 @@ fn admission_accepts_the_exact_future_boundary_and_rejects_the_next_millisecond(
     request.changes[0].stamp.physical_ms = 1_300_001.into();
     assert_eq!(
         store
-            .push_at(&actor, &request, false, || Ok(1_000_000))
+            .push_at(&actor, &request, || Ok(1_000_000))
             .unwrap_err()
             .code,
         "clock-skew"
@@ -128,7 +126,6 @@ fn admission_reads_the_clock_after_waiting_for_the_object_gate() {
     let store = Store::init(root.path()).unwrap();
     let actor = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let writer = "00000000-0000-4000-8000-000000000001";
     let request = PushRequest {
@@ -146,7 +143,7 @@ fn admission_reads_the_clock_after_waiting_for_the_object_gate() {
         }],
     };
     let receipt = store
-        .push_at(&actor, &request, false, || {
+        .push_at(&actor, &request, || {
             assert!(store.objects_gate.try_lock().is_err());
             Ok(1_000_000)
         })
@@ -180,7 +177,6 @@ fn operation_receipts_and_writer_versions_expire_with_the_journal_tail() {
     let store = Store::init(root.path()).unwrap();
     let actor = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let writer = "00000000-0000-4000-8000-000000000001";
     let push = |operation: &str, physical: u64, value: &[u8]| PushRequest {
@@ -238,7 +234,6 @@ fn journal_and_active_ack_expire_at_the_exact_seven_day_boundary() {
     let store = Store::init(root.path()).unwrap();
     let actor = Device {
         id: store.add_device().unwrap().device_id,
-        format_level: None,
     };
     let writer = "00000000-0000-4000-8000-000000000001";
     let request = PushRequest {

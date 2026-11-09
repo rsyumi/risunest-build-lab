@@ -1,0 +1,1793 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/response.oracle.test.ts",
+  "fixtureSha256": "75a95e36e7669aebbcc2ba6e59126427f388680fd0d2d9bc5fc154c0393a19d3",
+  "tsSourceSha256": {
+    "src/ts/process/generationResponseApplication.ts": "219619629c94600c8795b2cb79cd8a5519923ef72da2c54a9e548c5827130e45",
+    "src/ts/process/index.svelte.ts": "3336950a3fc1541b5041ad8281c6b20478a79d7f032e769519d6d6b6fd4244a1",
+    "src/ts/process/scripts.ts": "2d9b2c6e526119a2449a66970e1e74f7ee68c7f2d7d7800094a35890d3c66fbb",
+    "src/ts/process/currentChatParserPass.ts": "8e463cdc7a708aeb8c342c869ec865c4b21b4940cc02a25c8b8661ca6cf5fca5",
+    "src/ts/process/inlayScreen.ts": "4003ffc532ceff0a4b96ddb7fc06ab20bec1640fb750dc8b357806741f5a6827",
+    "src/ts/process/triggers.ts": "d911d3a9c8dd238600db674aeeddfa39cf51766a9bdd075f89837669d26e6496",
+    "src/ts/process/generationConversationOperation.ts": "d2830820b8220d365ddf0a65039ffd1d7032ef718f2b323f64abaa4307986b90",
+    "src/ts/responseVariants.ts": "05e5fdc6994186a93fb3770e5d0421ce86abbe8a75db278d640da3d475a8b000",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/parser/parser.svelte.ts": "7cd538850a8fe6d3ac27b0e8a9fe46eace47ba03daac672384e235201df8accf",
+    "src/ts/cbs.ts": "b56f4bd8aba12032c4c79dae7aafacd811d131e088733ffa4cd243fdc23e331b",
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/openAI/requests.ts": "58901b6539a523bdab03e92aa5b9154c6a192912e32b423bc70ef442ce27f233"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "text-trim",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": " \tSynthetic response.\n ",
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "Synthetic response.",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "Synthetic response.",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "text-empty",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": " \t\n ",
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "text-pair",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": "A🦊 é",
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "A🦊 é",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "A🦊 é",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "text-high-unit",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": "A\ud800B",
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "A\ud800B",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "A\ud800B",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "text-low-unit",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": "A\udc00B",
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "A\udc00B",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "A\udc00B",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "array-coercion",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": [
+              " alpha ",
+              null,
+              7,
+              [
+                "nested",
+                "tail"
+              ]
+            ],
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "error": "data.trim is not a function",
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "alpha ,,7,nested,tail",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "error": "data.trim is not a function"
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "array-marker",
+      "result": {
+        "entry": null,
+        "exit": null,
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "error": "text.substring is not a function"
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "array-shadowed-tostring",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": [
+              {
+                "toString": 0
+              }
+            ],
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "error": "Cannot convert object to primitive value",
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "error": "Cannot convert object to primitive value"
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "thinking-coerces-number",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": "<Thoughts>\nSynthetic reasoning.\n</Thoughts>\n\n7",
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "<Thoughts>\nSynthetic reasoning.\n</Thoughts>\n\n7",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>\nSynthetic reasoning.\n</Thoughts>\n\n7",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "number-without-thinking",
+      "result": {
+        "entry": null,
+        "exit": null,
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "error": "text.indexOf is not a function"
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "text-cbs",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": "Hello {{char}}.",
+            "model": "ollama-hosted"
+          },
+          "continue": false,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 71,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "Hello Synthetic character.",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "Hello Synthetic character.",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 71,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {},
+                "chatId": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "continue-array",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": [
+              " alpha ",
+              null,
+              7,
+              [
+                "nested",
+                "tail"
+              ]
+            ],
+            "model": "ollama-hosted"
+          },
+          "continue": true,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 76,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "Prefix: ",
+                "chatId": "continue-base",
+                "saying": "character",
+                "time": 100
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "error": "data.trim is not a function",
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "Prefix:  alpha ,,7,nested,tail",
+                "chatId": "00000000-0000-4000-8000-000000000001",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 76,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {}
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "error": "data.trim is not a function"
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    },
+    {
+      "id": "continue-high-unit",
+      "result": {
+        "entry": {
+          "response": {
+            "type": "success",
+            "result": "A\ud800B",
+            "model": "ollama-hosted"
+          },
+          "continue": true,
+          "generationId": "00000000-0000-4000-8000-000000000001",
+          "saying": "character",
+          "generationInfo": {
+            "model": "Ollama Local synthetic-model",
+            "generationId": "00000000-0000-4000-8000-000000000001",
+            "inputTokens": 76,
+            "outputTokens": 64,
+            "maxContext": 4000,
+            "stageTiming": {
+              "stage1": 0,
+              "stage2": 0,
+              "stage3": 0,
+              "stage4": 0
+            }
+          },
+          "promptInfo": {},
+          "character": {
+            "chaId": "character",
+            "name": "Synthetic character",
+            "type": "character",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "emotionImages": null,
+            "inlayViewScreen": null,
+            "viewScreen": null,
+            "customscript": [],
+            "triggerscript": []
+          },
+          "presetRegex": [],
+          "settings": {
+            "removeIncompleteResponse": false,
+            "ttsAutoSpeech": false
+          },
+          "plugins": {
+            "editoutput": 0,
+            "chatOutput": 0
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "Prefix: ",
+                "chatId": "continue-base",
+                "saying": "character",
+                "time": 100
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "exit": {
+          "application": {
+            "result": "Prefix: A\ud800B",
+            "emoChanged": false,
+            "resendChat": false
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              },
+              {
+                "role": "char",
+                "data": "Prefix: A\ud800B",
+                "chatId": "00000000-0000-4000-8000-000000000001",
+                "saying": "character",
+                "time": 1767225600000,
+                "generationInfo": {
+                  "model": "Ollama Local synthetic-model",
+                  "generationId": "00000000-0000-4000-8000-000000000001",
+                  "inputTokens": 76,
+                  "outputTokens": 64,
+                  "maxContext": 4000,
+                  "stageTiming": {
+                    "stage1": 0,
+                    "stage2": 0,
+                    "stage3": 0,
+                    "stage4": 0
+                  }
+                },
+                "promptInfo": {}
+              }
+            ],
+            "lastMemory": "NewChat"
+          }
+        },
+        "hooks": [],
+        "listenerCalls": 0,
+        "emotions": null,
+        "send": {
+          "returned": true
+        },
+        "alerts": [],
+        "requests": 1
+      }
+    }
+  ]
+}
