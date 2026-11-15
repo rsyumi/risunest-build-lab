@@ -1,8 +1,19 @@
 import { get, writable, type Writable } from 'svelte/store'
 import { isLibraryFileOperationReserved } from '../storage/libraryFileOperation'
 import { createRegexTimeoutScope, type RegexTimeoutScope } from './regexTimeoutScope'
+import type { PersistentDataRuntime } from '../storage/persistentDataRuntime'
+import type { NativeGenerationStatus, NativeGenerationTicket } from '../storage/nativeGeneration'
 
-let activeReservation: { regexScope: RegexTimeoutScope, characterId?: string, conversationId?: string } | null = null
+interface GenerationOwner {
+    regexScope: RegexTimeoutScope
+    reservation?: GenerationReservation
+    characterId?: string
+    conversationId?: string
+    nativeNavigationOwner?: symbol
+    nativeMessageEdit?: NativeGenerationMessageEdit
+    cancelled?: boolean
+}
+let activeReservation: GenerationOwner | null = null
 const doingChatState = writable(false)
 const generationCancellationState = writable<(() => void) | null>(null)
 export const generationCancellation = { subscribe: generationCancellationState.subscribe }
@@ -36,6 +47,69 @@ export interface GenerationReservation {
 }
 
 export const isGenerationReserved = () => activeReservation !== null
+
+export const isNativeGenerationNavigationAllowed = () => activeReservation?.nativeNavigationOwner !== undefined
+
+/** Called only after native preparation commits have been adopted and the save pause ends. */
+export function allowNativeGenerationNavigation(reservation: GenerationReservation): () => void {
+    const token = activeReservation
+    if (!token || !reservation.isCurrent()) return () => {}
+    const owner = Symbol('native-generation-navigation')
+    token.nativeNavigationOwner = owner
+    return () => {
+        if (activeReservation === token && token.nativeNavigationOwner === owner) delete token.nativeNavigationOwner
+    }
+}
+
+interface NativeGenerationMessageEditTarget {
+    characterId: string
+    conversationId: string
+}
+
+export interface NativeGenerationMessageEdit {
+    isCurrent(target: NativeGenerationMessageEditTarget): boolean
+}
+
+/** The original-message editor alone may enter the guarded edit cancellation path. */
+export function allowNativeGenerationMessageEdit(reservation: GenerationReservation, options: {
+    runtime: PersistentDataRuntime
+    ticket: NativeGenerationTicket
+    status: NativeGenerationStatus
+    target: NativeGenerationMessageEditTarget
+    authorityEpoch: number
+    signal?: AbortSignal
+}): () => void {
+    const owner = activeReservation
+    const { runtime, status, signal, authorityEpoch } = options
+    const ticket = { ...options.ticket }
+    const target = { ...options.target }
+    if (!owner || owner.reservation !== reservation || !reservation.isCurrent() || owner.cancelled || signal?.aborted
+        || status.phase !== 'running' || status.dispatch !== 'issued' || status.pendingCommit
+        || !status.preparationReady || status.cancelDecision !== null
+        || status.ticket.epoch !== ticket.epoch || status.ticket.sequence !== ticket.sequence
+        || status.characterId !== target.characterId || status.conversationId !== target.conversationId) return () => {}
+    const capability: NativeGenerationMessageEdit = {
+        isCurrent(current) {
+            if (activeReservation !== owner || owner.reservation !== reservation || owner.nativeMessageEdit !== capability
+                || !reservation.isCurrent() || owner.cancelled || signal?.aborted
+                || current.characterId !== target.characterId || current.conversationId !== target.conversationId) return false
+            try { runtime.assertPersistentMutationAllowed(authorityEpoch) } catch { return false }
+            return runtime.getNativeGenerationGuards().some(guard => guard.ticket.epoch === ticket.epoch
+                && guard.ticket.sequence === ticket.sequence && guard.characterId === target.characterId
+                && guard.conversationId === target.conversationId && guard.state === 'holding' && !guard.cancelled)
+        },
+    }
+    owner.nativeMessageEdit = capability
+    if (!capability.isCurrent(target)) delete owner.nativeMessageEdit
+    return () => {
+        if (activeReservation === owner && owner.nativeMessageEdit === capability) delete owner.nativeMessageEdit
+    }
+}
+
+export function captureNativeGenerationMessageEdit(target: NativeGenerationMessageEditTarget): NativeGenerationMessageEdit | null {
+    const capability = activeReservation?.nativeMessageEdit
+    return capability?.isCurrent(target) ? capability : null
+}
 
 export function bindGenerationRegexOwner(reservation: GenerationReservation, characterId: string, conversationId: string | undefined): void {
     if (!reservation.isCurrent() || !activeReservation) return
@@ -74,7 +148,7 @@ export function joinGenerationSignal(caller: AbortSignal | undefined, background
 
 export function reserveGeneration(cancel?: () => void): GenerationReservation | null {
     if (activeReservation || get(doingChat) || isLibraryFileOperationReserved()) return null
-    const token = { regexScope: createRegexTimeoutScope() }
+    const token: GenerationOwner = { regexScope: createRegexTimeoutScope() }
     activeReservation = token
     // Begins while the app is still on screen, before the input phase runs.
     const background = startBackground?.()
@@ -83,10 +157,12 @@ export function reserveGeneration(cancel?: () => void): GenerationReservation | 
     generationCancellationState.set(cancel ? () => {
         if (released || cancelled || activeReservation !== token) return
         cancelled = true
+        token.cancelled = true
+        delete token.nativeMessageEdit
         cancel()
     } : null)
     doingChat.set(true)
-    return {
+    const reservation: GenerationReservation = {
         background,
         regexScope: token.regexScope,
         isCurrent: () => !released && activeReservation === token,
@@ -100,4 +176,6 @@ export function reserveGeneration(cancel?: () => void): GenerationReservation | 
             if (!options?.preserveBusy) doingChat.set(false)
         },
     }
+    token.reservation = reservation
+    return reservation
 }

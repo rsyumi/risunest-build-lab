@@ -1,0 +1,3330 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "openAIKey": "sk-synthetic-openai",
+    "proxyKey": "sk-synthetic-proxy",
+    "nanogptKey": "sk-synthetic-nanogpt",
+    "OaiCompAPIKeys": {
+      "deepseek": "sk-synthetic-deepseek"
+    },
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "newOAIHandle": true,
+    "gptVisionQuality": "low",
+    "jsonSchemaEnabled": false,
+    "jsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"]}",
+    "strictJsonSchema": true,
+    "extractJson": "",
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "simplifiedToolUse": false,
+    "modelTools": [],
+    "autofillRequestUrl": false,
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "proxyRequestModel": "",
+    "customProxyRequestModel": "gpt-4.1",
+    "customAPIFormat": 18,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "stream",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "max-tokens",
+      "model": "gpt4o-response-api",
+      "maxTokens": 777,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "no-system",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "multi-turn",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "developer-role-for-system",
+      "model": "gpt-5-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "developer-role-by-custom-flags",
+      "model": "gpt4o-response-api",
+      "db": {
+        "enableCustomFlags": true,
+        "customFlags": [
+          6,
+          14
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "system-after-user-stays-system",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "One"
+        },
+        {
+          "role": "system",
+          "content": "Reminder"
+        },
+        {
+          "role": "assistant",
+          "content": "Two"
+        }
+      ]
+    },
+    {
+      "id": "empty-user-text-dropped",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "empty-user-text-kept-without-new-handle",
+      "model": "gpt4o-response-api",
+      "db": {
+        "newOAIHandle": false
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "empty-assistant-keeps-an-empty-message",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "function-role-is-dropped",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "function",
+          "content": "result",
+          "name": "lookup"
+        },
+        {
+          "role": "assistant",
+          "content": "Done"
+        }
+      ]
+    },
+    {
+      "id": "message-fields-are-ignored",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "name": "Alice",
+          "memo": "m",
+          "attr": [
+            "a"
+          ],
+          "removable": true,
+          "cachePoint": true
+        },
+        {
+          "role": "assistant",
+          "content": "Hey",
+          "thoughts": [
+            "t"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unicode-and-escapes",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "日本語 😀 \"quoted\" \\ back\nline  "
+        }
+      ]
+    },
+    {
+      "id": "system-content-replacement",
+      "model": "gpt4o-response-api",
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "image",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-detail-high",
+      "model": "gpt4o-response-api",
+      "db": {
+        "gptVisionQuality": "high"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "Look",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-without-text",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "image-without-text-without-new-handle",
+      "model": "gpt4o-response-api",
+      "db": {
+        "newOAIHandle": false
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "audio-video-and-signature-become-files",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hear",
+          "multimodals": [
+            {
+              "type": "audio",
+              "base64": "data:audio/wav;base64,BBBB"
+            },
+            {
+              "type": "video",
+              "base64": "data:video/mp4;base64,CCCC"
+            },
+            {
+              "type": "signature",
+              "base64": "c2ln"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "media-on-assistant-is-ignored",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "media-on-system",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Look"
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "marker-in-assistant",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look it up"
+        },
+        {
+          "role": "assistant",
+          "content": "Checking.<tool_call>k1</tool_call>\n\nDone."
+        },
+        {
+          "role": "user",
+          "content": "Thanks"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{\"query\":\"x\"}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "{\"found\":true}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-only",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "<tool_call>k1</tool_call>"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{\"query\":\"x\"}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "two-markers",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>k1</tool_call>B<tool_call>k2</tool_call>C"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{\"query\":\"x\"}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "one"
+            }
+          ]
+        },
+        "k2": {
+          "call": {
+            "id": "call_2",
+            "name": "clock",
+            "arg": "{}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "two"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-with-whitespace-text-carries-over",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": " <tool_call>k1</tool_call> x"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-undecodable-is-dropped",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>missing</tool_call>B"
+        }
+      ]
+    },
+    {
+      "id": "marker-unclosed-stays-text",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>k1"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-spans-lines",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>k\n1</tool_call>B"
+        }
+      ],
+      "decodings": {
+        "k\n1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-response-non-text-parts",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "<tool_call>k1</tool_call>"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "c",
+            "name": "lookup",
+            "arg": "{}"
+          },
+          "response": [
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AA"
+            },
+            {
+              "type": "text",
+              "text": "a"
+            },
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "marker-in-user-is-text",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi <tool_call>k1</tool_call>"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "model": "gpt4o-response-api",
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "search-tool",
+      "model": "gpt4o-response-api",
+      "db": {
+        "modelTools": [
+          "search"
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "tools-and-search-tool",
+      "model": "gpt4o-response-api",
+      "db": {
+        "modelTools": [
+          "search"
+        ]
+      },
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "other-model-tools-ignored",
+      "model": "gpt4o-response-api",
+      "db": {
+        "modelTools": [
+          "image"
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-parameters",
+      "model": "gpt-5-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-effort-minimal",
+      "model": "gpt-5-response-api",
+      "db": {
+        "reasoningEffort": -1
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-effort-low",
+      "model": "gpt-5-response-api",
+      "db": {
+        "reasoningEffort": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-effort-high",
+      "model": "gpt-5-response-api",
+      "db": {
+        "reasoningEffort": 2
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-effort-xhigh-falls-back-to-high",
+      "model": "gpt-5-response-api",
+      "db": {
+        "reasoningEffort": 3
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-effort-unknown-is-medium",
+      "model": "gpt-5-response-api",
+      "db": {
+        "reasoningEffort": 9
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-verbosity-low",
+      "model": "gpt-5-response-api",
+      "db": {
+        "verbosity": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-verbosity-high",
+      "model": "gpt-5-response-api",
+      "db": {
+        "verbosity": 2
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt5-verbosity-unknown-is-medium",
+      "model": "gpt-5-response-api",
+      "db": {
+        "verbosity": 7
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt51-effort-none",
+      "model": "gpt-5.1-response-api",
+      "db": {
+        "reasoningEffort": -1
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt54-pro-effort-min-medium",
+      "model": "gpt-5.4-pro-response-api",
+      "db": {
+        "reasoningEffort": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "gpt54-pro-effort-xhigh",
+      "model": "gpt-5.4-pro-response-api",
+      "db": {
+        "reasoningEffort": 3
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "o3-reasoning-only",
+      "model": "o3-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "o3-developer-role",
+      "model": "o3-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "chat-latest-without-reasoning",
+      "model": "gpt-5.2-chat-latest-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "temperature-disabled",
+      "model": "gpt4o-response-api",
+      "db": {
+        "temperature": -1000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "top-p-zero",
+      "model": "gpt4o-response-api",
+      "db": {
+        "top_p": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-model",
+      "model": "gpt-5-response-api",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 2,
+            "verbosity": 2
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "gpt-5-response-api": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": 5,
+              "thinking_tokens": 0,
+              "reasoning_effort": 3,
+              "verbosity": 0
+            }
+          }
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-submodel",
+      "model": "gpt-5-response-api",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 2,
+            "verbosity": 2
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "gpt-5-response-api": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": 5,
+              "thinking_tokens": 0,
+              "reasoning_effort": 3,
+              "verbosity": 0
+            }
+          }
+        }
+      },
+      "mode": "submodel",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-memory",
+      "model": "gpt-5-response-api",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 2,
+            "verbosity": 2
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "gpt-5-response-api": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": 5,
+              "thinking_tokens": 0,
+              "reasoning_effort": 3,
+              "verbosity": 0
+            }
+          }
+        }
+      },
+      "mode": "memory",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model",
+      "model": "gpt-5-response-api",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 2,
+            "verbosity": 2
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "gpt-5-response-api": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": 5,
+              "thinking_tokens": 0,
+              "reasoning_effort": 3,
+              "verbosity": 0
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model-missing-throws",
+      "model": "gpt4o-response-api",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 2,
+            "verbosity": 2
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 0,
+            "verbosity": 0
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "gpt-5-response-api": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": 5,
+              "thinking_tokens": 0,
+              "reasoning_effort": 3,
+              "verbosity": 0
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "schema-argument",
+      "model": "gpt4o-response-api",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "schema-argument-with-verbosity",
+      "model": "gpt-5-response-api",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "schema-database-declines",
+      "model": "gpt4o-response-api",
+      "db": {
+        "jsonSchemaEnabled": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "schema-from-database"
+    },
+    {
+      "id": "schema-not-strict",
+      "model": "gpt4o-response-api",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "db": {
+        "strictJsonSchema": false
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "schema-strict-null-is-true",
+      "model": "gpt4o-response-api",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "db": {
+        "strictJsonSchema": null
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "schema-with-pro-model",
+      "model": "gpt-5.4-pro-response-api",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-number",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-string-and-bool",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "user",
+            "\"abc\""
+          ],
+          [
+            "parallel_tool_calls",
+            "false"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-null-and-text",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "x",
+            "null"
+          ],
+          [
+            "y",
+            "plain text"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-json",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "metadata",
+            "json::{\"a\":1}"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-nested",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "reasoning.effort",
+            "high"
+          ],
+          [
+            "text.verbosity",
+            "low"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-header",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "header::X-Test",
+            "on"
+          ],
+          [
+            "header::Authorization",
+            "Bearer other"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-none-removes",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "header::Content-Type",
+            "{{none}}"
+          ],
+          [
+            "store",
+            "{{none}}"
+          ],
+          [
+            "max_output_tokens",
+            "{{none}}"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-store-true-keeps-items",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "store",
+            "true"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey"
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-stream-overridden",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "stream",
+            "true"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-stream-overridden-streaming",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "stream",
+            "false"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "stream": true
+    },
+    {
+      "id": "additional-input-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "input",
+            "x"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "additional-parameter-input"
+    },
+    {
+      "id": "additional-input-nested-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "additionalParams": [
+          [
+            "input.0",
+            "x"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "additional-parameter-input"
+    },
+    {
+      "id": "additional-ignored-for-openai-model",
+      "model": "gpt4o-response-api",
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-applied-for-custom-model",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-responses-model",
+          "url": "https://llm.example.test/v1/responses",
+          "key": "sk-synthetic-custom",
+          "format": 18,
+          "flags": [
+            6,
+            8
+          ],
+          "tokenizer": 0,
+          "params": "seed=9\nheader::X-Custom=yes"
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-apply-to-all-does-not-reach-openai",
+      "model": "gpt4o-response-api",
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "openai-endpoint",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-no-url-declines",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "reverse-proxy-risu-prefix",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "risu::https://proxy.example.test/v1/responses"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-model-and-key",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/x",
+        "customProxyRequestModel": "my-proxy-model",
+        "proxyKey": "sk-other"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-empty-model-uses-id",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/x",
+        "customProxyRequestModel": ""
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-no-autofill",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-bare-host",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-bare-host-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-bare-host-slash",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-bare-host-slash-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-v1",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-v1-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-v1-slash",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-v1-slash-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-responses",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-responses-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-responses-slash",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-responses-slash-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/responses/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-other-path",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-other-path-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-other-path-slash",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-other-path-slash-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api/",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-query",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api?x=1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-query-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api?x=1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-query-v1",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1?x=1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-query-v1-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1?x=1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-fragment",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api#frag",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-fragment-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api#frag",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-port",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://Proxy.Example.test:8443/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-port-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://Proxy.Example.test:8443/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-azure",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://res.openai.azure.com/openai/responses?api-version=2025-03-01-preview",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-azure-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://res.openai.azure.com/openai/responses?api-version=2025-03-01-preview",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-azure-deployment",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://res.openai.azure.com/openai/deployments/x/responses?api-version=2025-03-01-preview",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-azure-deployment-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://res.openai.azure.com/openai/deployments/x/responses?api-version=2025-03-01-preview",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-api-version-without-responses",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://res.openai.azure.com/openai?api-version=1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-api-version-without-responses-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://res.openai.azure.com/openai?api-version=1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-http",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "http://proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-http-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "http://proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-empty-segments",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test//v1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-empty-segments-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test//v1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-space-in-path",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/my path",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-space-in-path-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/my path",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-risu-prefix",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "risu::https://proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-risu-prefix-stream",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "risu::https://proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "autofill-userinfo-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://user:pw@proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "autofill-ip-host-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://127.0.0.1:8080/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "autofill-not-a-url-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "proxy.example.test/api",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "autofill-encoded-query-name-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/api?api%2Dversion=1",
+        "autofillRequestUrl": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "autofill-only-for-reverse-proxy",
+      "model": "xcustom:::one",
+      "db": {
+        "autofillRequestUrl": true
+      },
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-responses-model",
+          "url": "https://llm.example.test/api",
+          "key": "sk-synthetic-custom",
+          "format": 18,
+          "flags": [
+            6,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-responses-model",
+          "url": "https://llm.example.test/v1/responses",
+          "key": "sk-synthetic-custom",
+          "format": 18,
+          "flags": [
+            6,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-stream",
+      "model": "xcustom:::one",
+      "stream": true,
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-responses-model",
+          "url": "https://llm.example.test/v1/responses",
+          "key": "sk-synthetic-custom",
+          "format": 18,
+          "flags": [
+            6,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-no-url-declines",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-responses-model",
+          "url": "",
+          "key": "sk-synthetic-custom",
+          "format": 18,
+          "flags": [
+            6,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "custom-model-empty-key-kept",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-responses-model",
+          "url": "https://llm.example.test/v1/responses",
+          "key": "",
+          "format": 18,
+          "flags": [
+            6,
+            8
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "nanogpt-declines",
+      "model": "nanogpt",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "format"
+    },
+    {
+      "id": "other-format-declines",
+      "model": "gpt4o",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "format"
+    },
+    {
+      "id": "url-userinfo-buffered-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://user:pw@proxy.example.test/v1/responses"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "url-userinfo-stream-is-raw",
+      "model": "reverse_proxy",
+      "stream": true,
+      "db": {
+        "forceReplaceUrl": "https://user:pw@proxy.example.test/v1/responses"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "empty-messages",
+      "model": "gpt4o-response-api",
+      "messages": []
+    },
+    {
+      "id": "system-only",
+      "model": "gpt4o-response-api",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Only a system prompt."
+        }
+      ]
+    }
+  ]
+}

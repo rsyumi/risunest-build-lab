@@ -1,0 +1,12 @@
+[package]
+name = "risunest-formats"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../../LICENSE"
+
+[dependencies]
+risunest-ir = { path = "../ir" }
+
+[dev-dependencies]
+sha2 = "0.11.0"

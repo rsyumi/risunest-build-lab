@@ -1,0 +1,16 @@
+{
+  "package": "mlua",
+  "version": "0.12.2",
+  "archive": "https://static.crates.io/crates/mlua/mlua-0.12.2.crate",
+  "sha256": "7a7ae6b65bf54b7fdd4cf5b6f44f60862350ebf3fe3779b3a9cc005e7fa14f81",
+  "upstreamCommit": "a186d461c7772aed4cb0a9fa1d1899121c6450e7",
+  "license": "MIT",
+  "copiedPaths": [
+    "src",
+    "tests",
+    "LICENSE",
+    "README.md",
+    "Cargo.toml"
+  ],
+  "omitted": "Cargo cache metadata, upstream lockfile, examples, benchmarks and unrelated Lua engine sources are not included."
+}

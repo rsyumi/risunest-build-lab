@@ -1,0 +1,486 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "novelai": {
+      "token": "sk-synthetic-novelai",
+      "model": ""
+    },
+    "username": "Mina",
+    "NAIsettings": {
+      "topK": 12,
+      "topP": 0.85,
+      "topA": 0.1,
+      "tailFreeSampling": 0.915,
+      "repetitionPenalty": 2.8,
+      "repetitionPenaltyRange": 2048,
+      "repetitionPenaltySlope": 0.02,
+      "repostitionPenaltyPresence": 0,
+      "seperator": "",
+      "frequencyPenalty": 0.03,
+      "presencePenalty": 0,
+      "typicalp": 1,
+      "starter": "",
+      "cfg_scale": 1,
+      "mirostat_tau": 0,
+      "mirostat_lr": 1
+    },
+    "NAIadventure": false,
+    "NAIappendName": true,
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "proxyKey": "sk-synthetic-proxy",
+    "forceReplaceUrl": "https://proxy.example.test/api",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 9,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "output",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": " She nods."
+          }
+        }
+      ]
+    },
+    {
+      "id": "output-cut-at-user",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": " She nods.\nMina: what?"
+          }
+        }
+      ]
+    },
+    {
+      "id": "output-cut-at-char",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": "Steps in.\nAria： again"
+          }
+        }
+      ]
+    },
+    {
+      "id": "output-cut-at-message-name",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey",
+          "name": "Guide"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": "Ok. Guide: next"
+          }
+        }
+      ]
+    },
+    {
+      "id": "output-persona",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": "Fine. Hero: no"
+          }
+        }
+      ],
+      "persona": "Hero"
+    },
+    {
+      "id": "output-untrimmed",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": "  spaced  "
+          }
+        }
+      ]
+    },
+    {
+      "id": "output-empty-fails",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "output-missing-fails",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "other": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "output-number-declines",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "output": 5
+          }
+        }
+      ],
+      "declines": "result-text-not-text"
+    },
+    {
+      "id": "json-null-throws",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "json": null
+        }
+      ],
+      "declines": "thrown"
+    },
+    {
+      "id": "http-error-object",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "status": 401,
+          "json": {
+            "statusCode": 401,
+            "message": "Unauthorized"
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-error-with-output",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "json": {
+            "output": "partial"
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-error-not-json",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "status": 502,
+          "text": "Bad gateway"
+        }
+      ]
+    },
+    {
+      "id": "ok-not-json",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "status": 200,
+          "text": "nope"
+        }
+      ]
+    },
+    {
+      "id": "transport-error",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "throws": "fetch failed"
+        }
+      ]
+    }
+  ]
+}

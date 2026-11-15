@@ -1,0 +1,14 @@
+{"schema": 1, "cases": [
+{"id":"empty","text":""},
+{"id":"ascii","text":"plain text"},
+{"id":"two-byte","text":"café"},
+{"id":"three-byte","text":"가나"},
+{"id":"pair","text":"😀"},
+{"id":"nul-cut","text":"a\u0000b"},
+{"id":"lead-before-ascii","text":{"u":[55296,65,66]}},
+{"id":"trail-alone","text":{"u":[97,56320,98]}},
+{"id":"lead-at-end","text":{"u":[97,55357]}},
+{"id":"lead-eats-nul","text":{"u":[55296,0,67]}},
+{"id":"two-leads","text":{"u":[55296,55297,68]}},
+{"id":"long-mixed","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxé😀"}
+]}

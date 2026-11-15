@@ -1,0 +1,26 @@
+[package]
+name = "risunest-tokenizer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../../LICENSE"
+
+[features]
+default = []
+# The Hugging Face `tokenizer.json` families and the Gemma fallback of the Google Cloud tokenizer.
+huggingface = ["dep:tokenizers"]
+
+[dependencies]
+risunest-ir = { path = "../ir" }
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.0"
+# Exact, since the token IDs and the whitespace bound in `unicode.rs` were measured on this version. The
+# `tiktoken-rs-0.12.0` in the native tokenizer fingerprints (`id::CL100K_FINGERPRINT`) is a contract string TS sends
+# unchanged, recorded when the encoder was first reviewed; it does not name this version.
+tiktoken-rs = "=0.12.1"
+# `unstable_wasm` only swaps the regex engine from Oniguruma (C) to fancy-regex (pure Rust); the rest of the crate is
+# unchanged on native targets.
+tokenizers = { version = "=0.21.1", default-features = false, features = ["unstable_wasm"], optional = true }
+
+[dev-dependencies]
+serde_json = "1.0.151"

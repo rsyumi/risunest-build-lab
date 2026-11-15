@@ -29,6 +29,8 @@ export const MAX_SNAPSHOT_KEEP_COUNT = 8
 
 const storageKey = 'risuNestDeviceSettings'
 const exclusionsKey = 'risuNestStartupExclusions'
+const nativeOllamaGenerationKey = 'risuNestNativeOllamaGeneration'
+const nativeDisplayRenderKey = 'risuNestNativeDisplayRender'
 
 const defaults: RisuNestDeviceSettings = {
     schema: 'risunest.device-settings/v1',
@@ -203,4 +205,54 @@ export function updateStartupExclusions(exclusions: readonly RecoveryExclusion[]
     if (!isExclusionList(exclusions)) throw new Error('Invalid startup exclusions')
     storage?.setItem(exclusionsKey, JSON.stringify([...new Set(exclusions)]))
     void flushDeviceSettings().catch(reportStoreFailure)
+}
+
+/**
+ * Whether ordinary Ollama Send runs in the app core. It stays on this installation
+ * and defaults to off, so a missing or unreadable value reads false.
+ */
+export function getNativeOllamaGeneration(): boolean {
+    initializeSettings()
+    try {
+        return storage?.getItem(nativeOllamaGenerationKey) === 'true'
+    } catch { return false }
+}
+
+/** Returns false when the value could not be stored, leaving the previous one in place. */
+export function updateNativeOllamaGeneration(enabled: boolean): boolean {
+    initializeSettings()
+    try {
+        storage?.setItem(nativeOllamaGenerationKey, enabled ? 'true' : 'false')
+        void flushDeviceSettings().catch(reportStoreFailure)
+        return true
+    } catch (error) {
+        reportStoreFailure(error)
+        return false
+    }
+}
+
+/**
+ * Whether chat messages render in the app core (`true`) or in TS (`false`) on this installation,
+ * whatever the routing rule says. A missing or unreadable value reads null, and the rule decides.
+ */
+export function getNativeDisplayRender(): boolean | null {
+    initializeSettings()
+    try {
+        const value = storage?.getItem(nativeDisplayRenderKey)
+        return value === 'true' ? true : value === 'false' ? false : null
+    } catch { return null }
+}
+
+/** `null` leaves it to the routing rule. Returns false when the value could not be stored, leaving the previous one in place. */
+export function updateNativeDisplayRender(enabled: boolean | null): boolean {
+    initializeSettings()
+    try {
+        if (enabled === null) storage?.removeItem(nativeDisplayRenderKey)
+        else storage?.setItem(nativeDisplayRenderKey, enabled ? 'true' : 'false')
+        void flushDeviceSettings().catch(reportStoreFailure)
+        return true
+    } catch (error) {
+        reportStoreFailure(error)
+        return false
+    }
 }

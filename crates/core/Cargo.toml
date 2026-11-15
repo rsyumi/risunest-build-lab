@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["ir", "tokenizer", "records", "prompt", "regex", "lorebook", "providers", "memory", "triggers", "jinja", "formats", "render"]

@@ -105,10 +105,7 @@ vi.mock('./process/inlayScreen', () => ({ updateInlayScreen: (value: unknown) =>
 vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
 vi.mock('./translator/translator', () => ({ translateHTML: vi.fn() }))
 vi.mock('./mobileBackgroundTask', async () => (await import('./mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
-vi.mock('./process/index.svelte', async () => {
-    const { writable } = await import('svelte/store')
-    return { doingChat: writable(false) }
-})
+vi.mock('./process/index.svelte', async () => ({ doingChat: (await import('./process/generationState')).doingChat }))
 vi.mock('./characterCards', () => ({ importCharacter: vi.fn() }))
 vi.mock('./pngChunk', () => ({ PngChunk: {} }))
 vi.mock('./ui/yieldToUi', () => ({ yieldToUi: mocks.yieldToUi }))
@@ -167,7 +164,7 @@ import { language } from 'src/lang'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
-import { doingChat } from './process/index.svelte'
+import { doingChat, reserveGeneration, allowNativeGenerationNavigation } from './process/generationState'
 import { translateHTML } from './translator/translator'
 import { createConversationSummaryStub } from './storage/conversationResidency'
 import { installDisplayRecovery, isDisplayRecoveryMarked, type DisplayRecoveryTarget } from './displayRecovery.svelte'
@@ -315,6 +312,18 @@ describe('runtime chat identity', () => {
         expect(mocks.activateCharacter).toHaveBeenCalledWith(first.chaId, expect.objectContaining({
             normalize: expect.any(Function),
         }))
+    })
+
+    it('allows character navigation only after a native reservation hands off preparation', async () => {
+        mocks.database.characters.push(createBlankChar())
+        const reservation = reserveGeneration()!
+        try {
+            await expect(changeChar(0)).resolves.toBe(false)
+            const release = allowNativeGenerationNavigation(reservation)
+            await expect(changeChar(0)).resolves.toBe(true)
+            release()
+            await expect(changeChar(0)).resolves.toBe(false)
+        } finally { reservation.release() }
     })
 
     it('publishes character navigation before yielding to the UI', async () => {

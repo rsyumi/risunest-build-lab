@@ -40,6 +40,9 @@ test("rejects a test module in a dynamic chunk and a test framework", () => {
     "/node_modules/jsdom/lib/api.js",
     "/node_modules/@playwright/test/index.js",
     "/tests/native/main.ts",
+    "/tests/native/execution-profile/profile.mjs",
+    "/tests/native/ollama-route/bootstrap.mjs",
+    "/tests/native/ollama-route/commandWitness.mjs",
     "/tests/browser/main.ts",
   ]) {
     assert.throws(
@@ -58,6 +61,7 @@ test("rejects a test module in a dynamic chunk and a test framework", () => {
 });
 test("rejects a worker asset containing a benchmark interface", () => {
   for (const source of [
+    "window.__risunestExecutionProfile = {}",
     "window.__streamingSmoke = {}",
     "window.__RISUNEST_LINUX_BENCHMARK__ = {}",
   ]) {
@@ -84,14 +88,12 @@ test("rejects test modules and removed test helpers in source maps", () => {
       ]),
     /Verification source/,
   );
-  assert.throws(
-    () =>
-      assertProductionBundle([
-        chunk(),
-        map(["../../src/main.ts"], ["export const __testResponsesAPI = {}"]),
-      ]),
-    /Verification source text/,
-  );
+  for (const marker of ["__testResponsesAPI", "__risunestExecutionProfile"]) {
+    assert.throws(
+      () => assertProductionBundle([chunk(), map(["../../src/main.ts"], [`globalThis.${marker} = {}`])]),
+      /Verification source text/,
+    );
+  }
 });
 test("rejects an empty bundle instead of claiming validation", () => {
   assert.throws(() => assertProductionBundle([]), /No JavaScript/);
@@ -186,12 +188,14 @@ test("rejects isolated appearance and plugin probes in product workers and sourc
     assert.throws(() => assertProductionBundle([chunk(), map(["/src/main.ts"], [marker])]), /Verification source text/);
   }
 });
-test("rejects isolated persistence probes in product chunks, workers and source maps", () => {
+test("rejects isolated persistence and UI probes in product chunks, workers and source maps", () => {
   for (const marker of [
     "risunest.synthetic-legacy-restore/v1", "syntheticMeasurementResetId",
     "ios_bench_peak_rss", "legacy-restore-ready:", "runLegacyRestoreMeasurement",
     "synthetic-unicode-persistence-v1", "runUnicodePersistenceProbe", "verifyUnicodePersistenceProbe",
     "runLeaseReleaseCheckpointSuite", "lease-release-ipc", "synthetic-lease-release-owner",
+    "__risunestOllamaUi", "__OLLAMA_ROUTE_BUILD__", "risunest.ollama-ui/v1",
+    "risunest.ollama-ui-report/v1", "risunest-ollama-ui-startup-gate", "ollama-ui:",
   ]) {
     assert.throws(() => assertProductionBundle([chunk({}, marker)]), /Verification marker/);
     assert.throws(() => assertProductionBundle([chunk(), {

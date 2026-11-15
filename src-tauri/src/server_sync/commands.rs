@@ -387,8 +387,12 @@ pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent
     logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.push(store,&request,&generating))})).await
 }
 #[tauri::command]
-pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header,startup:Option<bool>)->Result<super::lww_client::ReceivePage> {
-    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|{core.client.retry_transient=!startup.unwrap_or(false);core.receive_page_with_frontier(store,&request)})})).await
+pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header,startup:Option<bool>)->Result<super::lww_client::ReceiveDescriptor> {
+    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|{core.client.retry_transient=!startup.unwrap_or(false);core.receive_descriptor(store,&request)})})).await
+}
+#[tauri::command]
+pub(crate) async fn server_sync_lww_apply_receive(app:AppHandle,request:crate::persistent_store::receive_evidence::RecordedApplyReceive)->Result<crate::persistent_store::lww::ApplyResult> {
+    logged_blocking("apply-receive",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.apply_stored_receive_with_baseline(store,&request.apply,request.native_baseline.as_ref()))})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {

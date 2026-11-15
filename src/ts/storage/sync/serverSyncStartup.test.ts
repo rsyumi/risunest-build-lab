@@ -22,7 +22,7 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => f.runtime,
     withPausedPersistentWrites: async (_reason: string, operation: (token: unknown) => Promise<unknown>) => operation({ id: 'paused' }),
     beginActivatedLibraryGuard: () => ({ complete() {}, async abortUnchanged() {} }),
-    refreshActivatedLibraryUnderPause: async () => ({ projection: 'applied' }), applyPersistentLwwReceive: async () => {}, flushPendingDataLocally: async () => {},
+    refreshActivatedLibraryUnderPause: async () => ({ projection: 'applied' }), applyPersistentStoredLwwReceive: async () => {}, flushPendingDataLocally: async () => {},
 }))
 vi.mock('../../mobileBackgroundTask', async () => (await import('../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingSetContinuation: vi.fn() }))
@@ -64,7 +64,7 @@ beforeEach(async () => {
         }
         if (command === 'server_sync_configure') f.pending = { endpoint: args.config.endpoint, libraryId: args.config.libraryId, epoch: 'epoch', serverEmpty: true }
         if (command === 'server_sync_lww_push') { if (f.pushError) throw f.pushError; if (!f.outbox) return null; f.outbox -= 1; f.pushed += 1; return { accepted: 1 } }
-        if (command === 'server_sync_lww_pull') return { bindingAuthority: f.binding.targetAuthority, requestId: 'pull', changes: [] }
+        if (command === 'server_sync_lww_pull') return { bindingAuthority: f.binding.targetAuthority, requestId: 'pull', incomingKeys: [], receivedUnits: 0, more: false, progress: {kind: 'server', cursor: '0'}, hasBodyReferences: false, hasRepresentativeReferences: false }
         if (command === 'server_sync_lww_pending_binding') return structuredClone(f.pending)
         if (command === 'server_sync_lww_pending_count') return f.outbox
         if (command === 'server_sync_lww_inspect') {

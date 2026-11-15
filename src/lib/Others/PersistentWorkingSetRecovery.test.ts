@@ -24,6 +24,7 @@ import { externalApplicationRecovery } from 'src/ts/storage/sync/external/applic
 import Recovery from './PersistentWorkingSetRecovery.svelte'
 import { persistentWorkingSetRefreshRevision } from 'src/ts/storage/persistentDataRuntime.svelte'
 import { languageEnglish } from 'src/lang/en'
+import { languageKorean } from 'src/lang/ko'
 
 const external = externalApplicationRecovery as Writable<{ jobId: string; confirmationPending: boolean } | null>
 const revision = persistentWorkingSetRefreshRevision as Writable<number | null>
@@ -59,8 +60,12 @@ describe('committed working-set recovery', () => {
         expect(mocks.retry).not.toHaveBeenCalled()
     })
 
-    it('explains the committed result and focuses the recovery dialog', async () => {
+    it('explains paused editing without claiming held edits were saved and focuses recovery', async () => {
         await setup(8)
+        expect(copy.refreshTitle).toBe('Editing is paused')
+        expect(copy.refreshHelp).toBe('Editing is paused. Reload the stored data to continue.')
+        expect(languageKorean.risuNest.persistentData.refreshTitle).toBe('편집이 일시 중단되었습니다')
+        expect(languageKorean.risuNest.persistentData.refreshHelp).toBe('편집이 일시 중단되었습니다. 계속하려면 저장된 데이터를 다시 불러오세요.')
         expect(target.textContent).toContain(copy.refreshTitle)
         expect(target.textContent).toContain(copy.refreshHelp)
         expect(document.activeElement).toBe(target.querySelector('[role="dialog"]'))

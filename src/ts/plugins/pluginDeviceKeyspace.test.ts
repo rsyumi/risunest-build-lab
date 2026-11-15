@@ -1,4 +1,4 @@
-import { advancePluginStorageRemoteChanges, setPluginStorageReloadHandler } from './pluginStorageProtection'
+import { advancePluginStorageRemoteChanges, beginPluginStorageReloadScope, setPluginStorageReloadHandler } from './pluginStorageProtection'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     PluginDeviceKeyspace,
@@ -6,6 +6,7 @@ import {
     createBrowserPluginDeviceBackend,
     getPluginDeviceKeyspace,
     invalidatePluginDeviceKeyspaces,
+    fenceUnknownPluginDeviceStorageRemoteChanges,
     type PluginDeviceBackend,
     type PluginDeviceMutation,
     type PluginDeviceSpace,
@@ -554,15 +555,81 @@ describe('native plugin device observations', () => {
         }
         const storage = new PluginDeviceKeyspace(owner, backend)
         const reload = vi.fn(); setPluginStorageReloadHandler(reload)
-        const writing = storage.setItem('json', 'settings', 'local')
-        await vi.waitFor(() => expect(rows()).toHaveLength(1))
-        rows()[0].value = 'remote'; sequence = 'epoch:1'
-        rows().push({ owner, space: 'json', key: 'added', value: 'new' })
-        advancePluginStorageRemoteChanges([JSON.stringify(['plugin-local', owner, 'json', 'settings']), JSON.stringify(['plugin-local', owner, 'json', 'added'])])
-        respond(); await writing
-        expect(reload).toHaveBeenCalledOnce()
-        await expect(storage.getItem('json', 'settings')).resolves.toBe('remote')
-        await expect(storage.keys('json')).resolves.toEqual(['added', 'settings'])
-        storage.dispose()
+        const release = beginPluginStorageReloadScope()
+        try {
+            const writing = storage.setItem('json', 'settings', 'local')
+            await vi.waitFor(() => expect(rows()).toHaveLength(1))
+            rows()[0].value = 'remote'; sequence = 'epoch:1'
+            rows().push({ owner, space: 'json', key: 'added', value: 'new' })
+            advancePluginStorageRemoteChanges([JSON.stringify(['plugin-local', owner, 'json', 'settings']), JSON.stringify(['plugin-local', owner, 'json', 'added'])])
+            respond(); await writing
+            expect(reload).not.toHaveBeenCalled()
+            await expect(storage.getItem('json', 'settings')).resolves.toBe('remote')
+            await expect(storage.keys('json')).resolves.toEqual(['added', 'settings'])
+            release()
+            expect(reload).toHaveBeenCalledOnce()
+        } finally {
+            release()
+            storage.dispose()
+            setPluginStorageReloadHandler(() => {})
+        }
     })
+})
+
+
+it('reloads device-only observations once after unknown remote changes and refreshes all live caches', async () => {
+    const owner = 'unknown-device-observed'
+    const { backend, rows } = recordingBackend([
+        { owner, space: 'json', key: 'settings', value: 'old observed' },
+        { owner: 'unknown-device-blind', space: 'json', key: 'settings', value: 'old blind' },
+    ])
+    backend.sequence = async () => 'epoch:0'
+    const observed = new PluginDeviceKeyspace(owner, backend)
+    const blind = new PluginDeviceKeyspace('unknown-device-blind', backend)
+    const reload = vi.fn()
+    setPluginStorageReloadHandler(reload)
+    const release = beginPluginStorageReloadScope()
+    try {
+        await expect(observed.getItem('json', 'settings')).resolves.toBe('old observed')
+        await expect(blind.keys('json')).resolves.toEqual(['settings'])
+        invalidatePluginDeviceKeyspaces(owner)
+        expect(reload).not.toHaveBeenCalled()
+        rows()[0].value = 'new observed'
+        rows()[1].value = 'new blind'
+        fenceUnknownPluginDeviceStorageRemoteChanges()
+        fenceUnknownPluginDeviceStorageRemoteChanges()
+        expect(reload).not.toHaveBeenCalled()
+        await expect(observed.getItem('json', 'settings')).resolves.toBe('new observed')
+        await expect(blind.getItem('json', 'settings')).resolves.toBe('new blind')
+        release()
+        expect(reload).toHaveBeenCalledOnce()
+    } finally {
+        release()
+        observed.dispose()
+        blind.dispose()
+        setPluginStorageReloadHandler(() => {})
+    }
+})
+
+it('invalidates unknown remote device changes without reloading enumerated or disposed observations', async () => {
+    const owner = 'unknown-device-unobserved'
+    const { backend, rows } = recordingBackend([{ owner, space: 'json', key: 'settings', value: 'old' }])
+    backend.sequence = async () => 'epoch:0'
+    const enumerated = new PluginDeviceKeyspace(owner, backend)
+    const disposed = new PluginDeviceKeyspace(owner, backend)
+    const reload = vi.fn()
+    setPluginStorageReloadHandler(reload)
+    try {
+        await expect(enumerated.keys('json')).resolves.toEqual(['settings'])
+        await disposed.getItem('json', 'settings')
+        disposed.dispose()
+        rows()[0].value = 'remote'
+        fenceUnknownPluginDeviceStorageRemoteChanges()
+        expect(reload).not.toHaveBeenCalled()
+        await expect(enumerated.getItem('json', 'settings')).resolves.toBe('remote')
+    } finally {
+        enumerated.dispose()
+        disposed.dispose()
+        setPluginStorageReloadHandler(() => {})
+    }
 })

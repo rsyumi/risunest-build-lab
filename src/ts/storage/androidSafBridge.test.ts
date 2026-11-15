@@ -11,6 +11,7 @@ import {
     materializeAndroidBackupSource,
     pickAndroidLegacyBackupSource,
     pickAndroidContentSources,
+    pickAndroidPresetSource,
     pickAndroidBackupSource,
     pickAndroidPortableBackupSource,
     type AndroidSafDestinationEvent,
@@ -922,7 +923,7 @@ describe('Android SAF bridge', () => {
     })
 })
 
-function contentPickerDependencies(detail: { ready: unknown[]; failures: unknown[] }, discardSource = vi.fn(() => true)) {
+function contentPickerDependencies(detail: { ready: unknown[]; failures: unknown[] }, discardSource = vi.fn((_token: string) => true)) {
     const listeners = new Set<(event: Event) => void>()
     const destinations: string[] = []
     return {
@@ -991,3 +992,85 @@ it('rejects a single refused file and lists several refused files together', asy
     await expect(pickAndroidContentSources({ destination: 'character' }, several.dependencies)).resolves.toEqual({ sources: [], failures })
     expect(several.listeners.size).toBe(0)
 })
+
+it.each(['json', 'preset', 'risupreset', 'RISUP'])('selects a preset %s as an owned spool descriptor', async (extension) => {
+    const listeners = new Map<string, (event: Event) => void>()
+    const onSource = vi.fn()
+    const destinations: string[] = []
+    await expect(pickAndroidPresetSource({ onSource }, {
+        createRequestId: () => 'preset-request',
+        bridge: {
+            copyExport: vi.fn(),
+            pickContentSource(requestId, destination) {
+                destinations.push(destination)
+                queueMicrotask(() => listeners.get('risu-android-content-source-picked')?.(
+                    new CustomEvent('risu-android-content-source-picked', { detail: {
+                        requestId, ready: [{ token: 'owned-preset', displayName: `synthetic.${extension}`, bytes: 7, importDestination: destination }], failures: [],
+                    } }),
+                ))
+            },
+        },
+        addEventListener: (name, listener) => { listeners.set(name, listener) },
+        removeEventListener: name => { listeners.delete(name) },
+    })).resolves.toEqual({ source: { type: 'androidSpool', token: 'owned-preset' }, displayName: `synthetic.${extension}` })
+    expect(destinations).toEqual(['preset'])
+    expect(onSource).toHaveBeenCalledWith({ displayName: `synthetic.${extension}`, bytes: 7 })
+    expect(listeners.size).toBe(0)
+})
+
+it.each(['cancelled', 'unsupported'])('handles a %s preset selection without returning a source', async (outcome) => {
+    const listeners = new Map<string, (event: Event) => void>()
+    const discardSource = vi.fn(() => true)
+    const pending = pickAndroidPresetSource({}, {
+        createRequestId: () => 'preset-selection',
+        bridge: {
+            copyExport: vi.fn(), discardSource,
+            pickContentSource(requestId) {
+                queueMicrotask(() => listeners.get('risu-android-content-source-picked')?.(
+                    new CustomEvent('risu-android-content-source-picked', { detail: {
+                        requestId, ready: outcome === 'cancelled' ? [] : [{ token: 'rejected-preset', displayName: 'synthetic.charx', bytes: 7 }], failures: [],
+                    } }),
+                ))
+            },
+        },
+        addEventListener: (name, listener) => { listeners.set(name, listener) },
+        removeEventListener: name => { listeners.delete(name) },
+    })
+    if (outcome === 'cancelled') {
+        await expect(pending).resolves.toBeNull()
+        expect(discardSource).not.toHaveBeenCalled()
+    } else {
+        await expect(pending).rejects.toMatchObject({ code: 'unsupported-format' })
+        expect(discardSource).toHaveBeenCalledWith('rejected-preset')
+    }
+    expect(listeners.size).toBe(0)
+})
+
+it.each(['extra-ready', 'partial-failure', 'unsupported-first', 'cleanup-failure', 'cancelled'])(
+    'disposes every unclaimed preset spool after %s', async (outcome) => {
+        const ready = [
+            { token: 'first-preset', displayName: outcome === 'unsupported-first' ? 'card.charx' : 'first.risup', bytes: 7 },
+            { token: 'second-preset', displayName: 'second.risup', bytes: 9 },
+        ]
+        const remaining = new Set(ready.map(source => source.token))
+        const picker = contentPickerDependencies({
+            ready,
+            failures: outcome === 'partial-failure' ? [{ displayName: 'failed.risup', code: 'storage-full' }] : [],
+        })
+        picker.discardSource.mockImplementation((token) => {
+            if (outcome === 'cleanup-failure' && token === 'first-preset') return false
+            return remaining.delete(token)
+        })
+        const controller = new AbortController()
+        const pending = pickAndroidPresetSource({ signal: controller.signal }, picker.dependencies)
+        const rejected = expect(pending).rejects.toMatchObject(outcome === 'cancelled'
+            ? { name: 'AbortError' }
+            : { code: outcome === 'partial-failure' ? 'storage-full'
+                : outcome === 'cleanup-failure' ? 'cleanup-failed' : 'source-reselect-required' })
+        if (outcome === 'cancelled') controller.abort()
+        await rejected
+        expect([...remaining]).toEqual(outcome === 'cleanup-failure' ? ['first-preset'] : [])
+        expect(picker.listeners.size).toBe(0)
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    },
+)

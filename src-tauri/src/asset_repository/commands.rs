@@ -2018,6 +2018,7 @@ mod tests {
                     path: source.to_string_lossy().into_owned(),
                 },
                 display_name: name.to_owned(),
+                import_destination: Default::default(),
             })
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);

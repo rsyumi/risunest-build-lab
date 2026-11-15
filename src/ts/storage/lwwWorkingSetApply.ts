@@ -1,14 +1,23 @@
 import { sharedRootFields } from './persistentRootFields'
-import { createCatalogCharacterStub, createPresetCatalogWorkingSetFromValues, isCatalogPresetWorkingSet } from './workingSetCatalog'
+import { replaceArrayRange } from '../arrayRange'
+import { createCatalogCharacterStub, createPresetCatalogWorkingSetFromValues, getCatalogCharacterMetadata, isCatalogPresetWorkingSet } from './workingSetCatalog'
 import { createConversationSummaryStub, createConversationSummaryFromMetadata } from './conversationResidency'
 import type { Chat, Database, botPreset, character } from './database.svelte'
-import type { PersistentRevisionReader, PersistentRoot } from './persistentDataStore'
+import type { CapturedReceiveConversationEdits } from './saveCoordinator'
+import { CONTENT_CHANGE_PAGE_LIMIT, type ContentChangeKey, type PersistentRevisionReader, type PersistentRoot } from './persistentDataStore'
 import { canonicalClone, canonicalJson, clonePersistentRootFields } from './saveCoordinatorHelpers'
-import { captureMaterializedCharacter, CHARACTER_SHARED_FIELDS, CONVERSATION_SHARED_FIELDS } from './persistentUnitCapture'
+import { captureMaterializedCharacter, diffFields, diffRecordCollection, recordCollections, CHARACTER_SHARED_FIELDS, CONVERSATION_SHARED_FIELDS } from './persistentUnitCapture'
 import { isWorkingSetCharacterStub, patchCatalogCharacterField } from './workingSetCatalog'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 
 type CompleteCharacter = character
+
+export class LwwWorkingSetConflictError extends Error {
+    constructor(readonly kind: 'archived-owner' | 'deleted-owner' | 'deleted-conversation', readonly characterId: string, readonly conversationId?: string) {
+        super(kind === 'archived-owner' ? 'Received archive conflicts with unsaved character edits' : 'Received deletion conflicts with unsaved local edits')
+        this.name = 'LwwWorkingSetConflictError'
+    }
+}
 
 export interface LwwWorkingSetBaseline {
     root: PersistentRoot
@@ -21,6 +30,155 @@ export function captureLwwWorkingSetBaseline(database: Database, root: Persisten
     return { root: clonePersistentRootFields(root), presets: presets && canonicalClone(presets),
         presetRecords: canonicalClone([...presetRecords]),
         characters: materialized ?? database.characters.filter((value) => !isWorkingSetCharacterStub(value)).map(captureMaterializedCharacter) }
+}
+
+export function prepareLwwReceiveDiscardBaseline(baseline: LwwWorkingSetBaseline, captured: CapturedReceiveConversationEdits): { baseline: LwwWorkingSetBaseline; keys: string[] } {
+    const next = canonicalClone(baseline)
+    const owner = next.characters.find(value => value.chaId === captured.characterId)
+    const conversation = owner?.chats.find(value => value.id === captured.conversationId)
+    if (!owner || !conversation) throw new Error('Discard baseline no longer contains the selected conversation')
+    const keys: string[] = []
+    const fields = (target: object, prefix: string[], changes: CapturedReceiveConversationEdits['characterFields']) => {
+        const record = target as Record<string, unknown>
+        for (const change of changes) {
+            if (change.type === 'delete') delete record[change.field]
+            else defineOwnEnumerableProperty(record, change.field, canonicalClone(change.value))
+            keys.push(JSON.stringify([...prefix, change.field]))
+        }
+    }
+    fields(owner, ['character', captured.characterId], captured.characterFields)
+    fields(conversation, ['conversation', captured.characterId, captured.conversationId], captured.conversationFields)
+    if (captured.ranges.length) {
+        if (Object.hasOwn(conversation, 'message')) {
+            for (const range of captured.ranges) replaceArrayRange(conversation.message, range.start, range.deleteCount, canonicalClone(range.messages))
+        }
+        keys.push(JSON.stringify(['messages', captured.characterId, captured.conversationId]))
+    }
+    return { baseline: next, keys }
+}
+
+/** Keys needed to merge the current stored state after a receive outlives its original revision. */
+export async function readLwwReceiveRebaseKeys(
+    database: Database, baseline: LwwWorkingSetBaseline, reader: PersistentRevisionReader, afterRevision: number, forceCurrentState = false,
+): Promise<{ keys: string[]; unknownPluginChanges: boolean }> {
+    let changes: ContentChangeKey[] | null = []
+    try {
+        if (forceCurrentState || !reader.readWorkingSetChangePage) changes = null
+        else {
+            let after: ContentChangeKey | null = null
+            while (true) {
+                const page = await reader.readWorkingSetChangePage(afterRevision, after, CONTENT_CHANGE_PAGE_LIMIT)
+                changes.push(...page)
+                if (page.length < CONTENT_CHANGE_PAGE_LIMIT) break
+                after = page[page.length - 1]
+            }
+            if (changes.some(key => !['root', 'preset', 'character', 'conversation', 'plugin', 'asset', 'inlay', 'owner'].includes(key.kind) ||
+                key.kind === 'owner' && !['character-additional-assets', 'root-module-assets', 'persona-embedded-module-assets'].includes(key.key1))) changes = null
+        }
+    } catch { changes = null }
+    const keys = new Set<string>()
+    const add = (...parts: string[]) => keys.add(JSON.stringify(parts))
+    const fields = (parts: string[], before: object, after: object, excluded = new Set<string>()) => {
+        for (const mutation of diffFields(parts, before, after, excluded)) keys.add(mutation.key)
+    }
+    if (!changes || changes.some(key => key.kind === 'root' || key.kind === 'owner' && key.key1 !== 'character-additional-assets')) {
+        const remote = (await reader.readRoot()).value
+        for (const mutation of diffFields(['root'], baseline.root, remote)) {
+            const name = (JSON.parse(mutation.key) as string[])[1]
+            const before = (baseline.root as unknown as Record<string, unknown>)[name]
+            const after = (remote as unknown as Record<string, unknown>)[name]
+            if (recordCollections.has(name)) {
+                for (const value of diffRecordCollection(name, (before ?? []) as unknown[], (after ?? []) as unknown[])) keys.add(value.key)
+            } else if (name === 'personas') {
+                const previous = new Map(((before ?? []) as { id: string }[]).map(value => [value.id, value]))
+                const current = new Map(((after ?? []) as { id: string }[]).map(value => [value.id, value]))
+                for (const id of new Set([...previous.keys(), ...current.keys()])) {
+                    if (previous.has(id) !== current.has(id)) add('exists', 'persona', id)
+                    if (current.has(id)) fields(['persona', id], previous.get(id) ?? {}, current.get(id)!, new Set(['id']))
+                }
+                if (canonicalJson([...previous.keys()]) !== canonicalJson([...current.keys()])) add('order', 'personas')
+            } else if (name === 'explicitGlobalChatVariables' || name === 'protectedPresetValues') {
+                for (const value of diffFields([], (before ?? {}) as object, (after ?? {}) as object)) {
+                    const field = (JSON.parse(value.key) as string[])[0]
+                    add(name === 'protectedPresetValues' ? 'preset-protected' : field.startsWith('toggle_') ? 'toggle' : 'variable', field)
+                }
+            } else keys.add(mutation.key)
+        }
+    }
+    const liveCharacters = new Map(database.characters.map(value => [value.chaId, value]))
+    const beforeCharacters = new Map(baseline.characters.map(value => [value.chaId, value]))
+    const characterIds = new Set(changes?.flatMap(key => key.kind === 'character' || key.kind === 'conversation' ? [key.key1]
+        : key.kind === 'owner' && key.key1 === 'character-additional-assets' ? [key.key2] : []) ?? liveCharacters.keys())
+    if (!changes) {
+        for (const trash of [false, true]) {
+            let cursor: string | undefined
+            do {
+                const page = await reader.queryCharacters({ order: 'configured', trash, limit: 128, cursor })
+                for (const value of page.items) characterIds.add(value.id)
+                cursor = page.nextCursor
+            } while (cursor)
+        }
+    }
+    for (const id of characterIds) {
+        const live = liveCharacters.get(id), before = beforeCharacters.get(id)
+        const summary = await reader.readCharacterSummary(id)
+        if (!summary || !live) { add('exists', 'character', id); continue }
+        if (summary.archived || getCatalogCharacterMetadata(live)?.residency === 'archived') {
+            add('archive', id)
+            if (summary.archived) continue
+        }
+        if (isWorkingSetCharacterStub(live) || !before) {
+            fields(['character', id], live, createCatalogCharacterStub(summary), new Set(['chaId', 'chats']))
+            continue
+        }
+        const detail = await reader.readCharacter(id)
+        if (!detail) { add('exists', 'character', id); continue }
+        fields(['character', id], before, detail.value, new Set(['chaId', 'chats', 'chatFolders']))
+        const currentIds: string[] = []
+        let cursor: string | undefined
+        do {
+            const page = await reader.queryConversations({ characterId: id, order: 'configured', limit: 128, cursor })
+            currentIds.push(...page.items.map(value => value.id)); cursor = page.nextCursor
+        } while (cursor)
+        const previous = new Map(before.chats.map(chat => [chat.id, chat]))
+        const current = new Set(currentIds)
+        if (canonicalJson([...previous.keys()]) !== canonicalJson(currentIds) || canonicalJson(before.chatFolders ?? []) !== canonicalJson(detail.value.chatFolders ?? [])) add('order', 'conversations', id)
+        for (const chatId of new Set([...previous.keys(), ...current])) {
+            if (previous.has(chatId) !== current.has(chatId)) add('exists', 'conversation', id, chatId)
+            if (!current.has(chatId) || !previous.has(chatId)) continue
+            const metadata = await reader.readConversationMetadata(id, chatId)
+            if (!metadata) { add('exists', 'conversation', id, chatId); continue }
+            fields(['conversation', id, chatId], previous.get(chatId)!, metadata.value.conversation, new Set(['id', 'message']))
+            if (!changes || changes.some(key => key.kind === 'conversation' && key.key1 === id && key.key2 === chatId)) {
+                const old = previous.get(chatId)!
+                const current = live.chats.find(chat => chat.id === chatId)
+                if (Object.hasOwn(old, 'message') && current && Object.prototype.propertyIsEnumerable.call(current, 'message')) {
+                    const conversation = await reader.readConversation(id, chatId)
+                    if (conversation && canonicalJson(old.message) !== canonicalJson(conversation.value.message)) add('messages', id, chatId)
+                } else add('messages', id, chatId)
+            }
+        }
+    }
+    if (!changes || changes.some(key => key.kind === 'preset')) {
+        const catalog = await reader.queryPresets()
+        const previous = new Map([...(baseline.presets ?? []), ...baseline.presetRecords].map(value => [value['id'] as string, value]))
+        const currentIds = catalog.items.map(value => value.id)
+        const oldIds = database.botPresets.filter(Boolean).map(value => value['id'] as string)
+        if (canonicalJson(oldIds) !== canonicalJson(currentIds)) add('order', 'presets')
+        for (const id of new Set([...previous.keys(), ...currentIds])) {
+            if (!previous.has(id) || !currentIds.includes(id)) { add('exists', 'preset', id); continue }
+            const remote = await reader.readPreset(id)
+            if (remote) fields(['preset', id], previous.get(id)!, remote.value, new Set(['id']))
+        }
+    }
+    if (changes) {
+        for (const key of changes) if (key.kind === 'plugin') add('plugin', key.key1, key.key2)
+    } else {
+        const owners = new Set((baseline.root.plugins ?? []).map(plugin => plugin.name))
+        for (const item of (await reader.queryPluginStorage()).items) owners.add(item.owner)
+        for (const owner of owners) add('order', 'plugin-storage', owner)
+    }
+    return { keys: [...keys], unknownPluginChanges: changes === null }
 }
 
 function patchField(live: object, baseline: object, remote: object, field: string): void {
@@ -37,7 +195,7 @@ function patchField(live: object, baseline: object, remote: object, field: strin
 }
 
 export async function applyLwwWorkingSetUnits(
-    database: Database, baseline: LwwWorkingSetBaseline, store: PersistentRevisionReader, affectedKeys: readonly string[], liveIndex?: ReadonlyMap<string, CompleteCharacter>, allowLocalFields = false, beforeProjection?: () => void, afterProjection?: () => void,
+    database: Database, baseline: LwwWorkingSetBaseline, store: PersistentRevisionReader, affectedKeys: readonly string[], liveIndex?: ReadonlyMap<string, CompleteCharacter>, allowLocalFields = false, beforeProjection?: () => void, afterProjection?: () => void, nativeReceive = false,
 ): Promise<LwwWorkingSetBaseline> {
     const charactersById = liveIndex ?? new Map(database.characters.map((value) => [value.chaId,value]))
     // A stub holds only catalog fields, so no baseline describes it.
@@ -45,23 +203,31 @@ export async function applyLwwWorkingSetUnits(
         const live = charactersById.get(value.chaId)
         return !live || !isWorkingSetCharacterStub(live)
     }).map((value) => [value.chaId,value]))
-    const keys = affectedKeys.map((key) => JSON.parse(key) as string[])
+    let keys = affectedKeys.map((key) => JSON.parse(key) as string[])
         .filter(([kind, , field, metadataField]) => allowLocalFields || (kind !== 'character' || CHARACTER_SHARED_FIELDS.has(field)) && (kind !== 'conversation' || CONVERSATION_SHARED_FIELDS.has(metadataField)))
         .sort((a, b) => Number(a[0] === 'root' && ['botPresetsId', 'selectedPersona'].includes(a[1])) - Number(b[0] === 'root' && ['botPresetsId', 'selectedPersona'].includes(b[1])))
+    const summaries = new Map<string, Awaited<ReturnType<PersistentRevisionReader['readCharacterSummary']>>>()
+    for (const [kind, id] of keys) if (nativeReceive && kind === 'archive') summaries.set(id, await store.readCharacterSummary(id))
+    keys = keys.filter(([kind, id, owner]) => !summaries.get(kind === 'order' && id === 'conversations' ? owner : id)?.archived ||
+        !['character', 'conversation', 'messages'].includes(kind) && !(kind === 'order' && id === 'conversations'))
     const root = keys.some(([kind]) => ['root', 'variable', 'toggle', 'record', 'order', 'persona', 'preset-protected', 'exists'].includes(kind))
         ? (await store.readRoot()).value : null
     const details = new Map<string, CompleteCharacter | null>()
     for (const [kind, id] of keys) if (kind === 'character') {
         if (!details.has(id)) {
-            const value = await store.readCharacter(id)
-            details.set(id, value ? { ...value.value, chats: [] } as CompleteCharacter : null)
+            if (nativeReceive && charactersById.has(id) && isWorkingSetCharacterStub(charactersById.get(id)!)) {
+                const summary = await store.readCharacterSummary(id)
+                details.set(id, summary ? createCatalogCharacterStub(summary) : null)
+            } else {
+                const value = await store.readCharacter(id)
+                details.set(id, value ? { ...value.value, chats: [] } as CompleteCharacter : null)
+            }
         }
     }
     const presets = new Map<string, Awaited<ReturnType<PersistentRevisionReader['readPreset']>>>()
     const metadata = new Map<string, Awaited<ReturnType<PersistentRevisionReader['readConversationMetadata']>>>()
     const conversations = new Map<string, Awaited<ReturnType<PersistentRevisionReader['readConversation']>>>()
     const orders = new Map<string, string[]>()
-    const summaries = new Map<string, Awaited<ReturnType<PersistentRevisionReader['readCharacterSummary']>>>()
     let presetCatalog: Awaited<ReturnType<PersistentRevisionReader['queryPresets']>> | undefined
     const pair = (characterId: string, conversationId: string) => JSON.stringify([characterId, conversationId])
     const readPreset = async (id: string) => {
@@ -99,6 +265,26 @@ export async function applyLwwWorkingSetUnits(
         if (kind === 'exists' && id === 'conversation' && !metadata.has(pair(field, metadataField))) metadata.set(pair(field, metadataField), await store.readConversationMetadata(field, metadataField))
     }
     beforeProjection?.()
+    for (const [kind, id] of keys) if (nativeReceive && kind === 'archive' && summaries.get(id)?.archived) {
+        const live = charactersById.get(id), before = baselineById.get(id)
+        if (live && !isWorkingSetCharacterStub(live) && (!before || canonicalJson(captureMaterializedCharacter(live)) !== canonicalJson(before))) {
+            throw new LwwWorkingSetConflictError('archived-owner', id)
+        }
+    }
+    for (const [kind, scope, characterId, conversationId] of keys) if (nativeReceive && kind === 'exists') {
+        const live = charactersById.get(characterId), before = baselineById.get(characterId)
+        if (!live || isWorkingSetCharacterStub(live)) continue
+        if (scope === 'character' && !summaries.get(characterId) && (!before || canonicalJson(captureMaterializedCharacter(live)) !== canonicalJson(before))) {
+            throw new LwwWorkingSetConflictError('deleted-owner', characterId)
+        }
+        if (scope === 'conversation' && !metadata.get(pair(characterId, conversationId))) {
+            const current = captureMaterializedCharacter({ ...live, chats: live.chats.filter(chat => chat.id === conversationId) }).chats[0]
+            const original = before?.chats.find(chat => chat.id === conversationId)
+            if (current && (!original || canonicalJson(current) !== canonicalJson(original))) {
+                throw new LwwWorkingSetConflictError('deleted-conversation', characterId, conversationId)
+            }
+        }
+    }
     for (const [kind, id, field, metadataField] of keys) {
         if (kind === 'root' && root && (allowLocalFields || sharedRootFields.has(id))) {
             if (id === 'botPresetsId' && typeof root.botPresetsId === 'string') {
@@ -250,7 +436,11 @@ export async function applyLwwWorkingSetUnits(
             const selectedId = database.botPresets[database.botPresetsId]?.['id']
             const catalog = presetCatalog!
             const byId = new Map(database.botPresets.filter(Boolean).map((value) => [value['id'], value]))
-            const next = catalog.items.map((summary) => byId.get(summary.id) ?? canonicalClone(presets.get(summary.id)?.value ?? { id: summary.id, name: summary.name, image: summary.image }) as botPreset)
+            const next = catalog.items.map((summary) => {
+                const live = byId.get(summary.id)
+                const catalogOnly = nativeReceive && isCatalogPresetWorkingSet(database.botPresets) && live && Object.keys(live).every(key => ['id', 'name', 'image'].includes(key))
+                return !catalogOnly && live ? live : canonicalClone(presets.get(summary.id)?.value ?? { id: summary.id, name: summary.name, image: summary.image }) as botPreset
+            })
             database.botPresets = isCatalogPresetWorkingSet(database.botPresets)
                 ? createPresetCatalogWorkingSetFromValues(next, catalog.revision, selectedId) : next
             if (isCatalogPresetWorkingSet(database.botPresets)) for (let index = 0; index < next.length; index++) database.botPresets[index] = next[index]
@@ -263,6 +453,13 @@ export async function applyLwwWorkingSetUnits(
                 baselineRoot.botPresetsId = typeof fallbackId === 'string' ? fallbackId : database.botPresetsId
             }
             if (baseline.presets) baseline.presets = catalog.items.map((summary, index) => baseline.presets!.find((value) => value['id'] === summary.id) ?? canonicalClone(presets.get(summary.id)?.value ?? byId.get(summary.id) ?? next[index]))
+        } else if (nativeReceive && kind === 'archive') {
+            const summary = summaries.get(id)
+            const index = database.characters.findIndex(value => value.chaId === id)
+            if (summary && index >= 0 && (summary.archived || getCatalogCharacterMetadata(database.characters[index])?.residency === 'archived')) {
+                database.characters[index] = createCatalogCharacterStub(summary)
+                baseline.characters = baseline.characters.filter(value => value.chaId !== id)
+            }
         } else if (kind === 'exists' && id === 'character') {
             const summary = summaries.get(field)
             if (summary && !charactersById.has(field)) database.characters.push(createCatalogCharacterStub(summary))

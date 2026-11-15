@@ -1,0 +1,1890 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/tokenizer.oracle.test.ts",
+  "fixtureSha256": "f9ded560dffed88c1c0e003ebb01dc187bf17d37e319ff1b9be76ae1da5f9851",
+  "tsSourceSha256": {
+    "src/ts/tokenizer.ts": "5c939b3229412d18ef6d3f2013b6a489680d272256ed37537c80a24a497b6989",
+    "src/ts/tokenizer/gemmaTokenizer.ts": "6a48c4cbc5b437518796acd0258c3c9586e59a9d8157f5c3bc1ce49738db967b",
+    "src/ts/model/modellist.ts": "1c4c97cf87d85b06d891531ef8ab65700a220840f116ba425173d0d8061033ae"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "total-number",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-number:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-fraction",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-fraction:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-negative-fraction",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-negative-fraction:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-negative",
+      "result": {
+        "steps": [
+          {
+            "error": "Invalid typed array length: -1",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-negative:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-overflow",
+      "result": {
+        "steps": [
+          {
+            "error": "Invalid typed array length: Infinity",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-overflow:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-zero",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-zero:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-string",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-string:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-string-spaced",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-string-spaced:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-string-hex",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-string-hex:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-string-word",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-string-word:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-true",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-true:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-null",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-null:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-missing",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-missing:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-duplicate-key",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-duplicate-key:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-with-details",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-with-details:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-array",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-array:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-number",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-number:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-string",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-string:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-null",
+      "result": {
+        "steps": [
+          {
+            "error": "Cannot read properties of null (reading 'totalTokens')",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-null:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-not-json",
+      "result": {
+        "steps": [
+          {
+            "error": "Unexpected token 'o', \"not json\" is not valid JSON",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-not-json:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-empty",
+      "result": {
+        "steps": [
+          {
+            "error": "Unexpected end of JSON input",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-empty:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-bom",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-bom:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "body-invalid-utf8",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-body-invalid-utf8:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "total-list",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              1,
+              2
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-total-list:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "status-404",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              4377,
+              1239,
+              22615,
+              4171,
+              236761
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-status-404:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "status-201",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              4377,
+              1239,
+              22615,
+              4171,
+              236761
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-status-201:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fetch-throws",
+      "result": {
+        "steps": [
+          {
+            "error": "synthetic network failure",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fetch-throws:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "token-missing",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-token-missing:countTokens?key=undefined",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "text-escapes",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-text-escapes:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"quote \\\" backslash \\\\ tab \\t newline \\n bell \\u0007 separator   emoji 🙂 é\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "text-isolated-surrogate",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-text-isolated-surrogate:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"lone \\ud800 high, lone \\udc00 low\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "text-empty",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-text-empty:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "model-id-characters",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-model-id-characters models/é ?x=1#y:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "chat-content-and-name",
+      "result": {
+        "steps": [
+          {
+            "value": 9,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-content-and-name:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              },
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-content-and-name:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Speaker\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-repeat",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-repeat:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": []
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-chat-then-encode",
+      "result": {
+        "steps": [
+          {
+            "value": 9,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-chat-then-encode:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              },
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-chat-then-encode:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Speaker\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0
+            ],
+            "fetches": []
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": []
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-encode-then-chat",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-encode-then-chat:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": 9,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-encode-then-chat:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Speaker\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-missing-total",
+      "result": {
+        "steps": [
+          {
+            "value": [],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-missing-total:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [],
+            "fetches": []
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-not-after-status",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              4377,
+              1239,
+              22615,
+              4171,
+              236761
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-not-after-status:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-not-after-status:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-not-after-syntax",
+      "result": {
+        "steps": [
+          {
+            "error": "Unexpected token 'o', \"not json\" is not valid JSON",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-not-after-syntax:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-not-after-syntax:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-not-after-throw",
+      "result": {
+        "steps": [
+          {
+            "error": "synthetic network failure",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-not-after-throw:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-not-after-throw:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-invalid-length",
+      "result": {
+        "steps": [
+          {
+            "error": "Invalid typed array length: -1",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-invalid-length:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "error": "Invalid typed array length: -1",
+            "fetches": []
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-per-model",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-per-model-a:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-per-model-b:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"Count these synthetic words.\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "memo-key-concatenation",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-memo-key-concatenation:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"helloX\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": []
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fallback-bad-json",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              105,
+              2364,
+              107,
+              155853,
+              106
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-bad-json:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fallback-invalid-utf8",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              105,
+              2364,
+              107,
+              155853,
+              106
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-invalid-utf8:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fallback-repeat-not-cached",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              105,
+              2364,
+              107,
+              155853,
+              106
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-repeat-not-cached:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              105,
+              2364,
+              107,
+              155853,
+              106
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-repeat-not-cached:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fallback-then-api-success-cache",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              105,
+              2364,
+              107,
+              155853,
+              106
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-then-api-success-cache:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-then-api-success-cache:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": []
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "chat-content-fallback-name-api",
+      "result": {
+        "steps": [
+          {
+            "value": 14,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-content-fallback-name-api:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              },
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-content-fallback-name-api:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"API name\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "chat-content-api-name-fallback",
+      "result": {
+        "steps": [
+          {
+            "value": 13,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-content-api-name-fallback:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              },
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-content-api-name-fallback:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|channel>name\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "chat-same-content-name-fallback",
+      "result": {
+        "steps": [
+          {
+            "value": 13,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-same-content-name-fallback:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              },
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-same-content-name-fallback:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "chat-same-content-name-api-cache",
+      "result": {
+        "steps": [
+          {
+            "value": 16,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-same-content-name-api-cache:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fallback-after-fetch-error",
+      "result": {
+        "steps": [
+          {
+            "error": "synthetic fallback retry failure",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-after-fetch-error:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              105,
+              2364,
+              107,
+              155853,
+              106
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-after-fetch-error:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-after-fetch-error:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fallback-after-malformed-200",
+      "result": {
+        "steps": [
+          {
+            "error": "Unexpected token 'o', \"not JSON\" is not valid JSON",
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-after-malformed-200:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              105,
+              2364,
+              107,
+              155853,
+              106
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-after-malformed-200:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-after-malformed-200:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "fallback-original-utf16",
+      "result": {
+        "steps": [
+          {
+            "value": [
+              236746,
+              478,
+              382,
+              367,
+              368,
+              238,
+              9900
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-fallback-original-utf16:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"a\\ud800B\\u0000after\"}]}]}"
+              }
+            ]
+          }
+        ],
+        "unanswered": 0
+      }
+    },
+    {
+      "id": "chat-fallback-cross-call-memo",
+      "result": {
+        "steps": [
+          {
+            "value": 15,
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-fallback-cross-call-memo:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              },
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-fallback-cross-call-memo:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"cached name\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": [
+              0,
+              0
+            ],
+            "fetches": [
+              {
+                "url": "https://generativelanguage.googleapis.com/v1beta/models/gc-chat-fallback-cross-call-memo:countTokens?key=synthetic-google-key",
+                "method": "POST",
+                "headers": [
+                  [
+                    "Content-Type",
+                    "application/json"
+                  ]
+                ],
+                "body": "{\"contents\":[{\"parts\":[{\"text\":\"<|turn>user\\nFallback<turn|>\"}]}]}"
+              }
+            ]
+          },
+          {
+            "value": 12,
+            "fetches": []
+          }
+        ],
+        "unanswered": 0
+      }
+    }
+  ]
+}
