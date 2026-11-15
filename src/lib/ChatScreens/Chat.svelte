@@ -4,6 +4,7 @@
     import { activeRerollConversations } from 'src/ts/durableReroll'
     import { innerWidth } from 'svelte/reactivity/window'
     import { doingChat } from 'src/ts/process/index.svelte'
+    import { captureNativeGenerationMessageEdit } from 'src/ts/process/generationState'
     import { ArrowLeft, ArrowLeftRightIcon, ArrowRight, BookmarkIcon, BotIcon, CopyIcon, PowerOff, GitBranch, HamburgerIcon, LanguagesIcon, MenuIcon, PencilIcon, RefreshCcwIcon, SplitIcon, TrashIcon, UserIcon, Volume2Icon, Scissors } from "@lucide/svelte"
     import { aiLawApplies, changeChatTo, foldChatToMessage, getFileSrc, createChatCopyName } from "src/ts/globalApi.svelte"
     import { ColorSchemeTypeStore } from "src/ts/gui/colorscheme"
@@ -198,6 +199,10 @@
         return retainedLayout
     })
     let captureTheme = $derived(presentedLayout.theme)
+    // Without the message buttons a long press on the inline editor is the only way to finish editing.
+    let editButtonShown = $derived(captureTheme === 'customHTML'
+        ? !!presentedLayout.gui?.querySelector('risubuttons')
+        : captureTheme !== 'mobilechat')
     let captureIconSize = $derived(captureSettings?.iconSize ?? DBState.db.iconsize)
     let captureZoomSize = $derived(captureSettings?.zoomSize ?? DBState.db.zoomsize)
     let captureLineHeight = $derived(captureSettings?.lineHeight ?? DBState.db.lineHeight ?? 1.25)
@@ -560,9 +565,16 @@
     }
 
     async function edit(){
-        if (mutationBlocked()) return false
         const retainedIntent = editIntent
         const retainedTarget = editTarget
+        const retainedEvidence = editEvidence
+        const retainedDraft = editDraft
+        const target = retainedIntent?.selection ?? (retainedTarget ? {
+            characterId: retainedTarget.character.chaId, conversationId: retainedTarget.conversation.id,
+        } : null)
+        const nativeEdit = target?.conversationId && !$activeRerollConversations.includes(target.conversationId)
+            ? captureNativeGenerationMessageEdit({ characterId: target.characterId, conversationId: target.conversationId }) : null
+        if (!nativeEdit && mutationBlocked()) return false
         const acquired = await acquireEditMessage(
             retainedIntent,
             retainedTarget,
@@ -570,9 +582,15 @@
         )
         if (!acquired) return reportRowActionRefused()
         try {
-            if (mutationBlocked()) return false
-            if (retainedTarget && !isEqual(resolveChatMessageTarget(retainedTarget, chatMessageContext)?.message, editEvidence)) return reportRowActionRefused()
-            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, editDraft)
+            if (!editMode || editIntent !== retainedIntent || editTarget !== retainedTarget || editDraft !== retainedDraft) return reportRowActionRefused()
+            if (retainedTarget && !isEqual(resolveChatMessageTarget(retainedTarget, chatMessageContext)?.message, retainedEvidence)) return reportRowActionRefused()
+            if (nativeEdit) {
+                const current = acquired.target
+                if ((current.kind !== 'session' && current.kind !== 'windowed') || !current.conversation.id
+                    || $activeRerollConversations.includes(current.conversation.id)
+                    || !nativeEdit.isCurrent({ characterId: current.character.chaId, conversationId: current.conversation.id })) return reportRowActionRefused()
+            } else if (mutationBlocked()) return false
+            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, retainedDraft)
             if (result.saved) {
                 editIntent = null
                 editTarget = null
@@ -1168,7 +1186,7 @@
         }} />
     {/if}
     {#if inlineEditMode}
-        <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} />
+        <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} touchLongPress={!editButtonShown} />
     {:else if isComment}
         <div class="w-full flex justify-center text-textcolor2 italic mb-12">
 
@@ -1283,13 +1301,13 @@
                 {#if (innerWidth.current ?? 0) >= 640}
                     {@render majorIconButtonsBody(false)}
                     {@render pluginMessageButtons(false)}
-                    {#if DBState.db.characters[selIdState.selId]}
+                    {#if DBState.db.characters[selIdState.selId] && idx > -1}
                         <PopupButton>
                             {@render minorIconButtonsBody(true)}
                         </PopupButton>
                     {/if}
                 {:else}
-                    {#if DBState.db.characters[selIdState.selId]}
+                    {#if DBState.db.characters[selIdState.selId] && (idx > -1 || (DBState.db.useChatCopy && !blankMessage))}
                         <PopupButton>
                             {@render majorIconButtonsBody(true)}
                             {@render pluginMessageButtons(true)}
@@ -1574,7 +1592,12 @@
             {/if}
         </button>
     {/if}
-    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => rm(e, true)}>
+    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => {
+        // A held press ends without the click that closes the action popup.
+        popupStore.children = null
+        popupStore.openId = 0
+        rm(e, true)
+    }}>
             <TrashIcon size={20}/>
 
             {#if showNames}
@@ -1634,7 +1657,8 @@
 {/snippet}
 
 {#snippet minorIconButtonsBody(showNames:boolean)}
-    
+    <!-- These act on a stored message, which the greeting row is not. -->
+    {#if idx > -1}
     {#if DBState.db.enableBookmark}
         <button class="flex items-center hover:text-blue-500 transition-colors button-icon-bookmark {isBookmarked ? 'text-yellow-400' : ''}" onclick={async () => {
             if (mutationBlocked()) return
@@ -1717,6 +1741,7 @@
             <span class="ml-1">{language.disableAbove}</span>
         {/if}
     </button>
+    {/if}
 {/snippet}
 
 {#snippet senderIcon(options:{rounded?:boolean,styleFix?:string} = {})}

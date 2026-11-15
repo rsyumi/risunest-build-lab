@@ -1,0 +1,3559 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-google.oracle.test.ts",
+  "fixtureSha256": "64c6a823a369e6b04f4108a8b2bf18af1cee6d4ae3e3a8f1ca2cfe0b1fc86100",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/process/request/google.ts": "0baf7e190c31d0b95ed862c37546e513b8fc3c6704d0771e291947abdd0db30b",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/globalApi.svelte.ts": "74c285e0038f8e1d033e267e1f3374fd925e1d3d73870cb97e811712e1ff2f0c",
+    "src/ts/model/types.ts": "676f450344e842cd5a4bddfbdb09cda220c351c98c07a5ab36f54b30a9441caf",
+    "src/ts/process/templates/jsonSchema.ts": "3306d98d052e2972e0d38344c8174e3e5ff83798a2f6694496240d9a958abef7"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "text-one-chunk",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Hello world"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-chunk-per-event",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Hello"
+            },
+            {
+              "0": "Hello world"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-split-mid-line",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Hi"
+            },
+            {
+              "0": "Hi!"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-chunk-ends-after-data-line",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-last-line-without-newline",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-crlf",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "data-without-space-ignored",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "B"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "non-data-lines-ignored",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "data-line-padded-with-spaces",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "empty-text-part-ignored",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "part-without-text-ignored",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "several-parts-in-one-event",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "second-candidate-ignored",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "unicode-text",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "日本語"
+            },
+            {
+              "0": "日本語 😀"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "multibyte-split-between-chunks",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A���"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "bom-at-chunk-start",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "empty-stream",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": []
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "empty-chunks",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thought-then-text",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\n\nHmm. \n\n</Thoughts>\n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nHmm. \n\n</Thoughts>\n\nAnswer."
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thought-then-text-one-chunk",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\n\nHmm. \n\n</Thoughts>\n\nAnswer."
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thought-only",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\n\nOnly.\n\n</Thoughts>\n\n"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thoughts-accumulate-without-separator",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\n\nA\n\n</Thoughts>\n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nAB\n\n</Thoughts>\n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nABC\n\n</Thoughts>\n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nABC\n\n</Thoughts>\n\nDone"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-thought-text",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "<Thoughts>\n\nB\n\n</Thoughts>\n\nA"
+            },
+            {
+              "0": "<Thoughts>\n\nB\n\n</Thoughts>\n\nAC"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thought-with-stream-thoughts-on",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Hmm. \n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nHmm. \n\n</Thoughts>\n\nAnswer."
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thought-only-with-stream-thoughts-on",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Only.\n\n"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thoughts-accumulate-with-stream-thoughts-on",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A\n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nA\n\n</Thoughts>\n\nB\n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nAB\n\n</Thoughts>\n\nC\n\n"
+            },
+            {
+              "0": "<Thoughts>\n\nABC\n\n</Thoughts>\n\nDone"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-thought-text-with-stream-thoughts-on",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "B\n\nA"
+            },
+            {
+              "0": "<Thoughts>\n\nB\n\n</Thoughts>\n\nAC"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thought-false-is-content",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "thought-signature-without-setting-is-ignored",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "vertex-text",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro-vertex",
+          "internalID": "gemini-2.5-pro",
+          "format": 6,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 3
+        },
+        "requests": [
+          {
+            "url": "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-synthetic/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer ya29.cached-synthetic"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "<Thoughts>\n\nB\n\n</Thoughts>\n\nA"
+            },
+            {
+              "0": "<Thoughts>\n\nB\n\n</Thoughts>\n\nAC"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "done-line-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "done-line-in-the-same-chunk",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": []
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "done-line-last-without-newline",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "done-line-padded",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "malformed-json-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "malformed-last-line-is-retried",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "data-null-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "data-number-and-string-and-array-are-fine",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "empty-data-line-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "parts-null-is-fine",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "parts-string-is-fine",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "parts-empty-string-is-fine",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "parts-number-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "parts-object-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "parts-true-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "part-null-ends-the-snapshots",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "part-primitives-are-fine",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "candidates-empty-and-missing",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "candidates-object-with-zero-key",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-number-declines",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "5"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "text-after-text-object-declines",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A[object Object]"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "usage-metadata",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "usage-metadata-and-model-status",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "B"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-500",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "upstream broke"
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-400-json",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"error\":{\"message\":\"API key not valid.\"}}"
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-500-empty",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": ""
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-201-is-not-a-stream",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "created"
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-429-exhausted",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}",
+          "failByServerError": true
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-429-exhausted-vertex",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro-vertex",
+          "internalID": "gemini-2.5-pro",
+          "format": 6,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 3
+        },
+        "requests": [
+          {
+            "url": "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-synthetic/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer ya29.cached-synthetic"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}",
+          "failByServerError": true
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-429-exhausted-anti-overload-retries",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          },
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "After retry."
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-429-exhausted-anti-overload-vertex-no-retry",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro-vertex",
+          "internalID": "gemini-2.5-pro",
+          "format": 6,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 3
+        },
+        "requests": [
+          {
+            "url": "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-synthetic/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "Authorization",
+                "Bearer ya29.cached-synthetic"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\"}}",
+          "failByServerError": true
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-429-without-marker-no-retry",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "slow down"
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "status-500-bom",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "fail",
+          "result": "broken"
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "id": "function-call-after-text-declines",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]},\"tools\":{\"functionDeclarations\":[{\"name\":\"lookup\",\"description\":\"Looks a word up.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The word.\"}},\"required\":[\"query\"]}}]}}"
+          },
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]},{\"role\":\"model\",\"parts\":[{\"text\":\"A\"},{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"query\":\"x\"}}}]},{\"parts\":[{\"functionResponse\":{\"name\":\"lookup\",\"response\":{\"data\":{\"found\":true}}}}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]},\"tools\":{\"functionDeclarations\":[{\"name\":\"lookup\",\"description\":\"Looks a word up.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The word.\"}},\"required\":[\"query\"]}}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A\n\n"
+            },
+            {
+              "0": "A\n\n\n\nDone."
+            }
+          ]
+        },
+        "toolCalls": [
+          {
+            "name": "lookup",
+            "args": {
+              "query": "x"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "function-call-first-declines",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]},\"tools\":{\"functionDeclarations\":[{\"name\":\"lookup\",\"description\":\"Looks a word up.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The word.\"}},\"required\":[\"query\"]}}]}}"
+          },
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]},{\"role\":\"model\",\"parts\":[{\"text\":\"\"},{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"query\":\"x\"}}}]},{\"parts\":[{\"functionResponse\":{\"name\":\"lookup\",\"response\":{\"data\":{\"found\":true}}}}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]},\"tools\":{\"functionDeclarations\":[{\"name\":\"lookup\",\"description\":\"Looks a word up.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The word.\"}},\"required\":[\"query\"]}}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "Done."
+            }
+          ]
+        },
+        "toolCalls": [
+          {
+            "name": "lookup",
+            "args": {
+              "query": "x"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "signature-with-setting-declines",
+      "result": {
+        "model": {
+          "id": "gemini-2.5-pro",
+          "internalID": "gemini-2.5-pro",
+          "format": 5,
+          "flags": [
+            "hasImageInput",
+            "poolSupported",
+            "hasAudioInput",
+            "hasVideoInput",
+            "hasStreaming",
+            "requiresAlternateRole",
+            "geminiThinking",
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "thinking_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ],
+          "provider": 2
+        },
+        "requests": [
+          {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=AIza-synthetic_key&alt=sse",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ]
+            ],
+            "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hello\"}]}],\"generation_config\":{\"maxOutputTokens\":300,\"temperature\":0.8,\"topP\":0.9,\"topK\":40,\"presencePenalty\":0.3,\"frequencyPenalty\":0.2,\"thinkingConfig\":{\"thinkingBudget\":1024,\"includeThoughts\":true}},\"safetySettings\":[{\"category\":\"HARM_CATEGORY_SEXUALLY_EXPLICIT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_DANGEROUS_CONTENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_CIVIC_INTEGRITY\",\"threshold\":\"BLOCK_NONE\"}],\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"}]}}"
+          }
+        ],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        },
+        "toolCalls": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,780 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "novelai": {
+      "token": "sk-synthetic-novelai",
+      "model": ""
+    },
+    "username": "Mina",
+    "NAIsettings": {
+      "topK": 12,
+      "topP": 0.85,
+      "topA": 0.1,
+      "tailFreeSampling": 0.915,
+      "repetitionPenalty": 2.8,
+      "repetitionPenaltyRange": 2048,
+      "repetitionPenaltySlope": 0.02,
+      "repostitionPenaltyPresence": 0,
+      "seperator": "",
+      "frequencyPenalty": 0.03,
+      "presencePenalty": 0,
+      "typicalp": 1,
+      "starter": "",
+      "cfg_scale": 1,
+      "mirostat_tau": 0,
+      "mirostat_lr": 1
+    },
+    "NAIadventure": false,
+    "NAIappendName": true,
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "proxyKey": "sk-synthetic-proxy",
+    "forceReplaceUrl": "https://proxy.example.test/api",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 9,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "kayra",
+      "model": "novelai_kayra",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "multi-turn",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "continued",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "continue": true
+    },
+    {
+      "id": "no-append-name",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "db": {
+        "NAIappendName": false
+      }
+    },
+    {
+      "id": "adventure",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "db": {
+        "NAIadventure": true
+      }
+    },
+    {
+      "id": "adventure-without-names",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "db": {
+        "NAIadventure": true,
+        "NAIappendName": false
+      }
+    },
+    {
+      "id": "named-messages",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "name": "Traveler"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey",
+          "name": "Guide"
+        },
+        {
+          "role": "assistant",
+          "content": "Plain"
+        },
+        {
+          "role": "function",
+          "content": "tool output"
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "new-chat-markers",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "system",
+          "content": "Example",
+          "memo": "NewChatExample"
+        },
+        {
+          "role": "system",
+          "content": "Chat",
+          "memo": "NewChat"
+        },
+        {
+          "role": "system",
+          "content": "[Start a new chat]"
+        },
+        {
+          "role": "system",
+          "content": "Other",
+          "memo": "NewChatX"
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ]
+    },
+    {
+      "id": "separator-and-starter",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "[Start a new chat]"
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "db": {
+        "NAIsettings": {
+          "topK": 12,
+          "topP": 0.85,
+          "topA": 0.1,
+          "tailFreeSampling": 0.915,
+          "repetitionPenalty": 2.8,
+          "repetitionPenaltyRange": 2048,
+          "repetitionPenaltySlope": 0.02,
+          "repostitionPenaltyPresence": 0,
+          "seperator": "\\n***\\n",
+          "frequencyPenalty": 0.03,
+          "presencePenalty": 0,
+          "typicalp": 1,
+          "starter": "\\n---",
+          "cfg_scale": 1,
+          "mirostat_tau": 0,
+          "mirostat_lr": 1
+        }
+      }
+    },
+    {
+      "id": "separator-plain",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "NAIsettings": {
+          "topK": 12,
+          "topP": 0.85,
+          "topA": 0.1,
+          "tailFreeSampling": 0.915,
+          "repetitionPenalty": 2.8,
+          "repetitionPenaltyRange": 2048,
+          "repetitionPenaltySlope": 0.02,
+          "repostitionPenaltyPresence": 0,
+          "seperator": " | ",
+          "frequencyPenalty": 0.03,
+          "presencePenalty": 0,
+          "typicalp": 1,
+          "starter": "",
+          "cfg_scale": 1,
+          "mirostat_tau": 0,
+          "mirostat_lr": 1
+        }
+      }
+    },
+    {
+      "id": "separator-number-declines",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "NAIsettings": {
+          "topK": 12,
+          "topP": 0.85,
+          "topA": 0.1,
+          "tailFreeSampling": 0.915,
+          "repetitionPenalty": 2.8,
+          "repetitionPenaltyRange": 2048,
+          "repetitionPenaltySlope": 0.02,
+          "repostitionPenaltyPresence": 0,
+          "seperator": 5,
+          "frequencyPenalty": 0.03,
+          "presencePenalty": 0,
+          "typicalp": 1,
+          "starter": "",
+          "cfg_scale": 1,
+          "mirostat_tau": 0,
+          "mirostat_lr": 1
+        }
+      },
+      "declines": "nai-settings-text"
+    },
+    {
+      "id": "persona-user-name",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "persona": "Hero"
+    },
+    {
+      "id": "unicode-and-escapes",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "日本語 😀"
+        },
+        {
+          "role": "user",
+          "content": "\"quoted\" \\ back\nline"
+        }
+      ]
+    },
+    {
+      "id": "empty-messages",
+      "model": "novelai",
+      "messages": []
+    },
+    {
+      "id": "max-tokens-argument",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "maxTokens": 77
+    },
+    {
+      "id": "temperature-zero",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "temperature": 0
+      }
+    },
+    {
+      "id": "settings-values",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "NAIsettings": {
+          "topK": 0,
+          "topP": 1,
+          "topA": 0,
+          "tailFreeSampling": 1,
+          "repetitionPenalty": 1,
+          "repetitionPenaltyRange": 2048,
+          "repetitionPenaltySlope": 0.02,
+          "repostitionPenaltyPresence": 0,
+          "seperator": "",
+          "frequencyPenalty": 0,
+          "presencePenalty": 0.5,
+          "typicalp": 0.9,
+          "starter": "",
+          "cfg_scale": 1,
+          "mirostat_tau": 0,
+          "mirostat_lr": 1
+        }
+      }
+    },
+    {
+      "id": "settings-optional-defaults",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "NAIsettings": {
+          "topK": 12,
+          "topP": 0.85,
+          "topA": 0.1,
+          "tailFreeSampling": 0.915,
+          "repetitionPenalty": 2.8,
+          "repetitionPenaltyRange": 2048,
+          "repetitionPenaltySlope": 0.02,
+          "repostitionPenaltyPresence": 0,
+          "seperator": "",
+          "frequencyPenalty": 0.03,
+          "presencePenalty": 0,
+          "typicalp": 1,
+          "starter": ""
+        }
+      }
+    },
+    {
+      "id": "settings-optional-null",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "NAIsettings": {
+          "topK": 12,
+          "topP": 0.85,
+          "topA": 0.1,
+          "tailFreeSampling": 0.915,
+          "repetitionPenalty": 2.8,
+          "repetitionPenaltyRange": 2048,
+          "repetitionPenaltySlope": 0.02,
+          "repostitionPenaltyPresence": 0,
+          "seperator": "",
+          "frequencyPenalty": 0.03,
+          "presencePenalty": 0,
+          "typicalp": 1,
+          "starter": "",
+          "cfg_scale": null,
+          "mirostat_tau": null,
+          "mirostat_lr": null
+        }
+      }
+    },
+    {
+      "id": "settings-optional-values",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "NAIsettings": {
+          "topK": 12,
+          "topP": 0.85,
+          "topA": 0.1,
+          "tailFreeSampling": 0.915,
+          "repetitionPenalty": 2.8,
+          "repetitionPenaltyRange": 2048,
+          "repetitionPenaltySlope": 0.02,
+          "repostitionPenaltyPresence": 0,
+          "seperator": "",
+          "frequencyPenalty": 0.03,
+          "presencePenalty": 0,
+          "typicalp": 1,
+          "starter": "",
+          "cfg_scale": 1.5,
+          "mirostat_tau": 5,
+          "mirostat_lr": 0.5
+        }
+      }
+    },
+    {
+      "id": "bias-strings",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "biasString": [
+        [
+          "dragon",
+          2
+        ],
+        [
+          " the",
+          -1.5
+        ],
+        [
+          "none",
+          1
+        ]
+      ],
+      "tokens": {
+        "dragon": [
+          101,
+          102
+        ],
+        " the": [
+          7
+        ]
+      }
+    },
+    {
+      "id": "additional-number",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-nested",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "parameters.min_length",
+            "5"
+          ],
+          [
+            "parameters.prefix",
+            "\"custom\""
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-removes-input",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "input",
+            "{{none}}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-header",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "header::Authorization",
+            "Bearer other"
+          ],
+          [
+            "header::X-Test",
+            "on"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "system-content-replacement",
+      "model": "novelai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      }
+    },
+    {
+      "id": "reverse-proxy-key",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-key",
+      "model": "xcustom:::nai",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "customModels": [
+        {
+          "id": "xcustom:::nai",
+          "name": "N",
+          "internalId": "n",
+          "url": "https://ignored.example.test/",
+          "key": "sk-synthetic-custom",
+          "format": 9,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ]
+    }
+  ]
+}

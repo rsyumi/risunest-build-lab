@@ -1,0 +1,748 @@
+{
+  "schema": 1,
+  "base": {
+    "root": {
+      "formatversion": 3,
+      "botPresetsId": 0,
+      "selectedPersona": 0,
+      "personas": [
+        {
+          "id": "persona-a",
+          "name": "Synthetic user",
+          "personaPrompt": "Synthetic persona.",
+          "note": "Synthetic note.",
+          "icon": "persona-icon"
+        },
+        {
+          "id": "persona-b",
+          "name": "Second user",
+          "personaPrompt": "Second persona.",
+          "note": "",
+          "icon": ""
+        }
+      ],
+      "mainPrompt": "Inactive root main.",
+      "temperature": 99,
+      "maxContext": 1,
+      "promptSettings": {
+        "sendName": true
+      },
+      "seperateModels": {
+        "memory": "root-memory",
+        "emotion": "",
+        "translate": "",
+        "otherAx": ""
+      },
+      "seperateModelsForAxModels": true,
+      "fallbackModels": {
+        "model": [
+          "root-fallback"
+        ],
+        "memory": [],
+        "emotion": [],
+        "translate": [],
+        "otherAx": []
+      },
+      "fallbackWhenBlankResponse": true,
+      "seperateParameters": {
+        "memory": {
+          "temperature": 3
+        },
+        "emotion": {},
+        "translate": {},
+        "otherAx": {},
+        "overrides": {}
+      },
+      "username": "Inactive root user",
+      "requestRetrys": 0,
+      "plugins": [],
+      "modules": [],
+      "enabledModules": [],
+      "loadouts": []
+    },
+    "preset": {
+      "id": "preset-a",
+      "name": "Synthetic preset",
+      "aiModel": "custom",
+      "currentPluginProvider": "synthetic-provider",
+      "mainPrompt": "Synthetic main.",
+      "jailbreak": "Synthetic jailbreak.",
+      "globalNote": "Synthetic global note.",
+      "maxContext": 4000,
+      "maxResponse": 64,
+      "temperature": 70,
+      "promptTemplate": null,
+      "promptPreprocess": false,
+      "formatingOrder": [
+        "main",
+        "description",
+        "personaPrompt",
+        "chats",
+        "lastChat",
+        "jailbreak",
+        "lorebook",
+        "globalNote",
+        "authorNote"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "preset-values"
+    },
+    {
+      "id": "preset-minimal",
+      "preset": {
+        "aiModel": null,
+        "currentPluginProvider": null,
+        "mainPrompt": null,
+        "jailbreak": null,
+        "globalNote": null,
+        "maxContext": null,
+        "maxResponse": null,
+        "temperature": null,
+        "promptTemplate": null,
+        "promptPreprocess": null,
+        "formatingOrder": null
+      }
+    },
+    {
+      "id": "preset-explicit-nulls",
+      "preset": {
+        "promptSettings": null,
+        "NAISettings": null,
+        "regex": null,
+        "reasonEffort": null,
+        "top_p": null,
+        "bias": null,
+        "customFlags": null,
+        "seperateModels": null,
+        "fallbackModels": null,
+        "modelTools": null,
+        "verbosity": null,
+        "thinkingTokens": null
+      }
+    },
+    {
+      "id": "preset-raw-fields",
+      "preset": {
+        "NAIadventure": true,
+        "NAIappendName": false,
+        "localStopStrings": [
+          "stop"
+        ],
+        "repetition_penalty": 1.1,
+        "min_p": 0.05,
+        "top_a": 0.2,
+        "openrouterProvider": {
+          "order": [
+            "a"
+          ]
+        },
+        "dynamicOutput": {
+          "enabled": true
+        },
+        "top_k": 40,
+        "top_p": 0.9
+      }
+    },
+    {
+      "id": "preset-prompt-settings-partial",
+      "preset": {
+        "promptSettings": {
+          "sendName": true,
+          "sendChatAsSystem": true
+        }
+      }
+    },
+    {
+      "id": "preset-prompt-settings-depth",
+      "preset": {
+        "promptSettings": {
+          "assistantPrefill": "",
+          "postEndInnerFormat": "",
+          "sendChatAsSystem": false,
+          "sendName": false,
+          "utilOverride": false,
+          "maxThoughtTagDepth": 2
+        }
+      }
+    },
+    {
+      "id": "preset-nai-partial",
+      "preset": {
+        "NAISettings": {
+          "topK": 5,
+          "cfg_scale": 2
+        }
+      }
+    },
+    {
+      "id": "preset-template-roles",
+      "preset": {
+        "promptTemplate": [
+          {
+            "type": "plain",
+            "type2": "normal",
+            "text": "A",
+            "role": "assistant"
+          },
+          {
+            "type": "jailbreak",
+            "type2": "normal",
+            "text": "B",
+            "role": "char"
+          },
+          {
+            "type": "cot",
+            "type2": "normal",
+            "text": "C",
+            "role": "unknown"
+          },
+          {
+            "type": "persona",
+            "role2": "assistant"
+          },
+          {
+            "type": "description",
+            "role2": "weird"
+          },
+          {
+            "type": "authornote"
+          },
+          {
+            "type": "memory",
+            "role2": null
+          },
+          {
+            "type": "cache",
+            "depth": 1,
+            "role": "bot"
+          },
+          {
+            "type": "cache",
+            "depth": 2,
+            "role": "nobody"
+          },
+          {
+            "type": "chat",
+            "rangeStart": 0,
+            "rangeEnd": "end"
+          },
+          null
+        ]
+      }
+    },
+    {
+      "id": "preset-template-object",
+      "preset": {
+        "promptTemplate": {
+          "type": "plain"
+        }
+      }
+    },
+    {
+      "id": "preset-renamed-fields",
+      "preset": {
+        "regex": [
+          {
+            "type": "editprocess",
+            "in": "a",
+            "out": "b"
+          }
+        ],
+        "reasonEffort": 3,
+        "NAISettings": {
+          "topK": 2
+        }
+      }
+    },
+    {
+      "id": "protected-separate-models-stored",
+      "root": {
+        "doNotChangeSeperateModels": true,
+        "protectedPresetValues": {
+          "seperateModels": {
+            "memory": "protected-memory",
+            "emotion": "",
+            "translate": "",
+            "otherAx": ""
+          },
+          "seperateModelsForAxModels": false
+        }
+      },
+      "preset": {
+        "seperateModels": {
+          "memory": "preset-memory",
+          "emotion": "",
+          "translate": "",
+          "otherAx": ""
+        },
+        "seperateModelsForAxModels": true
+      }
+    },
+    {
+      "id": "protected-separate-models-root",
+      "root": {
+        "doNotChangeSeperateModels": true
+      },
+      "preset": {
+        "seperateModels": {
+          "memory": "preset-memory",
+          "emotion": "",
+          "translate": "",
+          "otherAx": ""
+        }
+      }
+    },
+    {
+      "id": "protected-separate-models-off",
+      "root": {
+        "doNotChangeSeperateModels": false,
+        "protectedPresetValues": {
+          "seperateModels": {
+            "memory": "protected-memory",
+            "emotion": "",
+            "translate": "",
+            "otherAx": ""
+          }
+        }
+      },
+      "preset": {
+        "seperateModels": {
+          "memory": "preset-memory",
+          "emotion": "",
+          "translate": "",
+          "otherAx": ""
+        }
+      }
+    },
+    {
+      "id": "protected-fallback-partial",
+      "root": {
+        "doNotChangeFallbackModels": true,
+        "protectedPresetValues": {
+          "fallbackWhenBlankResponse": false
+        }
+      },
+      "preset": {
+        "fallbackModels": {
+          "model": [
+            "preset-fallback"
+          ],
+          "memory": [],
+          "emotion": [],
+          "translate": [],
+          "otherAx": []
+        },
+        "fallbackWhenBlankResponse": true
+      }
+    },
+    {
+      "id": "protected-parameters",
+      "root": {
+        "disableSeperateParameterChangeOnPresetChange": true
+      },
+      "preset": {
+        "seperateParameters": {
+          "memory": {
+            "temperature": 1
+          },
+          "emotion": {},
+          "translate": {},
+          "otherAx": {},
+          "overrides": {}
+        }
+      }
+    },
+    {
+      "id": "protected-parameters-stored",
+      "root": {
+        "disableSeperateParameterChangeOnPresetChange": true,
+        "protectedPresetValues": {
+          "seperateParameters": {
+            "memory": {
+              "top_p": 0.5
+            },
+            "emotion": {},
+            "translate": {},
+            "otherAx": {},
+            "overrides": {}
+          }
+        }
+      }
+    },
+    {
+      "id": "preset-parameters-own",
+      "preset": {
+        "seperateParameters": {
+          "memory": {
+            "temperature": 1
+          },
+          "emotion": {},
+          "translate": {},
+          "otherAx": {},
+          "overrides": {}
+        }
+      }
+    },
+    {
+      "id": "persona-second",
+      "root": {
+        "selectedPersona": 1
+      }
+    },
+    {
+      "id": "persona-missing-fields",
+      "root": {
+        "personas": [
+          {
+            "id": "persona-a",
+            "name": "Only name"
+          }
+        ]
+      }
+    },
+    {
+      "id": "persona-out-of-range",
+      "root": {
+        "selectedPersona": 7
+      }
+    },
+    {
+      "id": "persona-unknown-id",
+      "root": {
+        "selectedPersona": 1
+      },
+      "edit": {
+        "set": {
+          "selectedPersona": "persona-missing"
+        }
+      }
+    },
+    {
+      "id": "persona-absent",
+      "root": {
+        "selectedPersona": 1
+      },
+      "edit": {
+        "removed": [
+          "selectedPersona"
+        ]
+      }
+    },
+    {
+      "id": "persona-negative",
+      "root": {
+        "selectedPersona": 1
+      },
+      "edit": {
+        "set": {
+          "selectedPersona": -1
+        }
+      }
+    },
+    {
+      "id": "persona-fractional",
+      "root": {
+        "selectedPersona": 1
+      },
+      "edit": {
+        "set": {
+          "selectedPersona": 0.5
+        }
+      }
+    },
+    {
+      "id": "persona-non-number",
+      "root": {
+        "selectedPersona": 1
+      },
+      "edit": {
+        "set": {
+          "selectedPersona": true
+        }
+      }
+    },
+    {
+      "id": "persona-list-absent",
+      "stored": {
+        "removed": [
+          "personas"
+        ]
+      }
+    },
+    {
+      "id": "persona-list-absent-unknown-id",
+      "stored": {
+        "removed": [
+          "personas"
+        ]
+      },
+      "edit": {
+        "set": {
+          "selectedPersona": "persona-missing"
+        }
+      }
+    },
+    {
+      "id": "persona-list-absent-negative",
+      "stored": {
+        "removed": [
+          "personas"
+        ]
+      },
+      "edit": {
+        "set": {
+          "selectedPersona": -1
+        }
+      }
+    },
+    {
+      "id": "preset-second-selected",
+      "root": {
+        "botPresetsId": 1
+      }
+    },
+    {
+      "id": "order-without-persona",
+      "preset": {
+        "formatingOrder": [
+          "main",
+          "chats",
+          "lastChat"
+        ]
+      }
+    },
+    {
+      "id": "order-without-main",
+      "preset": {
+        "formatingOrder": [
+          "chats",
+          "lastChat"
+        ]
+      }
+    },
+    {
+      "id": "order-empty",
+      "preset": {
+        "formatingOrder": []
+      }
+    },
+    {
+      "id": "preset-negative",
+      "preset": {
+        "formatingOrder": [
+          "main",
+          "chats",
+          "lastChat"
+        ]
+      },
+      "edit": {
+        "set": {
+          "botPresetsId": -1
+        }
+      }
+    },
+    {
+      "id": "preset-out-of-range",
+      "preset": {
+        "formatingOrder": [
+          "main",
+          "chats",
+          "lastChat"
+        ]
+      },
+      "edit": {
+        "set": {
+          "botPresetsId": 5
+        }
+      }
+    },
+    {
+      "id": "preset-fractional",
+      "preset": {
+        "formatingOrder": [
+          "main",
+          "chats",
+          "lastChat"
+        ]
+      },
+      "edit": {
+        "set": {
+          "botPresetsId": 0.5
+        }
+      }
+    },
+    {
+      "id": "preset-non-number",
+      "preset": {
+        "formatingOrder": [
+          "main",
+          "chats",
+          "lastChat"
+        ]
+      },
+      "edit": {
+        "set": {
+          "botPresetsId": true
+        }
+      }
+    },
+    {
+      "id": "preset-null",
+      "preset": {
+        "formatingOrder": [
+          "main",
+          "chats",
+          "lastChat"
+        ]
+      },
+      "edit": {
+        "set": {
+          "botPresetsId": null
+        }
+      }
+    },
+    {
+      "id": "preset-negative-root-defaults",
+      "edit": {
+        "set": {
+          "botPresetsId": -1,
+          "selectedPersona": -1
+        },
+        "removed": [
+          "apiType",
+          "localNetworkMode",
+          "localNetworkTimeoutSec",
+          "mainPrompt",
+          "jailbreak",
+          "globalNote",
+          "temperature",
+          "maxContext",
+          "maxResponse",
+          "frequencyPenalty",
+          "PresensePenalty",
+          "formatingOrder",
+          "aiModel",
+          "subModel",
+          "currentPluginProvider",
+          "textgenWebUIStreamURL",
+          "textgenWebUIBlockingURL",
+          "forceReplaceUrl",
+          "promptPreprocess",
+          "bias",
+          "koboldURL",
+          "proxyKey",
+          "ooba",
+          "ainconfig",
+          "proxyRequestModel",
+          "openrouterRequestModel",
+          "promptTemplate",
+          "NAIadventure",
+          "NAIappendName",
+          "localStopStrings",
+          "autoSuggestPrompt",
+          "autoSuggestPrefix",
+          "autoSuggestClean",
+          "customProxyRequestModel",
+          "reverseProxyOobaArgs",
+          "top_p",
+          "promptSettings",
+          "repetition_penalty",
+          "min_p",
+          "top_a",
+          "openrouterProvider",
+          "useInstructPrompt",
+          "customPromptTemplateToggle",
+          "templateDefaultVariables",
+          "moduleIntergration",
+          "top_k",
+          "instructChatTemplate",
+          "JinjaTemplate",
+          "jsonSchemaEnabled",
+          "jsonSchema",
+          "strictJsonSchema",
+          "extractJson",
+          "namedMessageRole",
+          "messageNameTemplate",
+          "seperateParametersEnabled",
+          "seperateParameters",
+          "customAPIFormat",
+          "systemContentReplacement",
+          "systemRoleReplacement",
+          "customFlags",
+          "enableCustomFlags",
+          "thinkingTokens",
+          "thinkingType",
+          "deepseekThinkingType",
+          "adaptiveThinkingEffort",
+          "deepseekReasoningEffort",
+          "outputImageModal",
+          "seperateModelsForAxModels",
+          "seperateModels",
+          "modelTools",
+          "fallbackModels",
+          "fallbackWhenBlankResponse",
+          "verbosity",
+          "dynamicOutput",
+          "NAIsettings",
+          "presetRegex",
+          "reasoningEffort",
+          "username",
+          "userIcon",
+          "personaPrompt",
+          "userNote"
+        ]
+      }
+    },
+    {
+      "id": "preset-negative-root-raw",
+      "edit": {
+        "set": {
+          "botPresetsId": -1,
+          "localNetworkMode": "yes",
+          "localNetworkTimeoutSec": "600",
+          "top_p": "1",
+          "NAIadventure": null,
+          "openrouterProvider": "synthetic-provider",
+          "fallbackModels": {
+            "emotion": [
+              ""
+            ],
+            "memory": [
+              "memory-model",
+              ""
+            ],
+            "model": [
+              "",
+              "fallback-model"
+            ],
+            "otherAx": [],
+            "translate": []
+          },
+          "NAIsettings": {
+            "topK": 1
+          },
+          "promptSettings": {
+            "assistantPrefill": "Synthetic prefill."
+          },
+          "seperateParameters": {
+            "memory": {}
+          },
+          "promptTemplate": [
+            {
+              "type": "plain",
+              "type2": "normal",
+              "role": "assistant",
+              "text": "Synthetic card."
+            }
+          ],
+          "formatingOrder": [
+            "chats"
+          ]
+        }
+      }
+    }
+  ]
+}

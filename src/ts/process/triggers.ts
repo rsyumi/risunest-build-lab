@@ -8,7 +8,7 @@ import { v4 } from "uuid";
 import { risuChatParser as risuChatParserGlobal } from "../parser/parser.svelte";
 import type { ActiveConversationPin } from "../storage/activeConversationSession";
 import { getCurrentCharacter, getDatabase, setCharacterByIndex, setDatabase, type Chat, type character } from "../storage/database.svelte";
-import { tokenize } from "../tokenizer";
+import { encodeCounts, tokenize } from "../tokenizer";
 import { getModuleTriggers } from "./modules";
 import { get } from "svelte/store";
 import { ReloadGUIPointer, CurrentTriggerIdStore, DBState } from "../stores.svelte";
@@ -2988,14 +2988,12 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
     }
     
     let caculatedTokens = 0
-    if(additonalSysPrompt.start){
-        caculatedTokens += await tokenize(additonalSysPrompt.start)
-    }
-    if(additonalSysPrompt.historyend){
-        caculatedTokens += await tokenize(additonalSysPrompt.historyend)
-    }
-    if(additonalSysPrompt.promptend){
-        caculatedTokens += await tokenize(additonalSysPrompt.promptend)
+    // The system prompts are counted together, in one request where counts run natively.
+    const sysPrompts = [additonalSysPrompt.start, additonalSysPrompt.historyend, additonalSysPrompt.promptend].filter((prompt) => prompt)
+    if(sysPrompts.length > 0){
+        for(const tokens of await encodeCounts(sysPrompts)){
+            caculatedTokens += tokens
+        }
     }
     if (shouldSetTriggerId && mode !== 'manual') {
         CurrentTriggerIdStore.set(previousTriggerId)

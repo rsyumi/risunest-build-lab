@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "direct-precision-helper-f64-specials-and-rounding",
+      "input": {
+        "vectors": [
+          {
+            "precision": "f64",
+            "values": [
+              "NaN",
+              "Infinity",
+              "-Infinity",
+              "-0",
+              0,
+              1.0000000596046448,
+              1.0000001788139343
+            ]
+          },
+          {
+            "precision": "f32",
+            "bits": [
+              2141266757,
+              2147483648
+            ]
+          },
+          {
+            "precision": "f32",
+            "bits": [
+              0,
+              2141266757,
+              2147483648,
+              0
+            ],
+            "view": {
+              "offset": 1,
+              "length": 2
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

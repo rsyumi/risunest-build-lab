@@ -20,7 +20,7 @@ const reservationAttribute = 'data-risu-image-size'
 const widthProperty = '--risu-image-width'
 const heightProperty = '--risu-image-height'
 
-function supportsImageReservation(): boolean {
+export function supportsImageReservation(): boolean {
     return typeof CSS !== 'undefined' && CSS.supports('contain', 'size') &&
         CSS.supports('contain-intrinsic-size', '1px 1px')
 }

@@ -1,0 +1,4905 @@
+{
+ "schema": "risunest-cbs-ledger/1",
+ "generator": "benchmarks/rust-cbs/ledger.mjs",
+ "sourceSha256": {
+  "src/ts/cbs.ts": "b56f4bd8aba12032c4c79dae7aafacd811d131e088733ffa4cd243fdc23e331b",
+  "src/ts/parser/parser.svelte.ts": "de53094046b85b8587a681915c5472b9ee4e0b104bb8768345639396f6f29570",
+  "src/ts/gui/codearea/cbsMonaco.ts": "8beab542eac49d2501286fc589bdbdb2671e5156a6518dfbd5bb10c5d9016844"
+ },
+ "counts": {
+  "registrations": 176,
+  "runtimeRegistrations": 150,
+  "reachableKeys": 215,
+  "registrationStatus": {
+   "native": 100,
+   "host": 59,
+   "display": 16,
+   "unsupported": 1
+  },
+  "structural": 107,
+  "structuralStatus": {
+   "native": 101,
+   "host": 6,
+   "display": 0,
+   "unsupported": 0
+  },
+  "adapterStatus": {
+   "native": 80,
+   "decline": 1,
+   "pending": 0
+  }
+ },
+ "registrations": [
+  {
+   "id": "char",
+   "name": "char",
+   "aliases": [
+    "bot"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "char",
+    "bot"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "char",
+    "bot"
+   ],
+   "monaco": {
+    "name": "char",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the selected character (database) or the matcher chara argument",
+   "adapter": "native"
+  },
+  {
+   "id": "user",
+   "name": "user",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "user"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "user"
+   ],
+   "monaco": {
+    "name": "user",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the persona user name; the experiment serves it from the context snapshot user",
+   "adapter": "native"
+  },
+  {
+   "id": "trigger_id",
+   "name": "trigger_id",
+   "aliases": [
+    "triggerid"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "trigger_id",
+    "triggerid"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "triggerid"
+   ],
+   "monaco": {
+    "name": "trigger_id",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the current trigger id (store or matcher triggerId)",
+   "adapter": "native"
+  },
+  {
+   "id": "previouscharchat",
+   "name": "previouscharchat",
+   "aliases": [
+    "previouscharchat",
+    "lastcharmessage"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "previouscharchat",
+    "lastcharmessage"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "previouscharchat",
+    "lastcharmessage"
+   ],
+   "monaco": {
+    "name": "previouscharchat",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "searches conversation history by role and falls back to greetings",
+   "adapter": "native"
+  },
+  {
+   "id": "previoususerchat",
+   "name": "previoususerchat",
+   "aliases": [
+    "previoususerchat",
+    "lastusermessage"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "previoususerchat",
+    "lastusermessage"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "previoususerchat",
+    "lastusermessage"
+   ],
+   "monaco": {
+    "name": "previoususerchat",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "searches conversation history by role and falls back to greetings",
+   "adapter": "native"
+  },
+  {
+   "id": "personality",
+   "name": "personality",
+   "aliases": [
+    "charpersona"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "personality",
+    "charpersona"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "personality",
+    "charpersona"
+   ],
+   "monaco": {
+    "name": "personality",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character card fields and reparses them",
+   "adapter": "native"
+  },
+  {
+   "id": "description",
+   "name": "description",
+   "aliases": [
+    "chardesc"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "description",
+    "chardesc"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "description",
+    "chardesc"
+   ],
+   "monaco": {
+    "name": "description",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character card fields and reparses them",
+   "adapter": "native"
+  },
+  {
+   "id": "scenario",
+   "name": "scenario",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "scenario"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "scenario"
+   ],
+   "monaco": {
+    "name": "scenario",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character card fields and reparses them",
+   "adapter": "native"
+  },
+  {
+   "id": "exampledialogue",
+   "name": "exampledialogue",
+   "aliases": [
+    "examplemessage",
+    "example_dialogue"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "exampledialogue",
+    "examplemessage",
+    "example_dialogue"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "exampledialogue",
+    "examplemessage"
+   ],
+   "monaco": {
+    "name": "exampledialogue",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character card fields and reparses them",
+   "adapter": "native"
+  },
+  {
+   "id": "persona",
+   "name": "persona",
+   "aliases": [
+    "userpersona"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "persona",
+    "userpersona"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "persona",
+    "userpersona"
+   ],
+   "monaco": {
+    "name": "persona",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the persona prompt and reparses it",
+   "adapter": "native"
+  },
+  {
+   "id": "mainprompt",
+   "name": "mainprompt",
+   "aliases": [
+    "systemprompt",
+    "main_prompt"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "mainprompt",
+    "systemprompt",
+    "main_prompt"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "mainprompt",
+    "systemprompt"
+   ],
+   "monaco": {
+    "name": "mainprompt",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database prompt text and reparses it",
+   "adapter": "native"
+  },
+  {
+   "id": "lorebook",
+   "name": "lorebook",
+   "aliases": [
+    "worldinfo"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "lorebook",
+    "worldinfo"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "lorebook",
+    "worldinfo"
+   ],
+   "monaco": {
+    "name": "lorebook",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character, chat and module lorebooks",
+   "adapter": "native"
+  },
+  {
+   "id": "userhistory",
+   "name": "userhistory",
+   "aliases": [
+    "usermessages",
+    "user_history"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "userhistory",
+    "usermessages",
+    "user_history"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "userhistory",
+    "usermessages"
+   ],
+   "monaco": {
+    "name": "userhistory",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads conversation history and reparses each message",
+   "adapter": "native"
+  },
+  {
+   "id": "charhistory",
+   "name": "charhistory",
+   "aliases": [
+    "charmessages",
+    "char_history"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "charhistory",
+    "charmessages",
+    "char_history"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "charhistory",
+    "charmessages"
+   ],
+   "monaco": {
+    "name": "charhistory",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads conversation history and reparses each message",
+   "adapter": "native"
+  },
+  {
+   "id": "jb",
+   "name": "jb",
+   "aliases": [
+    "jailbreak"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "jb",
+    "jailbreak"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "jb",
+    "jailbreak"
+   ],
+   "monaco": {
+    "name": "jb",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database prompt text and reparses it",
+   "adapter": "native"
+  },
+  {
+   "id": "globalnote",
+   "name": "globalnote",
+   "aliases": [
+    "globalnote",
+    "systemnote",
+    "ujb"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "globalnote",
+    "systemnote",
+    "ujb"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "globalnote",
+    "systemnote",
+    "ujb"
+   ],
+   "monaco": {
+    "name": "globalnote",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database prompt text and reparses it",
+   "adapter": "native"
+  },
+  {
+   "id": "authornote",
+   "name": "authornote",
+   "aliases": [
+    "author_note"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "authornote",
+    "author_note"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "authornote"
+   ],
+   "monaco": {
+    "name": "authornote",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the chat note or prompt template default and reparses it",
+   "adapter": "native"
+  },
+  {
+   "id": "chatindex",
+   "name": "chatindex",
+   "aliases": [
+    "chat_index"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "chatindex",
+    "chat_index"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "chatindex"
+   ],
+   "monaco": {
+    "name": "chatindex",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the invocation chat index; the experiment serves it from the context snapshot index",
+   "adapter": "native"
+  },
+  {
+   "id": "firstmsgindex",
+   "name": "firstmsgindex",
+   "aliases": [
+    "firstmessageindex",
+    "first_msg_index"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "firstmsgindex",
+    "firstmessageindex",
+    "first_msg_index"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "firstmsgindex",
+    "firstmessageindex"
+   ],
+   "monaco": {
+    "name": "firstmsgindex",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the selected chat greeting index",
+   "adapter": "native"
+  },
+  {
+   "id": "blank",
+   "name": "blank",
+   "aliases": [
+    "none"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "blank",
+    "none"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "blank",
+    "none"
+   ],
+   "monaco": {
+    "name": "blank",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "constant text (cbs::families)"
+  },
+  {
+   "id": "messagetime",
+   "name": "messagetime",
+   "aliases": [
+    "message_time"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "messagetime",
+    "message_time"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "messagetime"
+   ],
+   "monaco": {
+    "name": "messagetime",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads message timestamps, the clock and the local time zone",
+   "adapter": "native"
+  },
+  {
+   "id": "messagedate",
+   "name": "messagedate",
+   "aliases": [
+    "message_date"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "messagedate",
+    "message_date"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "messagedate"
+   ],
+   "monaco": {
+    "name": "messagedate",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads message timestamps, the clock and the local time zone",
+   "adapter": "native"
+  },
+  {
+   "id": "messageunixtimearray",
+   "name": "messageunixtimearray",
+   "aliases": [
+    "message_unixtime_array"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "messageunixtimearray",
+    "message_unixtime_array"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "messageunixtimearray"
+   ],
+   "monaco": {
+    "name": "messageunixtimearray",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads message timestamps from history",
+   "adapter": "native"
+  },
+  {
+   "id": "unixtime",
+   "name": "unixtime",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "unixtime"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "unixtime"
+   ],
+   "monaco": {
+    "name": "unixtime",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the clock (currentTime or Date.now)",
+   "adapter": "native"
+  },
+  {
+   "id": "time",
+   "name": "time",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "time"
+   ],
+   "shadowedKeys": [
+    "time"
+   ],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "time",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "shadowed by the later time registration, which reads the clock and local time zone",
+   "adapter": "decline",
+   "adapterNote": "unsupported-operator: the later time registration shadows it, so no key reaches it; the product never calls it"
+  },
+  {
+   "id": "isotime",
+   "name": "isotime",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "isotime"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "isotime"
+   ],
+   "monaco": {
+    "name": "isotime",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the clock (currentTime or Date.now)",
+   "adapter": "native"
+  },
+  {
+   "id": "isodate",
+   "name": "isodate",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "isodate"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "isodate"
+   ],
+   "monaco": {
+    "name": "isodate",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads the clock (currentTime or Date.now)",
+   "adapter": "native"
+  },
+  {
+   "id": "messageidleduration",
+   "name": "messageidleduration",
+   "aliases": [
+    "message_idle_duration"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "messageidleduration",
+    "message_idle_duration"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "messageidleduration"
+   ],
+   "monaco": {
+    "name": "messageidleduration",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads message timestamps, the clock and the local time zone",
+   "adapter": "native"
+  },
+  {
+   "id": "idleduration",
+   "name": "idleduration",
+   "aliases": [
+    "idle_duration"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "idleduration",
+    "idle_duration"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "idleduration"
+   ],
+   "monaco": {
+    "name": "idleduration",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads message timestamps, the clock and the local time zone",
+   "adapter": "native"
+  },
+  {
+   "id": "br",
+   "name": "br",
+   "aliases": [
+    "newline"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "br",
+    "newline"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "br",
+    "newline"
+   ],
+   "monaco": {
+    "name": "br",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "constant text (cbs::families)"
+  },
+  {
+   "id": "model",
+   "name": "model",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "model"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "model"
+   ],
+   "monaco": {
+    "name": "model",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database model and prompt settings",
+   "adapter": "native"
+  },
+  {
+   "id": "axmodel",
+   "name": "axmodel",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "axmodel"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "axmodel"
+   ],
+   "monaco": {
+    "name": "axmodel",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database model and prompt settings",
+   "adapter": "native"
+  },
+  {
+   "id": "role",
+   "name": "role",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "role"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "role"
+   ],
+   "monaco": {
+    "name": "role",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads invocation conditions and the current history row",
+   "adapter": "native"
+  },
+  {
+   "id": "isfirstmsg",
+   "name": "isfirstmsg",
+   "aliases": [
+    "isfirstmsg",
+    "isfirstmessage"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "isfirstmsg",
+    "isfirstmessage"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "isfirstmsg",
+    "isfirstmessage"
+   ],
+   "monaco": {
+    "name": "isfirstmsg",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads invocation conditions and the current history row",
+   "adapter": "native"
+  },
+  {
+   "id": "jbtoggled",
+   "name": "jbtoggled",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "jbtoggled"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "jbtoggled"
+   ],
+   "monaco": {
+    "name": "jbtoggled",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database model and prompt settings",
+   "adapter": "native"
+  },
+  {
+   "id": "maxcontext",
+   "name": "maxcontext",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "maxcontext"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "maxcontext"
+   ],
+   "monaco": {
+    "name": "maxcontext",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database model and prompt settings",
+   "adapter": "native"
+  },
+  {
+   "id": "lastmessage",
+   "name": "lastmessage",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "lastmessage"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "lastmessage"
+   ],
+   "monaco": {
+    "name": "lastmessage",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads conversation history (prepared history capture in the compat lane)",
+   "adapter": "native"
+  },
+  {
+   "id": "lastmessageid",
+   "name": "lastmessageid",
+   "aliases": [
+    "lastmessageindex"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "lastmessageid",
+    "lastmessageindex"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "lastmessageid",
+    "lastmessageindex"
+   ],
+   "monaco": {
+    "name": "lastmessageid",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads conversation history (prepared history capture in the compat lane)",
+   "adapter": "native"
+  },
+  {
+   "id": "tempvar",
+   "name": "tempvar",
+   "aliases": [
+    "gettempvar"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "tempvar",
+    "gettempvar"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "tempvar",
+    "gettempvar"
+   ],
+   "monaco": {
+    "name": "tempvar",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "invocation-local temporary variables and early return (cbs::parser)"
+  },
+  {
+   "id": "settempvar",
+   "name": "settempvar",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "settempvar"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "settempvar"
+   ],
+   "monaco": {
+    "name": "settempvar",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "invocation-local temporary variables and early return (cbs::parser)"
+  },
+  {
+   "id": "return",
+   "name": "return",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "return"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "return"
+   ],
+   "monaco": {
+    "name": "return",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "invocation-local temporary variables and early return (cbs::parser)"
+  },
+  {
+   "id": "getvar",
+   "name": "getvar",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "getvar"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "getvar"
+   ],
+   "monaco": {
+    "name": "getvar",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads chat variables; the experiment serves reads from the context snapshot variables",
+   "adapter": "native"
+  },
+  {
+   "id": "calc",
+   "name": "calc",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "calc"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "calc"
+   ],
+   "monaco": {
+    "name": "calc",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "arithmetic expression port (cbs::calc); $name and @name references read the variable store and are refused"
+  },
+  {
+   "id": "addvar",
+   "name": "addvar",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "addvar"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "addvar"
+   ],
+   "monaco": {
+    "name": "addvar",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "writes chat variables (compat effect lane only; refused by the ordinary lane)",
+   "adapter": "native"
+  },
+  {
+   "id": "setvar",
+   "name": "setvar",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "setvar"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "setvar"
+   ],
+   "monaco": {
+    "name": "setvar",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "writes chat variables (compat effect lane only; refused by the ordinary lane)",
+   "adapter": "native"
+  },
+  {
+   "id": "setdefaultvar",
+   "name": "setdefaultvar",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "setdefaultvar"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "setdefaultvar"
+   ],
+   "monaco": {
+    "name": "setdefaultvar",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "writes chat variables (compat effect lane only; refused by the ordinary lane)",
+   "adapter": "native"
+  },
+  {
+   "id": "getglobalvar",
+   "name": "getglobalvar",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "getglobalvar"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "getglobalvar"
+   ],
+   "monaco": {
+    "name": "getglobalvar",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads global chat variables; the experiment serves reads from the context snapshot globals",
+   "adapter": "native"
+  },
+  {
+   "id": "button",
+   "name": "button",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "button"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "button"
+   ],
+   "monaco": {
+    "name": "button",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string templates over arguments and invocation display mode (cbs::families)"
+  },
+  {
+   "id": "risu",
+   "name": "risu",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "risu"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "risu"
+   ],
+   "monaco": {
+    "name": "risu",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string templates over arguments and invocation display mode (cbs::families)"
+  },
+  {
+   "id": "equal",
+   "name": "equal",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "equal"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "equal"
+   ],
+   "monaco": {
+    "name": "equal",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "notequal",
+   "name": "notequal",
+   "aliases": [
+    "not_equal"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "notequal",
+    "not_equal"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "notequal"
+   ],
+   "monaco": {
+    "name": "notequal",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "greater",
+   "name": "greater",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "greater"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "greater"
+   ],
+   "monaco": {
+    "name": "greater",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "less",
+   "name": "less",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "less"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "less"
+   ],
+   "monaco": {
+    "name": "less",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "greaterequal",
+   "name": "greaterequal",
+   "aliases": [
+    "greater_equal"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "greaterequal",
+    "greater_equal"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "greaterequal"
+   ],
+   "monaco": {
+    "name": "greaterequal",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "lessequal",
+   "name": "lessequal",
+   "aliases": [
+    "less_equal"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "lessequal",
+    "less_equal"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "lessequal"
+   ],
+   "monaco": {
+    "name": "lessequal",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "and",
+   "name": "and",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "and"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "and"
+   ],
+   "monaco": {
+    "name": "and",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "or",
+   "name": "or",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "or"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "or"
+   ],
+   "monaco": {
+    "name": "or",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "not",
+   "name": "not",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "not"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "not"
+   ],
+   "monaco": {
+    "name": "not",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "comparison and logic over arguments (cbs::families)"
+  },
+  {
+   "id": "file",
+   "name": "file",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "file"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "file"
+   ],
+   "monaco": {
+    "name": "file",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string templates over arguments and invocation display mode (cbs::families)"
+  },
+  {
+   "id": "startswith",
+   "name": "startswith",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "startswith"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "startswith"
+   ],
+   "monaco": {
+    "name": "startswith",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "endswith",
+   "name": "endswith",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "endswith"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "endswith"
+   ],
+   "monaco": {
+    "name": "endswith",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "contains",
+   "name": "contains",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "contains"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "contains"
+   ],
+   "monaco": {
+    "name": "contains",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "replace",
+   "name": "replace",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "replace"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "replace"
+   ],
+   "monaco": {
+    "name": "replace",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "split",
+   "name": "split",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "split"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "split"
+   ],
+   "monaco": {
+    "name": "split",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "join",
+   "name": "join",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "join"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "join"
+   ],
+   "monaco": {
+    "name": "join",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "spread",
+   "name": "spread",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "spread"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "spread"
+   ],
+   "monaco": {
+    "name": "spread",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "trim",
+   "name": "trim",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "trim"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "trim"
+   ],
+   "monaco": {
+    "name": "trim",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "length",
+   "name": "length",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "length"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "length"
+   ],
+   "monaco": {
+    "name": "length",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "arraylength",
+   "name": "arraylength",
+   "aliases": [
+    "arraylength"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "arraylength"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "arraylength"
+   ],
+   "monaco": {
+    "name": "arraylength",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "lower",
+   "name": "lower",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "lower"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "lower"
+   ],
+   "monaco": {
+    "name": "lower",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "upper",
+   "name": "upper",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "upper"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "upper"
+   ],
+   "monaco": {
+    "name": "upper",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "capitalize",
+   "name": "capitalize",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "capitalize"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "capitalize"
+   ],
+   "monaco": {
+    "name": "capitalize",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "round",
+   "name": "round",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "round"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "round"
+   ],
+   "monaco": {
+    "name": "round",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "floor",
+   "name": "floor",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "floor"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "floor"
+   ],
+   "monaco": {
+    "name": "floor",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "ceil",
+   "name": "ceil",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "ceil"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "ceil"
+   ],
+   "monaco": {
+    "name": "ceil",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "abs",
+   "name": "abs",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "abs"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "abs"
+   ],
+   "monaco": {
+    "name": "abs",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "remaind",
+   "name": "remaind",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "remaind"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "remaind"
+   ],
+   "monaco": {
+    "name": "remaind",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "previouschatlog",
+   "name": "previouschatlog",
+   "aliases": [
+    "previous_chat_log"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "previouschatlog",
+    "previous_chat_log"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "previouschatlog"
+   ],
+   "monaco": {
+    "name": "previouschatlog",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads conversation history (prepared history capture in the compat lane)",
+   "adapter": "native"
+  },
+  {
+   "id": "tonumber",
+   "name": "tonumber",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "tonumber"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "tonumber"
+   ],
+   "monaco": {
+    "name": "tonumber",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "pow",
+   "name": "pow",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "pow"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "pow"
+   ],
+   "monaco": {
+    "name": "pow",
+    "isBlock": false
+   },
+   "status": "unsupported",
+   "reason": "Math.pow results are engine-approximated; native power is not assumed bit-exact (contract or tolerance candidate, see crate README)"
+  },
+  {
+   "id": "arrayelement",
+   "name": "arrayelement",
+   "aliases": [
+    "arrayelement"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "arrayelement"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "arrayelement"
+   ],
+   "monaco": {
+    "name": "arrayelement",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "dictelement",
+   "name": "dictelement",
+   "aliases": [
+    "dictelement",
+    "objectelement"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "dictelement",
+    "objectelement"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "dictelement",
+    "objectelement"
+   ],
+   "monaco": {
+    "name": "dictelement",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON object family (cbs::families); prototype-property lookups are refused"
+  },
+  {
+   "id": "objectassert",
+   "name": "objectassert",
+   "aliases": [
+    "dictassert",
+    "object_assert"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "objectassert",
+    "dictassert",
+    "object_assert"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "objectassert",
+    "dictassert"
+   ],
+   "monaco": {
+    "name": "objectassert",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON object family (cbs::families); prototype-property lookups are refused"
+  },
+  {
+   "id": "element",
+   "name": "element",
+   "aliases": [
+    "ele"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "element",
+    "ele"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "element",
+    "ele"
+   ],
+   "monaco": {
+    "name": "element",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON object family (cbs::families); prototype-property lookups are refused"
+  },
+  {
+   "id": "arrayshift",
+   "name": "arrayshift",
+   "aliases": [
+    "arrayshift"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "arrayshift"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "arrayshift"
+   ],
+   "monaco": {
+    "name": "arrayshift",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "arraypop",
+   "name": "arraypop",
+   "aliases": [
+    "arraypop"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "arraypop"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "arraypop"
+   ],
+   "monaco": {
+    "name": "arraypop",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "arraypush",
+   "name": "arraypush",
+   "aliases": [
+    "arraypush"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "arraypush"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "arraypush"
+   ],
+   "monaco": {
+    "name": "arraypush",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "arraysplice",
+   "name": "arraysplice",
+   "aliases": [
+    "arraysplice"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "arraysplice"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "arraysplice"
+   ],
+   "monaco": {
+    "name": "arraysplice",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "arrayassert",
+   "name": "arrayassert",
+   "aliases": [
+    "arrayassert"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "arrayassert"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "arrayassert"
+   ],
+   "monaco": {
+    "name": "arrayassert",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "makearray",
+   "name": "makearray",
+   "aliases": [
+    "array",
+    "a",
+    "makearray"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "makearray",
+    "array",
+    "a"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "makearray",
+    "array",
+    "a"
+   ],
+   "monaco": {
+    "name": "makearray",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "makedict",
+   "name": "makedict",
+   "aliases": [
+    "dict",
+    "d",
+    "makedict",
+    "makeobject",
+    "object",
+    "o"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "makedict",
+    "dict",
+    "d",
+    "makeobject",
+    "object",
+    "o"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "makedict",
+    "dict",
+    "d",
+    "makeobject",
+    "object",
+    "o"
+   ],
+   "monaco": {
+    "name": "makedict",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON object family (cbs::families); prototype-property lookups are refused"
+  },
+  {
+   "id": "emotionlist",
+   "name": "emotionlist",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "emotionlist"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "emotionlist"
+   ],
+   "monaco": {
+    "name": "emotionlist",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character assets",
+   "adapter": "native"
+  },
+  {
+   "id": "assetlist",
+   "name": "assetlist",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "assetlist"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "assetlist"
+   ],
+   "monaco": {
+    "name": "assetlist",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character assets",
+   "adapter": "native"
+  },
+  {
+   "id": "prefillsupported",
+   "name": "prefillsupported",
+   "aliases": [
+    "prefill_supported",
+    "prefill"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "prefillsupported",
+    "prefill_supported",
+    "prefill"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "prefillsupported",
+    "prefill"
+   ],
+   "monaco": {
+    "name": "prefillsupported",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads database model and prompt settings",
+   "adapter": "native"
+  },
+  {
+   "id": "screenwidth",
+   "name": "screenwidth",
+   "aliases": [
+    "screen_width"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "screenwidth",
+    "screen_width"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "screenwidth"
+   ],
+   "monaco": {
+    "name": "screenwidth",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "reads the WebView viewport size",
+   "adapter": "native"
+  },
+  {
+   "id": "screenheight",
+   "name": "screenheight",
+   "aliases": [
+    "screen_height"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "screenheight",
+    "screen_height"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "screenheight"
+   ],
+   "monaco": {
+    "name": "screenheight",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "reads the WebView viewport size",
+   "adapter": "native"
+  },
+  {
+   "id": "cbr",
+   "name": "cbr",
+   "aliases": [
+    "cnl",
+    "cnewline"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "cbr",
+    "cnl",
+    "cnewline"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "cbr",
+    "cnl",
+    "cnewline"
+   ],
+   "monaco": {
+    "name": "cbr",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "decbo",
+   "name": "decbo",
+   "aliases": [
+    "displayescapedcurlybracketopen"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "decbo",
+    "displayescapedcurlybracketopen"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "decbo",
+    "displayescapedcurlybracketopen"
+   ],
+   "monaco": {
+    "name": "decbo",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "decbc",
+   "name": "decbc",
+   "aliases": [
+    "displayescapedcurlybracketclose"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "decbc",
+    "displayescapedcurlybracketclose"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "decbc",
+    "displayescapedcurlybracketclose"
+   ],
+   "monaco": {
+    "name": "decbc",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "bo",
+   "name": "bo",
+   "aliases": [
+    "ddecbo",
+    "doubledisplayescapedcurlybracketopen"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "bo",
+    "ddecbo",
+    "doubledisplayescapedcurlybracketopen"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "bo",
+    "ddecbo",
+    "doubledisplayescapedcurlybracketopen"
+   ],
+   "monaco": {
+    "name": "bo",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "bc",
+   "name": "bc",
+   "aliases": [
+    "ddecbc",
+    "doubledisplayescapedcurlybracketclose"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "bc",
+    "ddecbc",
+    "doubledisplayescapedcurlybracketclose"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "bc",
+    "ddecbc",
+    "doubledisplayescapedcurlybracketclose"
+   ],
+   "monaco": {
+    "name": "bc",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "displayescapedbracketopen",
+   "name": "displayescapedbracketopen",
+   "aliases": [
+    "debo",
+    "("
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "displayescapedbracketopen",
+    "debo",
+    "("
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "displayescapedbracketopen",
+    "debo",
+    "("
+   ],
+   "monaco": {
+    "name": "displayescapedbracketopen",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "displayescapedbracketclose",
+   "name": "displayescapedbracketclose",
+   "aliases": [
+    "debc",
+    ")"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "displayescapedbracketclose",
+    "debc",
+    ")"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "displayescapedbracketclose",
+    "debc",
+    ")"
+   ],
+   "monaco": {
+    "name": "displayescapedbracketclose",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "displayescapedanglebracketopen",
+   "name": "displayescapedanglebracketopen",
+   "aliases": [
+    "deabo",
+    "<"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "displayescapedanglebracketopen",
+    "deabo",
+    "<"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "displayescapedanglebracketopen",
+    "deabo",
+    "<"
+   ],
+   "monaco": {
+    "name": "displayescapedanglebracketopen",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "displayescapedanglebracketclose",
+   "name": "displayescapedanglebracketclose",
+   "aliases": [
+    "deabc",
+    ">"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "displayescapedanglebracketclose",
+    "deabc",
+    ">"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "displayescapedanglebracketclose",
+    "deabc",
+    ">"
+   ],
+   "monaco": {
+    "name": "displayescapedanglebracketclose",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "displayescapedcolon",
+   "name": "displayescapedcolon",
+   "aliases": [
+    "dec",
+    ":"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "displayescapedcolon",
+    "dec",
+    ":"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "displayescapedcolon",
+    "dec"
+   ],
+   "monaco": {
+    "name": "displayescapedcolon",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "displayescapedsemicolon",
+   "name": "displayescapedsemicolon",
+   "aliases": [
+    ";"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "displayescapedsemicolon",
+    ";"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "displayescapedsemicolon",
+    ";"
+   ],
+   "monaco": {
+    "name": "displayescapedsemicolon",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "escape and separator characters (cbs::families)"
+  },
+  {
+   "id": "chardisplayasset",
+   "name": "chardisplayasset",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "chardisplayasset"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "chardisplayasset"
+   ],
+   "monaco": {
+    "name": "chardisplayasset",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads character assets",
+   "adapter": "native"
+  },
+  {
+   "id": "history",
+   "name": "history",
+   "aliases": [
+    "messages"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "history",
+    "messages"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "history",
+    "messages"
+   ],
+   "monaco": {
+    "name": "history",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads conversation history and reparses each message",
+   "adapter": "native"
+  },
+  {
+   "id": "range",
+   "name": "range",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "range"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "range"
+   ],
+   "monaco": {
+    "name": "range",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "date",
+   "name": "date",
+   "aliases": [
+    "datetimeformat"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "date",
+    "datetimeformat"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "date",
+    "datetimeformat"
+   ],
+   "monaco": {
+    "name": "date",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "formats the clock or a timestamp in the local time zone with Intl month and weekday names",
+   "adapter": "native"
+  },
+  {
+   "id": "time@2",
+   "name": "time",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "time"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "time"
+   ],
+   "monaco": {
+    "name": "time",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "formats the clock or a timestamp in the local time zone with Intl month and weekday names",
+   "adapter": "native"
+  },
+  {
+   "id": "moduleenabled",
+   "name": "moduleenabled",
+   "aliases": [
+    "module_enabled"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "moduleenabled",
+    "module_enabled"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "moduleenabled"
+   ],
+   "monaco": {
+    "name": "moduleenabled",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads enabled modules",
+   "adapter": "native"
+  },
+  {
+   "id": "moduleassetlist",
+   "name": "moduleassetlist",
+   "aliases": [
+    "module_assetlist"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "moduleassetlist",
+    "module_assetlist"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "moduleassetlist"
+   ],
+   "monaco": {
+    "name": "moduleassetlist",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads enabled modules",
+   "adapter": "native"
+  },
+  {
+   "id": "filter",
+   "name": "filter",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "filter"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "filter"
+   ],
+   "monaco": {
+    "name": "filter",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "all",
+   "name": "all",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "all"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "all"
+   ],
+   "monaco": {
+    "name": "all",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "any",
+   "name": "any",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "any"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "any"
+   ],
+   "monaco": {
+    "name": "any",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "JSON array family (cbs::array_ops, cbs::families)"
+  },
+  {
+   "id": "min",
+   "name": "min",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "min"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "min"
+   ],
+   "monaco": {
+    "name": "min",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "aggregate family (cbs::aggregates)"
+  },
+  {
+   "id": "max",
+   "name": "max",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "max"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "max"
+   ],
+   "monaco": {
+    "name": "max",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "aggregate family (cbs::aggregates)"
+  },
+  {
+   "id": "sum",
+   "name": "sum",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "sum"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "sum"
+   ],
+   "monaco": {
+    "name": "sum",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "aggregate family (cbs::aggregates)"
+  },
+  {
+   "id": "average",
+   "name": "average",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "average"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "average"
+   ],
+   "monaco": {
+    "name": "average",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "aggregate family (cbs::aggregates)"
+  },
+  {
+   "id": "fixnum",
+   "name": "fixnum",
+   "aliases": [
+    "fixnum",
+    "fixnumber"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "fixnum",
+    "fixnumber"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "fixnum",
+    "fixnumber"
+   ],
+   "monaco": {
+    "name": "fixnum",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "unicodeencode",
+   "name": "unicodeencode",
+   "aliases": [
+    "unicode_encode"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "unicodeencode",
+    "unicode_encode"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "unicodeencode"
+   ],
+   "monaco": {
+    "name": "unicodeencode",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "unicodedecode",
+   "name": "unicodedecode",
+   "aliases": [
+    "unicode_decode"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "unicodedecode",
+    "unicode_decode"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "unicodedecode"
+   ],
+   "monaco": {
+    "name": "unicodedecode",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "u",
+   "name": "u",
+   "aliases": [
+    "unicodedecodefromhex"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "u",
+    "unicodedecodefromhex"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "u",
+    "unicodedecodefromhex"
+   ],
+   "monaco": {
+    "name": "u",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "ue",
+   "name": "ue",
+   "aliases": [
+    "unicodeencodefromhex"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "ue",
+    "unicodeencodefromhex"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "ue",
+    "unicodeencodefromhex"
+   ],
+   "monaco": {
+    "name": "ue",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "hash",
+   "name": "hash",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "hash"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "hash"
+   ],
+   "monaco": {
+    "name": "hash",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "deterministic hash (cbs::deterministic_hash)"
+  },
+  {
+   "id": "randint",
+   "name": "randint",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "randint"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "randint"
+   ],
+   "monaco": {
+    "name": "randint",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "draws Math.random; the experiment serves it from the verification LCG tape",
+   "adapter": "native"
+  },
+  {
+   "id": "dice",
+   "name": "dice",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "dice"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "dice"
+   ],
+   "monaco": {
+    "name": "dice",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "draws Math.random; the experiment serves it from the verification LCG tape",
+   "adapter": "native"
+  },
+  {
+   "id": "fromhex",
+   "name": "fromhex",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "fromhex"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "fromhex"
+   ],
+   "monaco": {
+    "name": "fromhex",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "tohex",
+   "name": "tohex",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "tohex"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "tohex"
+   ],
+   "monaco": {
+    "name": "tohex",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "numeric and code-unit family (cbs::scalar, cbs::families)"
+  },
+  {
+   "id": "metadata",
+   "name": "metadata",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "metadata"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "metadata"
+   ],
+   "monaco": {
+    "name": "metadata",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "reads platform, application version, database language and model metadata",
+   "adapter": "native"
+  },
+  {
+   "id": "iserror",
+   "name": "iserror",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "iserror"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "iserror"
+   ],
+   "monaco": {
+    "name": "iserror",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "xor",
+   "name": "xor",
+   "aliases": [
+    "xorencrypt",
+    "xorencode",
+    "xore"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "xor",
+    "xorencrypt",
+    "xorencode",
+    "xore"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "xor",
+    "xorencrypt",
+    "xorencode",
+    "xore"
+   ],
+   "monaco": {
+    "name": "xor",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "codec family: UTF-8, base64 and code-unit shifts (cbs::families)"
+  },
+  {
+   "id": "xordecrypt",
+   "name": "xordecrypt",
+   "aliases": [
+    "xordecode",
+    "xord"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "xordecrypt",
+    "xordecode",
+    "xord"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "xordecrypt",
+    "xordecode",
+    "xord"
+   ],
+   "monaco": {
+    "name": "xordecrypt",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "codec family: UTF-8, base64 and code-unit shifts (cbs::families)"
+  },
+  {
+   "id": "crypt",
+   "name": "crypt",
+   "aliases": [
+    "crypto",
+    "caesar",
+    "encrypt",
+    "decrypt"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "crypt",
+    "crypto",
+    "caesar",
+    "encrypt",
+    "decrypt"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "crypt",
+    "crypto",
+    "caesar",
+    "encrypt",
+    "decrypt"
+   ],
+   "monaco": {
+    "name": "crypt",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "codec family: UTF-8, base64 and code-unit shifts (cbs::families)"
+  },
+  {
+   "id": "random",
+   "name": "random",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "random"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "random"
+   ],
+   "monaco": {
+    "name": "random",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "draws Math.random; the experiment serves it from the verification LCG tape",
+   "adapter": "native"
+  },
+  {
+   "id": "pick",
+   "name": "pick",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "pick"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "pick"
+   ],
+   "monaco": {
+    "name": "pick",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "derives a deterministic draw from the selected character and chat ids",
+   "adapter": "native"
+  },
+  {
+   "id": "roll",
+   "name": "roll",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "roll"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "roll"
+   ],
+   "monaco": {
+    "name": "roll",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "draws Math.random; the experiment serves it from the verification LCG tape",
+   "adapter": "native"
+  },
+  {
+   "id": "rollp",
+   "name": "rollp",
+   "aliases": [
+    "rollpick"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "rollp",
+    "rollpick"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "rollp",
+    "rollpick"
+   ],
+   "monaco": {
+    "name": "rollp",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "derives a deterministic draw from the selected character and chat ids",
+   "adapter": "native"
+  },
+  {
+   "id": "hiddenkey",
+   "name": "hiddenkey",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "hiddenkey"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "hiddenkey"
+   ],
+   "monaco": {
+    "name": "hiddenkey",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "constant text (cbs::families)"
+  },
+  {
+   "id": "reverse",
+   "name": "reverse",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "reverse"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "reverse"
+   ],
+   "monaco": {
+    "name": "reverse",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string family over UTF-16 units (cbs::families)"
+  },
+  {
+   "id": "comment",
+   "name": "comment",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "comment"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "comment"
+   ],
+   "monaco": {
+    "name": "comment",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string templates over arguments and invocation display mode (cbs::families)"
+  },
+  {
+   "id": "tex",
+   "name": "tex",
+   "aliases": [
+    "latex",
+    "katex"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "tex",
+    "latex",
+    "katex"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "tex",
+    "latex",
+    "katex"
+   ],
+   "monaco": {
+    "name": "tex",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string templates over arguments and invocation display mode (cbs::families)"
+  },
+  {
+   "id": "ruby",
+   "name": "ruby",
+   "aliases": [
+    "furigana"
+   ],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "ruby",
+    "furigana"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "ruby",
+    "furigana"
+   ],
+   "monaco": {
+    "name": "ruby",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string templates over arguments and invocation display mode (cbs::families)"
+  },
+  {
+   "id": "codeblock",
+   "name": "codeblock",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "codeblock"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "codeblock"
+   ],
+   "monaco": {
+    "name": "codeblock",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "string templates over arguments and invocation display mode (cbs::families)"
+  },
+  {
+   "id": "bkspc",
+   "name": "bkspc",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "bkspc"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "bkspc"
+   ],
+   "monaco": {
+    "name": "bkspc",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "edits the current nested output root (cbs::parser)"
+  },
+  {
+   "id": "erase",
+   "name": "erase",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "erase"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "erase"
+   ],
+   "monaco": {
+    "name": "erase",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "edits the current nested output root (cbs::parser)"
+  },
+  {
+   "id": "declare",
+   "name": "declare",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [
+    "declare"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [
+    "declare"
+   ],
+   "monaco": {
+    "name": "declare",
+    "isBlock": false
+   },
+   "status": "host",
+   "reason": "writes the caller-supplied var map",
+   "adapter": "native"
+  },
+  {
+   "id": "//",
+   "name": "//",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "//",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "doc-only: matcher finds no callback and the parser preserves the text"
+  },
+  {
+   "id": "?",
+   "name": "?",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "?",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "doc-only: the '? ' calc form (cbs::calc)"
+  },
+  {
+   "id": "__",
+   "name": "__",
+   "aliases": [],
+   "callback": "function",
+   "internalOnly": true,
+   "deprecated": false,
+   "runtimeKeys": [
+    "__"
+   ],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": null,
+   "status": "native",
+   "reason": "internal-only and unreachable: normalized lookup removes underscores, so the parser preserves it"
+  },
+  {
+   "id": "asset",
+   "name": "asset",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "asset",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "emotion",
+   "name": "emotion",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "emotion",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "audio",
+   "name": "audio",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "audio",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "bg",
+   "name": "bg",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "bg",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "bgm",
+   "name": "bgm",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "bgm",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "video",
+   "name": "video",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "video",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "video-img",
+   "name": "video-img",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "video-img",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "image",
+   "name": "image",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "image",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "img",
+   "name": "img",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "img",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "path",
+   "name": "path",
+   "aliases": [
+    "raw"
+   ],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "path",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "inlay",
+   "name": "inlay",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "inlay",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "inlayed",
+   "name": "inlayed",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "inlayed",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "inlayeddata",
+   "name": "inlayeddata",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "inlayeddata",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "source",
+   "name": "source",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "source",
+    "isBlock": false
+   },
+   "status": "display",
+   "reason": "doc-only: risuChatParser preserves it and the display pipeline renders it (assetRegex)",
+   "adapter": "native"
+  },
+  {
+   "id": "#if",
+   "name": "#if",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": true,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "if",
+    "isBlock": true
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": "#if_pure",
+   "name": "#if_pure",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": true,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "if_pure",
+    "isBlock": true
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": "#when",
+   "name": "#when",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "when",
+    "isBlock": true
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": ":else",
+   "name": ":else",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": ":else",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": "#pure",
+   "name": "#pure",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": true,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "pure",
+    "isBlock": true
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": "#puredisplay",
+   "name": "#puredisplay",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "puredisplay",
+    "isBlock": true
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": "#escape",
+   "name": "#escape",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "escape",
+    "isBlock": true
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": "#each",
+   "name": "#each",
+   "aliases": [
+    ":each"
+   ],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "each",
+    "isBlock": true
+   },
+   "status": "native",
+   "reason": "doc-only block form handled by the stream port (cbs::parser)"
+  },
+  {
+   "id": "slot",
+   "name": "slot",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "slot",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "doc-only: #each slot substitution (cbs::parser)"
+  },
+  {
+   "id": "position",
+   "name": "position",
+   "aliases": [],
+   "callback": "doc_only",
+   "internalOnly": false,
+   "deprecated": false,
+   "runtimeKeys": [],
+   "shadowedKeys": [],
+   "reachableKeys": [],
+   "monaco": {
+    "name": "position",
+    "isBlock": false
+   },
+   "status": "native",
+   "reason": "doc-only: the parser preserves it for lorebook position decorators"
+  }
+ ],
+ "structural": [
+  {
+   "id": "blockMatch:type:ignore",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "ignore",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:parse",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "parse",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:nothing",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "nothing",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:ifpure",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "ifpure",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:pure",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "pure",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:each",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "each",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:function",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "function",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:pure-display",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "pure-display",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:normalize",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "normalize",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:escape",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "escape",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:newif",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "newif",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "blockMatch:type:newif-falsy",
+   "function": "blockMatch",
+   "kind": "type",
+   "value": "newif-falsy",
+   "status": "native",
+   "reason": "block kind (cbs::parser)"
+  },
+  {
+   "id": "initMatcher:compare:doc_only",
+   "function": "initMatcher",
+   "kind": "compare",
+   "value": "doc_only",
+   "status": "native",
+   "reason": "runtime registration table (cbs::families registry, cross-checked against this ledger)"
+  },
+  {
+   "id": "initMatcher:regex:/^[a-z0-9]+$/",
+   "function": "initMatcher",
+   "kind": "regex",
+   "value": "/^[a-z0-9]+$/",
+   "status": "native",
+   "reason": "runtime registration table (cbs::families registry, cross-checked against this ledger)"
+  },
+  {
+   "id": "matcher:startsWith:? ",
+   "function": "matcher",
+   "kind": "startsWith",
+   "value": "? ",
+   "status": "native",
+   "reason": "matcher dispatch port (cbs::parser)"
+  },
+  {
+   "id": "matcher:regex:/[\\s_-]/g",
+   "function": "matcher",
+   "kind": "regex",
+   "value": "/[\\s_-]/g",
+   "status": "native",
+   "reason": "matcher dispatch port (cbs::parser)"
+  },
+  {
+   "id": "matcher:compare::",
+   "function": "matcher",
+   "kind": "compare",
+   "value": ":",
+   "status": "native",
+   "reason": "matcher dispatch port (cbs::parser)"
+  },
+  {
+   "id": "legacyBlockMatcher:case:if",
+   "function": "legacyBlockMatcher",
+   "kind": "case",
+   "value": "if",
+   "status": "native",
+   "reason": "legacy {#if ...#} block port (cbs::parser)"
+  },
+  {
+   "id": "legacyBlockMatcher:includes:[\"\",\"0\",\"-1\"]",
+   "function": "legacyBlockMatcher",
+   "kind": "includes",
+   "value": "[\"\",\"0\",\"-1\"]",
+   "status": "native",
+   "reason": "legacy {#if ...#} block port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#if",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#if",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#if_pure ",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#if_pure ",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:compare:true",
+   "function": "blockStartMatcher",
+   "kind": "compare",
+   "value": "true",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:compare:1",
+   "function": "blockStartMatcher",
+   "kind": "compare",
+   "value": "1",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#if_pure",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#if_pure",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#when",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#when",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#when ",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#when ",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#when::",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#when::",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:not",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "not",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:keep",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "keep",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:legacy",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "legacy",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:and",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "and",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:or",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "or",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:is",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "is",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:isnot",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "isnot",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:var",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "var",
+   "status": "host",
+   "reason": "#when operator reads chat variables; the experiment serves reads from the context snapshot variables",
+   "adapter": "native"
+  },
+  {
+   "id": "blockStartMatcher:case:toggle",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "toggle",
+   "status": "host",
+   "reason": "#when operator reads global toggles; the experiment serves reads from the context snapshot globals",
+   "adapter": "native"
+  },
+  {
+   "id": "blockStartMatcher:case:vis",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "vis",
+   "status": "host",
+   "reason": "#when operator reads chat variables; the experiment serves reads from the context snapshot variables",
+   "adapter": "native"
+  },
+  {
+   "id": "blockStartMatcher:case:visnot",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "visnot",
+   "status": "host",
+   "reason": "#when operator reads chat variables; the experiment serves reads from the context snapshot variables",
+   "adapter": "native"
+  },
+  {
+   "id": "blockStartMatcher:case:tis",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "tis",
+   "status": "host",
+   "reason": "#when operator reads global toggles; the experiment serves reads from the context snapshot globals",
+   "adapter": "native"
+  },
+  {
+   "id": "blockStartMatcher:case:tisnot",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "tisnot",
+   "status": "host",
+   "reason": "#when operator reads global toggles; the experiment serves reads from the context snapshot globals",
+   "adapter": "native"
+  },
+  {
+   "id": "blockStartMatcher:case:>",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": ">",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:<",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "<",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:>=",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": ">=",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:case:<=",
+   "function": "blockStartMatcher",
+   "kind": "case",
+   "value": "<=",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:default:operator",
+   "function": "blockStartMatcher",
+   "kind": "default",
+   "value": "operator",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:default:mode",
+   "function": "blockStartMatcher",
+   "kind": "default",
+   "value": "mode",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:compare:#pure",
+   "function": "blockStartMatcher",
+   "kind": "compare",
+   "value": "#pure",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:compare:#pure_display",
+   "function": "blockStartMatcher",
+   "kind": "compare",
+   "value": "#pure_display",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:compare:#puredisplay",
+   "function": "blockStartMatcher",
+   "kind": "compare",
+   "value": "#puredisplay",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:compare:#code",
+   "function": "blockStartMatcher",
+   "kind": "compare",
+   "value": "#code",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#escape",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#escape",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:compare:::keep",
+   "function": "blockStartMatcher",
+   "kind": "compare",
+   "value": "::keep",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#each",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#each",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:::keep ",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "::keep ",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:as ",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "as ",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockStartMatcher:startsWith:#func",
+   "function": "blockStartMatcher",
+   "kind": "startsWith",
+   "value": "#func",
+   "status": "native",
+   "reason": "block start port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:pure",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "pure",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:pure-display",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "pure-display",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:function",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "function",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:parse",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "parse",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:each",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "each",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:compare:keep",
+   "function": "blockEndMatcher",
+   "kind": "compare",
+   "value": "keep",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:ifpure",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "ifpure",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:newif",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "newif",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:newif-falsy",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "newif-falsy",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:compare:newif",
+   "function": "blockEndMatcher",
+   "kind": "compare",
+   "value": "newif",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:compare:newif-falsy",
+   "function": "blockEndMatcher",
+   "kind": "compare",
+   "value": "newif-falsy",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:compare:{{:else}}",
+   "function": "blockEndMatcher",
+   "kind": "compare",
+   "value": "{{:else}}",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:compare:",
+   "function": "blockEndMatcher",
+   "kind": "compare",
+   "value": "",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:normalize",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "normalize",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:regex:/\\\\u([0-9A-Fa-f]{4})/g",
+   "function": "blockEndMatcher",
+   "kind": "regex",
+   "value": "/\\\\u([0-9A-Fa-f]{4})/g",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:regex:/\\\\(.)/g",
+   "function": "blockEndMatcher",
+   "kind": "regex",
+   "value": "/\\\\(.)/g",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:n",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "n",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:r",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "r",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:t",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "t",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:b",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "b",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:f",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "f",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:v",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "v",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:a",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "a",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:x",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "x",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:default:p1",
+   "function": "blockEndMatcher",
+   "kind": "default",
+   "value": "p1",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:case:escape",
+   "function": "blockEndMatcher",
+   "kind": "case",
+   "value": "escape",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "blockEndMatcher:default:type.type",
+   "function": "blockEndMatcher",
+   "kind": "default",
+   "value": "type.type",
+   "status": "native",
+   "reason": "block end port (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:string",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "string",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:regex:/\\<(user|char|bot)\\>/gi",
+   "function": "risuChatParser",
+   "kind": "regex",
+   "value": "/\\<(user|char|bot)\\>/gi",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:case:{",
+   "function": "risuChatParser",
+   "kind": "case",
+   "value": "{",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:{",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "{",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:#",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "#",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:case:#",
+   "function": "risuChatParser",
+   "kind": "case",
+   "value": "#",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:}",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "}",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:case:}",
+   "function": "risuChatParser",
+   "kind": "case",
+   "value": "}",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:startsWith:#",
+   "function": "risuChatParser",
+   "kind": "startsWith",
+   "value": "#",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:startsWith::",
+   "function": "risuChatParser",
+   "kind": "startsWith",
+   "value": ":",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare::else",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": ":else",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:nothing",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "nothing",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:ignore",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "ignore",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:pure",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "pure",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:each",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "each",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:function",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "function",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:pure-display",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "pure-display",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:escape",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "escape",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:startsWith:/",
+   "function": "risuChatParser",
+   "kind": "startsWith",
+   "value": "/",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:startsWith://",
+   "function": "risuChatParser",
+   "kind": "startsWith",
+   "value": "//",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:keep",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "keep",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:compare:",
+   "function": "risuChatParser",
+   "kind": "compare",
+   "value": "",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:startsWith:call::",
+   "function": "risuChatParser",
+   "kind": "startsWith",
+   "value": "call::",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  },
+  {
+   "id": "risuChatParser:default:da[pointer]",
+   "function": "risuChatParser",
+   "kind": "default",
+   "value": "da[pointer]",
+   "status": "native",
+   "reason": "stream port of risuChatParser (cbs::parser)"
+  }
+ ]
+}

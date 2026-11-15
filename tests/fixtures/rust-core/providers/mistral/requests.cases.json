@@ -1,0 +1,2157 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "cohereAPIKey": "sk-synthetic-cohere",
+    "mistralKey": "sk-synthetic-mistral",
+    "proxyKey": "sk-synthetic-proxy",
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "newOAIHandle": true,
+    "reverseProxyOobaMode": false,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "extractJson": "",
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 4,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "multi-turn",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "no-system",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "user-first-then-assistant",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "empty-messages",
+      "model": "mistral-large-latest",
+      "messages": []
+    },
+    {
+      "id": "system-only",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Only system."
+        }
+      ]
+    },
+    {
+      "id": "consecutive-users-merge",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "One"
+        },
+        {
+          "role": "user",
+          "content": "Two"
+        },
+        {
+          "role": "user",
+          "content": "Three"
+        }
+      ]
+    },
+    {
+      "id": "consecutive-assistants-merge",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "One"
+        },
+        {
+          "role": "assistant",
+          "content": "Two"
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "system-after-user-appends",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "system",
+          "content": "Aside."
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "system-after-assistant-pushes-user",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "system",
+          "content": "Aside."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "system-after-system-merges",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "One."
+        },
+        {
+          "role": "system",
+          "content": "Two."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ]
+    },
+    {
+      "id": "function-role",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Checking."
+        },
+        {
+          "role": "function",
+          "content": "result",
+          "name": "lookup"
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "function-after-user-merges",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "function",
+          "content": "result",
+          "name": "lookup"
+        },
+        {
+          "role": "assistant",
+          "content": "Ok."
+        }
+      ]
+    },
+    {
+      "id": "assistant-first",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ]
+    },
+    {
+      "id": "function-first",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "function",
+          "content": "result",
+          "name": "lookup"
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ]
+    },
+    {
+      "id": "empty-contents-dropped",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "empty-contents-kept-without-new-handle",
+      "model": "mistral-large-latest",
+      "db": {
+        "newOAIHandle": false
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "new-chat-memo-clears-content",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "memo": "NewChat"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "new-chat-memo-kept-without-new-handle",
+      "model": "mistral-large-latest",
+      "db": {
+        "newOAIHandle": false
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "memo": "NewChat"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "other-memo-kept",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "memo": "Other"
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "message-fields-are-ignored",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi",
+          "name": "Alice",
+          "memo": "m",
+          "attr": [
+            "a"
+          ],
+          "removable": true,
+          "cachePoint": true
+        },
+        {
+          "role": "assistant",
+          "content": "Hey",
+          "thoughts": [
+            "t"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unicode-and-escapes",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "日本語 😀"
+        },
+        {
+          "role": "user",
+          "content": "\"quoted\" \\ back\nline  "
+        }
+      ]
+    },
+    {
+      "id": "system-content-replacement",
+      "model": "mistral-large-latest",
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "image-on-assistant-ignored",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "image-on-system-ignored",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Look"
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "image-on-user-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ],
+      "declines": "multimodal-user-message"
+    },
+    {
+      "id": "tool-call-marker-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>k1</tool_call>B"
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ],
+      "decodings": {
+        "k1": {
+          "call": {
+            "id": "call_1",
+            "name": "lookup",
+            "arg": "{}"
+          },
+          "response": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      },
+      "declines": "tool-call-marker"
+    },
+    {
+      "id": "tool-call-marker-in-user-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi <tool_call>k1</tool_call>"
+        }
+      ],
+      "declines": "tool-call-marker"
+    },
+    {
+      "id": "ooba-mode-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "reverseProxyOobaMode": true,
+        "forceReplaceUrl": "https://proxy.example.test/v1"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "reverse-proxy-ooba-mode"
+    },
+    {
+      "id": "developer-role-flag",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6,
+            14
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-mistral-small-latest",
+      "model": "mistral-small-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-mistral-medium-latest",
+      "model": "mistral-medium-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-mistral-large-2411",
+      "model": "mistral-large-2411",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-open-mistral-nemo",
+      "model": "open-mistral-nemo",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "max-tokens",
+      "model": "mistral-large-latest",
+      "maxTokens": 777,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "stream-flag-is-ignored",
+      "model": "mistral-large-latest",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "temperature-disabled",
+      "model": "mistral-large-latest",
+      "db": {
+        "temperature": -1000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "penalties-disabled",
+      "model": "mistral-large-latest",
+      "db": {
+        "frequencyPenalty": -1000,
+        "PresensePenalty": -1000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "top-p-zero",
+      "model": "mistral-large-latest",
+      "db": {
+        "top_p": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "top-k-and-other-parameters-not-sent",
+      "model": "mistral-large-latest",
+      "db": {
+        "top_k": 5,
+        "min_p": 0.5,
+        "top_a": 0.5,
+        "repetition_penalty": 2,
+        "thinkingTokens": 5
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-model",
+      "model": "mistral-large-latest",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "mistral-large-latest": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": -1000,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-submodel",
+      "model": "mistral-large-latest",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "mistral-large-latest": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": -1000,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "mode": "submodel",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-memory",
+      "model": "mistral-large-latest",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "mistral-large-latest": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": -1000,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "mode": "memory",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model-missing-throws",
+      "model": "mistral-large-latest",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {}
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model",
+      "model": "mistral-large-latest",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "mistral-large-latest": {
+              "temperature": 33,
+              "top_k": 6,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.33,
+              "frequency_penalty": 5,
+              "presence_penalty": 5,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-params-are-not-applied",
+      "model": "mistral-large-latest",
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ],
+          [
+            "header::X-Test",
+            "on"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "mistral-key-in-header",
+      "model": "mistral-large-latest",
+      "db": {
+        "mistralKey": "sk-other"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/chat/completions"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-model-is-the-alias",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/x",
+        "customProxyRequestModel": "another"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-url-normalized",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://Proxy.Example.test:8443/a b?x=1#f"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-no-url-declines",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "reverse-proxy-userinfo-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://u:p@proxy.example.test/chat"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "custom-model",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-no-url",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-no-key-uses-mistral-key",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-empty-key-kept",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "raw-system-after-user-appends",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "system",
+          "content": "M"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        }
+      ]
+    },
+    {
+      "id": "raw-system-after-assistant-pushes-user",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "system",
+          "content": "M"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        }
+      ]
+    },
+    {
+      "id": "raw-system-after-system-merges",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "system",
+          "content": "T"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        }
+      ]
+    },
+    {
+      "id": "raw-system-last",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "system",
+          "content": "M"
+        }
+      ]
+    },
+    {
+      "id": "raw-function-after-assistant",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "function",
+          "content": "R",
+          "name": "lookup"
+        },
+        {
+          "role": "assistant",
+          "content": "C"
+        }
+      ]
+    },
+    {
+      "id": "raw-function-after-user-merges",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "function",
+          "content": "R",
+          "name": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "raw-function-first",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "function",
+          "content": "R",
+          "name": "lookup"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        }
+      ]
+    },
+    {
+      "id": "raw-assistant-first",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        }
+      ]
+    },
+    {
+      "id": "raw-user-first-system-second",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "system",
+          "content": "M"
+        },
+        {
+          "role": "user",
+          "content": "B"
+        }
+      ]
+    },
+    {
+      "id": "raw-consecutive-all",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "user",
+          "content": "B"
+        },
+        {
+          "role": "assistant",
+          "content": "C"
+        },
+        {
+          "role": "assistant",
+          "content": "D"
+        },
+        {
+          "role": "system",
+          "content": "E"
+        },
+        {
+          "role": "system",
+          "content": "F"
+        }
+      ]
+    },
+    {
+      "id": "raw-developer-role",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6,
+            14
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "system",
+          "content": "M"
+        }
+      ]
+    },
+    {
+      "id": "raw-developer-after-user",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6,
+            14
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "system",
+          "content": "M"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        }
+      ]
+    },
+    {
+      "id": "raw-empty-first-user-dropped",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "A"
+        }
+      ]
+    },
+    {
+      "id": "raw-empty-contents-kept",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": ""
+        },
+        {
+          "role": "assistant",
+          "content": ""
+        }
+      ],
+      "db": {
+        "newOAIHandle": false
+      }
+    },
+    {
+      "id": "raw-function-media-kept",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 4,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "function",
+          "content": "",
+          "name": "lookup",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "A"
+        }
+      ]
+    },
+    {
+      "id": "other-format-declines",
+      "model": "gpt4o",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "format"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/cbs-host.oracle.test.ts",
+  "fixtureSha256": "ee8715ec86eb39fcfaee6d034ba6ebd4126788780f1d02590248498e3f568058",
+  "tsSourceSha256": {
+    "src/ts/model/modellist.ts": "1c4c97cf87d85b06d891531ef8ab65700a220840f116ba425173d0d8061033ae"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "ollama-hosted",
+      "result": {
+        "json": "{\"id\":\"ollama-hosted\",\"name\":\"Local\",\"fullName\":\"Ollama Local\",\"provider\":16,\"format\":15,\"flags\":[6,8],\"parameters\":[\"temperature\",\"top_p\",\"frequency_penalty\",\"presence_penalty\"],\"tokenizer\":0,\"recommended\":true,\"shortName\":\"Local\",\"internalID\":\"ollama-hosted\"}"
+      }
+    }
+  ]
+}

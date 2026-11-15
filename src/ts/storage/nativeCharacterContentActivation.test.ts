@@ -1,4 +1,7 @@
 import { Buffer } from 'buffer'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { decodePreparedNativePngCardMetadata } from './nativePngCardAdapter'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -14,6 +17,7 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
 }))
 
 import type { character } from './database.svelte'
+import { decryptBuffer } from '../bufferCrypto'
 import type { PreparedImmutablePayload } from './payloadCas'
 import {
     activatePreparedNativeCharacterContent,
@@ -21,11 +25,14 @@ import {
     type NativeCharacterContentActivationDependencies,
 } from './nativeCharacterContentActivation'
 import type {
+    PreparedCardContentAssetDescriptor,
+    PreparedNativeCharacterMapping,
     PreparedNativeContent,
     PreparedNativeContentActivationLifecycle,
 } from './nativeFileJobs'
 import { decodeOwnerManifest, ownerManifestIdentity } from './ownerManifestCodec'
 import { runNativePreparedContentRoute } from './nativePreparedContentRoute'
+import { canonicalClone } from './saveCoordinatorHelpers'
 
 const firstHash = '11'.repeat(32)
 const secondHash = '22'.repeat(32)
@@ -657,7 +664,7 @@ describe('prepared native character content activation', () => {
         expect(deps.upsert).not.toHaveBeenCalled()
     })
 
-    it('keeps v2 JSON on the compatibility importer until native v2 payload extraction exists', async () => {
+    it('keeps v2 JSON on the compatibility importer, even with a native mapping, until native v2 payload extraction exists', async () => {
         const deps = dependencies()
         const session = lifecycle()
 
@@ -668,6 +675,7 @@ describe('prepared native character content activation', () => {
                 spec_version: '2.0',
                 data: { extensions: {} },
             },
+            nativeMapping: { outcome: 'mapped', character: mappedCharacter() as unknown as Record<string, unknown> },
         }, session, deps)).rejects.toBeInstanceOf(UnsupportedPreparedNativeCharacterCardError)
 
         expect(deps.map).not.toHaveBeenCalled()
@@ -739,5 +747,124 @@ describe('prepared native character content activation', () => {
             .rejects.toThrow('revision conflict')
 
         expect(session.prepareOwnerManifestAndSeal).toHaveBeenCalledOnce()
+    })
+})
+
+// The card receipts the import wiring oracle imports as characters, with what the TS activation stored for each,
+// recorded by benchmarks/rust-core-oracles/formats-wiring.oracle.test.ts. `native` is the mapping the Rust receipt
+// carries, and `staged` the PNG inline payloads the TS decode staged.
+type WiringCase = {
+    id: string
+    receipt: PreparedNativeContent
+    native: 'mapped' | { reason: 'unsupported' | 'invalid'; name: string }
+    result: { mapped?: string; stored?: string; manifest?: string; staged?: PreparedCardContentAssetDescriptor[]; error?: string }
+}
+const fixture = (name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `tests/fixtures/rust-core/formats/${name}.json`), 'utf8'))
+const wiringResults = new Map((fixture('wiring.expected').cases as { id: string; result: WiringCase['result'] }[]).map(({ id, result }) => [id, result]))
+const wiringCases = (fixture('wiring.cases').cases as (Omit<WiringCase, 'result'> & { destination?: 'module' })[])
+    .filter((entry) => entry.receipt.format !== 'risu-module' && entry.destination !== 'module')
+    .map((entry) => ({ ...entry, result: wiringResults.get(entry.id)! }))
+const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+
+// The PNG decode the production activation runs, with the RCC password prompt declined.
+const decodePng: NativeCharacterContentActivationDependencies['decodePng'] = async (metadata, stageInlineAsset) =>
+    await decodePreparedNativePngCardMetadata(metadata, {
+        stageInlineAsset,
+        hash: async (bytes) => createHash('sha256').update(bytes).digest('hex'),
+        decrypt: (bytes, password) => decryptBuffer(bytes, password),
+        requestPassword: async () => null,
+    }) as Awaited<ReturnType<NativeCharacterContentActivationDependencies['decodePng']>>
+
+// The record the upsert keeps and the owner manifest the activation seals, as the oracle records them. An inline
+// payload the decode stages becomes the asset the oracle staged for it.
+async function activateReceipt(
+    entry: WiringCase,
+    nativeMapping: PreparedNativeCharacterMapping | undefined,
+    map: NativeCharacterContentActivationDependencies['map'],
+): Promise<{ stored?: string; manifest?: string }> {
+    const receipt: PreparedNativeContent = { ...structuredClone(entry.receipt), ...(nativeMapping === undefined ? {} : { nativeMapping }) }
+    const staged = structuredClone(entry.result.staged ?? [])
+    const kept: { stored?: string; manifest?: string } = {}
+    const session = lifecycle({
+        prepareOwnerManifestAndSeal: vi.fn(async (bytes): Promise<PreparedImmutablePayload> => {
+            kept.manifest = hex(bytes)
+            return {
+                contentHash: await ownerManifestIdentity(bytes),
+                byteSize: bytes.byteLength,
+                physicalKey: 'unused-by-activation',
+                deduplicated: false,
+            }
+        }),
+        stageInlineAsset: vi.fn(async () => {
+            const asset = staged.shift()
+            if (!asset) throw new Error('the oracle staged no further asset')
+            receipt.assets.push(asset)
+            return asset
+        }),
+    })
+    await activatePreparedNativeCharacterContent(receipt, session, dependencies({
+        decodePng,
+        map,
+        upsert: vi.fn(async (_id, _reason, createOrMutate) => {
+            kept.stored = JSON.stringify(canonicalClone(await createOrMutate(undefined)))
+            return true
+        }),
+    }))
+    return kept
+}
+
+describe('native card mapping', () => {
+    const named = <Entry extends WiringCase>(entries: Entry[]) => entries.map((entry) => [entry.id, entry] as const)
+    const mapped = wiringCases.filter((entry) => entry.native === 'mapped')
+    const declined = wiringCases.flatMap((entry) => entry.native === 'mapped' ? [] : [{ ...entry, native: entry.native }])
+    const declinedAndStored = declined.filter((entry) => entry.result.stored !== undefined)
+    const declinedAndFailed = declined.filter((entry) => entry.result.error !== undefined)
+    // What the TS mapping of the entry's card returned or threw, as the oracle recorded it.
+    const tsMapping = (entry: WiringCase) => vi.fn(async () => {
+        if (entry.result.error !== undefined) throw new Error(entry.result.error)
+        return JSON.parse(entry.result.mapped!) as character
+    })
+    const tsMappingRuns = async (): Promise<never> => {
+        throw new Error('the TS mapping ran')
+    }
+    const recorded = (entry: WiringCase) => ({ stored: entry.result.stored, manifest: entry.result.manifest })
+
+    it('replays every wiring receipt', () => {
+        expect([mapped.length, declinedAndStored.length, declinedAndFailed.length]).toEqual([12, 6, 13])
+    })
+
+    // With the Rust receipt test, which proves the native mapping is the text the TS mapping stringifies to, this is
+    // the same card through both paths.
+    it.each(named(mapped))('stores the native mapping of %s exactly as the TS path stores its own', async (_id, entry) => {
+        const character = JSON.parse(entry.result.mapped!) as Record<string, unknown>
+        await expect(activateReceipt(entry, { outcome: 'mapped', character }, tsMappingRuns)).resolves.toEqual(recorded(entry))
+    })
+
+    it.each(named(declinedAndStored))('maps %s in TS where the native mapping declines it', async (_id, entry) => {
+        await expect(activateReceipt(entry, { outcome: 'declined', ...entry.native }, tsMapping(entry))).resolves.toEqual(recorded(entry))
+    })
+
+    // A card the native mapping finds invalid is mapped in TS too, which is the reference: it stores what TS maps.
+    it.each([
+        ['limit', 'maxOwnedBytes'],
+        ['cancelled', ''],
+        ['host', 'stack'],
+        ['failed', 'panic'],
+        ...['card', 'dataUri', 'missingAsset', 'ccdefaultPortrait', 'duplicateAssetToken', 'assetToken', 'portraitLogicalId', 'assetReference']
+            .map((name) => ['invalid', name] as const),
+    ] as const)('maps the card in TS where the native mapping declines it as %s %s', async (reason, name) => {
+        const entry = mapped[0]
+        await expect(activateReceipt(entry, { outcome: 'declined', reason, name }, tsMapping(entry))).resolves.toEqual(recorded(entry))
+    })
+
+    it.each(named(declinedAndFailed))('rejects %s with the exact TS error where the native mapping declines it', async (_id, entry) => {
+        await expect(activateReceipt(entry, { outcome: 'declined', ...entry.native }, tsMapping(entry)))
+            .rejects.toHaveProperty('message', entry.result.error)
+    })
+
+    it('maps a PNG card in TS once its decode staged an inline payload the native mapping did not read', async () => {
+        const entry = wiringCases.find(({ id }) => id === 'png-v3-inline-data-uri')!
+        const elsewhere = JSON.parse(mapped[0].result.mapped!) as Record<string, unknown>
+        await expect(activateReceipt(entry, { outcome: 'mapped', character: elsewhere }, tsMapping(entry))).resolves.toEqual(recorded(entry))
     })
 })

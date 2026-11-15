@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/ir.oracle.test.ts",
+  "fixtureSha256": "14d7def78635e49c93b275203aa7818385c5ad5b6ad901497abb2a88af3e9793",
+  "tsSourceSha256": {},
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "main-site-empty-multimodals",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"Hello\",\"memo\":\"chat-1\",\"attr\":[],\"thoughts\":[]}"
+      }
+    },
+    {
+      "id": "main-site-undefined-memo",
+      "result": {
+        "text": "{\"role\":\"assistant\",\"content\":\"Reply\",\"attr\":[\"nameAdded\"],\"thoughts\":[\"plan\"]}"
+      }
+    },
+    {
+      "id": "main-site-image",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"Look\",\"memo\":\"chat-2\",\"attr\":[],\"multimodals\":[{\"type\":\"image\",\"base64\":\"data:image/png;base64,AAAA\",\"width\":512,\"height\":256}],\"thoughts\":[]}"
+      }
+    },
+    {
+      "id": "image-without-dimensions",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"x\",\"multimodals\":[{\"type\":\"image\",\"base64\":\"data:,\"}]}"
+      }
+    },
+    {
+      "id": "example-assistant",
+      "result": {
+        "text": "{\"role\":\"assistant\",\"content\":\"Hi there\",\"name\":\"example_assistant\"}"
+      }
+    },
+    {
+      "id": "example-user",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"Hello\",\"name\":\"example_user\"}"
+      }
+    },
+    {
+      "id": "new-chat-example",
+      "result": {
+        "text": "{\"role\":\"system\",\"content\":\"[Start a new chat]\",\"memo\":\"NewChatExample\"}"
+      }
+    },
+    {
+      "id": "removable-and-cache-point",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"a\",\"memo\":\"m\",\"removable\":true,\"cachePoint\":true}"
+      }
+    },
+    {
+      "id": "false-flags",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"a\",\"removable\":false,\"cachePoint\":false}"
+      }
+    },
+    {
+      "id": "shuffled-keys",
+      "result": {
+        "text": "{\"role\":\"function\",\"content\":\"c\",\"name\":\"n\",\"memo\":\"m\",\"attr\":[\"x\"],\"thoughts\":[\"t\"],\"removable\":true,\"cachePoint\":true}"
+      }
+    },
+    {
+      "id": "extra-keys",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"x\",\"zeta\":[1,2],\"custom\":1,\"alpha\":null}"
+      }
+    },
+    {
+      "id": "extra-index-keys",
+      "result": {
+        "text": "{\"2\":\"two\",\"10\":\"ten\",\"role\":\"user\",\"content\":\"x\",\"tail\":true}"
+      }
+    },
+    {
+      "id": "extra-undefined",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"x\",\"kept\":0}"
+      }
+    },
+    {
+      "id": "extra-proto-key",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"x\",\"__proto__\":{\"polluted\":true}}"
+      }
+    },
+    {
+      "id": "extra-nested",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"x\",\"meta\":{\"list\":[null,null,\"\\ud800\"],\"empty\":{}}}"
+      }
+    },
+    {
+      "id": "content-escapes",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"quote \\\" backslash \\\\ newline \\n tab \\t \\u0001 \\ud800 😀 한국어  \"}"
+      }
+    },
+    {
+      "id": "empty-content",
+      "result": {
+        "text": "{\"role\":\"system\",\"content\":\"\"}"
+      }
+    },
+    {
+      "id": "all-fields",
+      "result": {
+        "text": "{\"role\":\"assistant\",\"content\":\"c\",\"name\":\"n\",\"memo\":\"m\",\"attr\":[\"a1\",\"a2\"],\"multimodals\":[{\"type\":\"image\",\"base64\":\"data:image/png;base64,AAAA\",\"width\":512,\"height\":256},{\"type\":\"audio\",\"base64\":\"data:audio/mp3;base64,BBBB\"}],\"thoughts\":[\"t1\",\"t2\"],\"removable\":true,\"cachePoint\":false,\"x\":1}"
+      }
+    },
+    {
+      "id": "multimodal-lua-extra",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"x\",\"multimodals\":[{\"5\":5,\"type\":\"image\",\"base64\":\"data:image/png;base64,AAAA\",\"width\":512,\"height\":256,\"caption\":\"cat\"}]}"
+      }
+    },
+    {
+      "id": "multimodal-nonfinite-dimensions",
+      "result": {
+        "text": "{\"role\":\"user\",\"content\":\"x\",\"multimodals\":[{\"type\":\"video\",\"base64\":\"v\",\"width\":null,\"height\":0}]}"
+      }
+    },
+    {
+      "id": "standalone-image",
+      "result": {
+        "text": "{\"type\":\"image\",\"base64\":\"data:image/png;base64,AAAA\",\"width\":512,\"height\":256}"
+      }
+    },
+    {
+      "id": "standalone-shuffled",
+      "result": {
+        "text": "{\"type\":\"signature\",\"base64\":\"b\",\"width\":20,\"height\":10}"
+      }
+    },
+    {
+      "id": "standalone-extra",
+      "result": {
+        "text": "{\"1\":1,\"type\":\"audio\",\"base64\":\"b\",\"note\":\"n\"}"
+      }
+    },
+    {
+      "id": "standalone-isolated-base64",
+      "result": {
+        "text": "{\"type\":\"image\",\"base64\":\"\\udc00\"}"
+      }
+    }
+  ]
+}

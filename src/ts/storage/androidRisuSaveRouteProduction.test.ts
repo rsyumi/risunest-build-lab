@@ -662,3 +662,16 @@ it('keeps the managed plain-JPEG failure as the sole outcome', () => {
     showDestinationRequired(source, 456)
     expect(alertError).toHaveBeenCalledExactlyOnceWith('photo.jpg: localized:destination-required')
 })
+
+it.each(['synthetic.json', 'synthetic.risup'])('discards an interrupted preset picker source %s without replaying import', async displayName => {
+    const discardSource = vi.fn(async () => true)
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { RisuSafBridge: { discardSource } }))
+    backupMocks.replay.mockClear()
+    backupMocks.externalManager.mockClear()
+    try {
+        await expect(importAndroidCharacterSpool({ token: 'synthetic-preset', displayName, bytes: 12, importDestination: 'preset' })).resolves.toEqual({ kind: 'declined' })
+        expect(discardSource).toHaveBeenCalledExactlyOnceWith('synthetic-preset')
+        expect(backupMocks.replay).not.toHaveBeenCalled()
+        expect(backupMocks.externalManager).not.toHaveBeenCalled()
+    } finally { vi.unstubAllGlobals() }
+})

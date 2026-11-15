@@ -273,8 +273,8 @@ impl PersistentStore {
         let device = self.device_store()?;
         readable &= observe_text_rows(
             device.connection(),
-            "SELECT value FROM device_settings WHERE key <> ?1",
-            [PUBLICATION_LEDGER_SETTING],
+            "SELECT value FROM device_settings WHERE key NOT IN (?1, ?2, ?3)",
+            [PUBLICATION_LEDGER_SETTING, super::generation::JOURNAL_KEY, super::lww::NATIVE_RECEIVE_RECEIPT_SETTING],
             false,
             matcher,
         )?;
@@ -859,6 +859,23 @@ pub(super) fn collect_value_owned_keys(value: &serde_json::Value, keys: &mut BTr
 #[cfg(test)]
 mod tests {
     use super::AssetKeyMatcher;
+
+    #[test]
+    fn operational_generation_records_do_not_hold_assets_but_other_settings_do() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::persistent_store::PersistentStore::open(directory.path()).unwrap();
+        let db = store.device_store().unwrap().connection();
+        for (key, asset) in [
+            (crate::persistent_store::generation::JOURNAL_KEY, "assets/operation.png"),
+            ("official-account.pending-assets.v1", "assets/pending.png"),
+            ("native-generation-journal-v1-extra", "assets/other.png"),
+        ] {
+            db.execute("INSERT INTO device_settings(key,value) VALUES(?1,?2)", rusqlite::params![key, serde_json::to_string(asset).unwrap()]).unwrap();
+        }
+        let mut matcher = AssetKeyMatcher::new(["assets/operation.png", "assets/pending.png", "assets/other.png"].map(str::to_owned));
+        assert!(store.observe_asset_key_references(&store.library_identity().unwrap(), &mut matcher).unwrap().is_some());
+        assert_eq!(matcher.unreferenced().collect::<Vec<_>>(), ["assets/operation.png"]);
+    }
 
     fn unreferenced(keys: &[&str], texts: &[&str], plugin: bool) -> Vec<String> {
         let mut matcher = AssetKeyMatcher::new(keys.iter().map(|key| key.to_string()));

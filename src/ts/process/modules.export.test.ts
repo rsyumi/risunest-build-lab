@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     readImage: vi.fn(),
     saveAsset: vi.fn(async (_data: Uint8Array) => ''),
     exportRisum: vi.fn(),
+    invoke: vi.fn(),
 }))
 
 vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({
@@ -21,6 +22,9 @@ vi.mock('../storage/androidContentPicker', () => ({ importAndroidContentFromPick
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }))
 vi.mock('@tauri-apps/plugin-fs', () => ({ readFile: mocks.readFile }))
 vi.mock('../storage/nativeModuleRisumExportRoute', () => ({ exportNativeModuleRisumFromPicker: mocks.exportRisum }))
+vi.mock('@tauri-apps/api/core', async (original) => ({
+    ...(await original<typeof import('@tauri-apps/api/core')>()), invoke: mocks.invoke,
+}))
 vi.mock('../mobileBackgroundTask', async () => (await import('../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 vi.mock('../alert', () => ({
@@ -75,7 +79,7 @@ vi.mock('../characterCards', () => ({
 
 import { get } from 'svelte/store'
 import { language } from 'src/lang'
-import { exportModuleLegacy, importModule, importModuleData, readModule, type RisuModule } from './modules'
+import { exportModuleLegacy, importModule, importModuleData, importPreparedNativeModuleContent, readModule, type RisuModule } from './modules'
 import { DBState } from '../stores.svelte'
 import {
     dismissNativeFileOperationOutcome,
@@ -302,5 +306,19 @@ describe('legacy module export', () => {
             ['ordinary-asset-a', 'asset://roundtrip-a', 'bin', 'first-tail', { rank: 1 }],
             ['ordinary-asset-b', 'asset://roundtrip-b', 'dat', 'second-tail', { rank: 2 }],
         ])
+    })
+
+    // A card picked for a module import is converted by the native job too.
+    it('names the module destination in the native content import request', async () => {
+        mocks.platform = 'desktop'
+        const refused = new Error('synthetic stop after the request')
+        mocks.invoke.mockRejectedValue(refused)
+        const source = { type: 'desktopPath', path: 'C:/synthetic/card.charx' } as const
+
+        await importPreparedNativeModuleContent({ source, displayName: 'card.charx' }).catch(() => undefined)
+
+        expect(mocks.invoke).toHaveBeenCalledWith('native_file_job_start', {
+            request: { kind: 'prepare-content-import', source, displayName: 'card.charx', importDestination: 'module' },
+        })
     })
 })

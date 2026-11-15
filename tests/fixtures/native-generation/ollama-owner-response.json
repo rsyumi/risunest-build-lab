@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "expectationStatus": "source-derived, awaiting real-consumer qualification",
+  "continuePrefix": "Prefix: ",
+  "cases": [
+    {"id":"text-trim","oracleScope":"provider-envelope","content":" \tSynthetic response.\n ","route":"success","output":"Synthetic response."},
+    {"id":"text-empty","oracleScope":"provider-envelope","content":" \t\n ","route":"success","output":""},
+    {"id":"text-pair","oracleScope":"provider-envelope","content":"A\ud83e\udd8a e\u0301","route":"success","output":"A\ud83e\udd8a e\u0301"},
+    {"id":"text-high-unit","oracleScope":"provider-envelope","content":"A\ud800B","route":"success","output":"A\ud800B","nativeOutput":"A\ufffdB"},
+    {"id":"text-low-unit","oracleScope":"provider-envelope","content":"A\udc00B","route":"success","output":"A\udc00B","nativeOutput":"A\ufffdB"},
+    {"id":"array-coercion","oracleScope":"provider-envelope","content":[" alpha ",null,7,["nested","tail"]],"route":"fallback-error","output":"alpha ,,7,nested,tail"},
+    {"id":"array-marker","oracleScope":"provider-envelope","content":["before","Synthetic character:","after"],"route":"adapter-error","output":null},
+    {"id":"array-shadowed-tostring","oracleScope":"provider-envelope","content":[{"toString":0}],"route":"coercion-error","output":null},
+    {"id":"thinking-coerces-number","oracleScope":"provider-envelope","thinking":"Synthetic reasoning.","content":7,"route":"success","adapterOutput":"<Thoughts>\nSynthetic reasoning.\n</Thoughts>\n\n7","output":"<Thoughts>\nSynthetic reasoning.\n</Thoughts>\n\n7"},
+    {"id":"number-without-thinking","oracleScope":"provider-envelope","content":7,"route":"adapter-error","output":null},
+    {"id":"text-cbs","oracleScope":"provider-envelope","content":"Hello {{char}}.","route":"success","output":"Hello Synthetic character."},
+    {"id":"continue-array","oracleScope":"provider-envelope","continue":true,"content":[" alpha ",null,7,["nested","tail"]],"route":"fallback-error","output":"Prefix:  alpha ,,7,nested,tail"},
+    {"id":"continue-high-unit","oracleScope":"provider-envelope","continue":true,"content":"A\ud800B","route":"success","output":"Prefix: A\ud800B","nativeOutput":"Prefix: A\ufffdB"},
+    {"route":"success","id":"output-order-modes","oracleScope":"owner-output","content":"seed","output":"seedLpc","preset":{"regex":[{"type":"editoutput","in":"$","out":"p"},{"type":"editoutput","in":"$","out":"L","flag":"g<order 5>","ableFlag":true}]},"character":{"customscript":[{"type":"editoutput","in":"$","out":"c"},{"type":"editinput","in":"seed","out":"INPUT"},{"type":"editdisplay","in":"seed","out":"DISPLAY"},{"type":"editprocess","in":"question","out":"query"}]}},
+    {"route":"success","id":"output-excluded","oracleScope":"owner-output","content":"seed","output":"seedc","startupExclusions":["regex"],"preset":{"regex":[{"type":"editoutput","in":"$","out":"p"}]},"character":{"customscript":[{"type":"editoutput","in":"$","out":"c"}]}},
+    {"route":"success","id":"output-index-cbs","oracleScope":"owner-output","content":"{{char}} {{getvar::mood}}","output":"Synthetic character calm [4|Synthetic user]","messages":[{"role":"user","data":"First question.","chatId":"out-a"},{"role":"char","data":"Hidden.","chatId":"out-b","disabled":true},{"role":"char","data":"Answer.","chatId":"out-c"},{"role":"user","data":"Final question.","chatId":"out-d"}],"conversation":{"scriptstate":{"$mood":"calm"}},"character":{"customscript":[{"type":"editoutput","in":"calm","out":"calm [{{chatindex}}|{{user}}]"}]}},
+    {"route":"success","id":"output-random","oracleScope":"owner-output","content":"{{random::A::B}}","output":"B X","random":[0.125,0.875,0.375],"preset":{"mainPrompt":"Prompt {{random::P::Q}}."},"character":{"customscript":[{"type":"editoutput","in":"$","out":" {{random::X::Y}}"}]}},
+    {"route":"success","id":"output-tokens","oracleScope":"owner-output","content":"abc","output":"a[b|b|$|a|c]c","character":{"customscript":[{"type":"editoutput","in":"(b)","out":"[$1|$&|$$|$`|$']"}]}},
+    {"route":"success","id":"output-move-newline","oracleScope":"owner-output","content":"abc","output":"B\nacline\nbreak","character":{"customscript":[{"type":"editoutput","in":"b","out":"@@move_top B"},{"type":"editoutput","in":"$","out":"line$nbreak"}]}},
+    {"route":"success","id":"output-invalid-skip","oracleScope":"owner-output","content":"seed","output":"grown","character":{"customscript":[{"type":"editoutput","in":"(","out":"never"},{"type":"editoutput","in":"seed","out":"grown"}]}},
+    {"route":"success","id":"output-static-unsupported","oracleScope":"owner-output","content":"seed","output":"grown","nativeUnsupported":"regex.dynamicPattern","excludedFromNativeAdmission":true,"character":{"customscript":[{"type":"editoutput","in":"{{getvar::needle}}","out":"grown","flag":"g<cbs>","ableFlag":true}]},"conversation":{"scriptstate":{"$needle":"seed"}}},
+    {"route":"success","id":"output-current-chat-write","oracleScope":"owner-output","content":"seed","earlyOutput":"{{setvar::mood::bright}}bright","output":"bright","nativeUnsupported":"regex.replacementCbs","excludedFromNativeAdmission":true,"character":{"customscript":[{"type":"editoutput","in":"seed","out":"{{setvar::mood::bright}}bright"}]}},
+    {"route":"success","id":"output-late-unsupported","oracleScope":"owner-output","content":"{{setvar::mood::bright}}bright","earlyOutput":"{{setvar::mood::bright}}bright","output":"bright","nativeUnsupported":"unsupported-output","excludedFromNativeAdmission":true},
+    {"id":"output-late-fragment-assembly","oracleScope":"owner-output","content":"{setvar::mood::bright}}bright","route":"success","character":{"customscript":[{"type":"editoutput","in":"^","out":"{"}]},"earlyOutput":"{{setvar::mood::bright}}bright","output":"bright","nativeUnsupported":"unsupported-output","excludedFromNativeAdmission":true},
+    {"id":"output-midflight-variable","oracleScope":"owner-output","content":"seed","route":"success","conversation":{"scriptstate":{"$mood":"old","preserve":"value"}},"character":{"customscript":[{"type":"editoutput","in":"seed","out":"{{getvar::mood}}"}]},"midflightVariables":{"mood":"new"},"output":"new"},
+    {
+      "id": "output-selected-module-fresh-defaults",
+      "oracleScope": "owner-output",
+      "route": "success",
+      "content": "seed",
+      "output": "new|new-character|new-template|foreign-new|true|OUT-B",
+      "observeLore": true,
+      "random": [
+        0.125,
+        0.875
+      ],
+      "root": {
+        "modules": [],
+        "enabledModules": [],
+        "personas": [
+          {
+            "id": "persona-a",
+            "name": "Synthetic user",
+            "personaPrompt": "Synthetic persona.",
+            "note": "",
+            "icon": ""
+          },
+          {
+            "id": "persona-b",
+            "name": "Bound user",
+            "personaPrompt": "Bound persona.",
+            "note": "",
+            "icon": "",
+            "embeddedModule": {
+              "id": "module-fresh",
+              "name": "Bound fresh module",
+              "lorebook": [
+                {
+                  "key": "",
+                  "secondkey": "",
+                  "insertorder": 100,
+                  "comment": "module-fresh",
+                  "content": "@@probability 100\n@@keep_activate_after_match\nFresh module lore.",
+                  "mode": "normal",
+                  "alwaysActive": true,
+                  "selective": false,
+                  "id": "module-fresh"
+                }
+              ],
+              "regex": [
+                {
+                  "type": "editoutput",
+                  "in": "seed",
+                  "out": "{{getvar::mood}}|{{getvar::fallback}}|{{getvar::templ}}|{{getvar::foreignFlag}}|{{getvar::__internal_ka_module-fresh}}|{{random::OUT-A::OUT-B}}"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "preset": {
+        "mainPrompt": "Old {{getvar::mood}} {{getvar::fallback}} {{getvar::templ}}.",
+        "templateDefaultVariables": "templ=old-template"
+      },
+      "character": {
+        "defaultVariables": "fallback=old-character"
+      },
+      "conversation": {
+        "bindedPersona": "persona-b",
+        "scriptstate": {
+          "$mood": "old",
+          "preserve": "value"
+        }
+      },
+      "midflightVariables": {
+        "mood": "new",
+        "foreignFlag": "foreign-new"
+      },
+      "midflightDefaults": {
+        "characterDefaultVariables": "fallback=new-character",
+        "presetTemplateDefaultVariables": "templ=new-template"
+      }
+    }
+  ]
+}

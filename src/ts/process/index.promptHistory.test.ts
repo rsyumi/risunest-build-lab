@@ -7,6 +7,8 @@ const testState = vi.hoisted(() => ({
     activeSession: null as unknown,
     runTrigger: vi.fn(),
     onTokenizeChat: null as null | (() => void | Promise<void>),
+    deferChatCounts: false,
+    loreActives: [] as unknown[],
     cbsCallbacks: new Map<string, (...args: any[]) => any>(),
     pluginV2: {
         editprocess: new Set<(content: string) => string | Promise<string>>(),
@@ -61,9 +63,12 @@ vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')
         return chats.length
     },
     tokenizeNum: vi.fn(async () => 1),
+    deferChatCounts: () => testState.deferChatCounts,
 }))
 
-vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule())
+vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule({
+    loadLoreBookV3Prompt: async () => ({ actives: testState.loreActives }),
+}))
 
 vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarness')).requestModule(vi.fn()))
 
@@ -236,6 +241,8 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = null
         testState.runTrigger.mockReset()
         testState.onTokenizeChat = null
+        testState.deferChatCounts = false
+        testState.loreActives = []
         testState.pluginV2.editprocess.clear()
         resetScriptCache()
     })
@@ -273,6 +280,64 @@ describe('sendChat prompt history characterization', () => {
         await expect(sendChat({ preview: true })).resolves.toBe(true)
         expect(previewFormated.map(message => message.content)).toEqual(change === 'adds'
             ? ['newer'] : ['older', 'boundary', 'newer'])
+    })
+
+    it.each([false, true])('trims the oldest history past maxContext with its depth prompt (counted after the loop: %s)', async (deferred) => {
+        const database = makeDatabase()
+        const owner = database.characters[0] as character
+        owner.customscript = []
+        owner.firstMessage = ''
+        owner.chats[0].fmIndex = -1
+        owner.chats[0].message = [
+            { role: 'user', data: 'older', chatId: 'older' },
+            { role: 'user', data: 'middle', chatId: 'middle' },
+            { role: 'user', data: 'newer', chatId: 'newer' },
+        ]
+        // The 50 tokens sendChat reserves, a template prompt, and two chats of one token each.
+        database.maxContext = 53
+        database.promptTemplate = [
+            { type: 'plain', type2: 'normal', role: 'system', text: 'template note' },
+            { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+        ]
+        setDatabaseLite(database)
+        mockTriggerClone()
+        testState.loreActives = [{
+            depth: 1, pos: 'depth', prompt: 'depth note', role: 'system', order: 0, tokens: 1, priority: 0, source: '',
+            inject: null,
+        }]
+        testState.deferChatCounts = deferred
+
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
+        expect(previewFormated.map(message => message.content)).toEqual(['template note', 'newer', 'depth note'])
+    })
+
+    it('runs no editprocess plugin for a later message once a count fails, while counts are deferred', async () => {
+        const database = makeDatabase()
+        const owner = database.characters[0] as character
+        owner.customscript = []
+        owner.firstMessage = ''
+        owner.chats[0].fmIndex = -1
+        owner.chats[0].message = [
+            { role: 'user', data: 'older', chatId: 'older' },
+            { role: 'user', data: 'middle', chatId: 'middle' },
+            { role: 'user', data: 'newer', chatId: 'newer' },
+        ]
+        setDatabaseLite(database)
+        mockTriggerClone()
+        // The greeting runs through the plugin too, so only history messages are recorded.
+        const history = ['older', 'middle', 'newer']
+        const processed: string[] = []
+        testState.pluginV2.editprocess.add((content) => {
+            if (history.includes(content)) processed.push(content)
+            return content
+        })
+        testState.onTokenizeChat = () => {
+            if (processed.length > 0) throw new Error('synthetic count failure')
+        }
+        testState.deferChatCounts = true
+
+        await expect(sendChat({ preview: true })).rejects.toThrow('synthetic count failure')
+        expect(processed).toEqual(['older'])
     })
 
     it('formats ordinary messages with the configured name template and role', async () => {

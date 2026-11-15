@@ -50,6 +50,7 @@ vi.mock('src/ts/util', () => ({
 }))
 vi.mock('../../ts/alert', () => ({
     alertClear: vi.fn(), alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn(),
+    alertCheckboxConfirm: vi.fn(async () => ({ confirmed: false, checked: false })),
     alertRequestData: vi.fn(), alertWait: vi.fn(), alertToast: vi.fn(),
 }))
 vi.mock('../../ts/translator/translator', () => ({ getLLMCache: vi.fn(), setLLMCache: vi.fn() }))
@@ -68,6 +69,10 @@ vi.mock('../../ts/storage/persistentDataRuntime.svelte', () => ({
 import Chat from './Chat.svelte'
 import PopupList from '../UI/PopupList.svelte'
 import { additionalMessageButtons, type MessageButtonDef } from 'src/ts/plugins/messageButtons.svelte'
+import { createMetadataOnlySelectedConversation } from 'src/ts/storage/selectedConversationLifecycle'
+import { language } from 'src/lang'
+import { alertCheckboxConfirm } from '../../ts/alert'
+import { getLLMCache } from '../../ts/translator/translator'
 
 const messages: Message[] = [
     { role: 'user', data: 'question', chatId: 'm-0' },
@@ -79,7 +84,7 @@ function button(id: string, roles?: MessageButtonDef['roles']): MessageButtonDef
     return { id, name: `Button ${id}`, icon: '', iconType: 'none', callback: vi.fn(), roles }
 }
 
-function installCharacter(conversation: Record<string, unknown>) {
+function installCharacter(conversation: object) {
     live.db = {
         theme: '',
         clickToEdit: false,
@@ -106,6 +111,16 @@ describe('plugin message buttons in the message action row', () => {
     }
     const pluginButtons = (root: ParentNode = target) =>
         [...root.querySelectorAll<HTMLButtonElement>('.button-icon-plugin')].map((element) => element.title)
+    const menuButton = () => target.querySelector<HTMLButtonElement>('.button-icon-menu')!
+    const openPopup = async () => {
+        menuButton().click()
+        await vi.waitFor(() => expect(live.popup.children).not.toBeNull())
+        const popup = document.createElement('div')
+        document.body.append(popup)
+        mounted.push(mount(PopupList, { target: popup }))
+        await tick()
+        return popup
+    }
 
     beforeEach(() => {
         additionalMessageButtons.push(button('char-only', ['char']), button('user-only', ['user']), button('both'))
@@ -165,17 +180,77 @@ describe('plugin message buttons in the message action row', () => {
         await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 })
         expect(pluginButtons()).toEqual([])
 
-        target.querySelector<HTMLButtonElement>('.button-icon-menu')!.click()
-        await vi.waitFor(() => expect(live.popup.children).not.toBeNull())
-        const popup = document.createElement('div')
-        document.body.append(popup)
-        mounted.push(mount(PopupList, { target: popup }))
-        await tick()
+        const popup = await openPopup()
 
         expect(pluginButtons(popup)).toEqual(['Button char-only', 'Button both'])
         expect([...popup.querySelectorAll('.button-icon-plugin span')].map((element) => element.textContent)).toEqual(['Button char-only', 'Button both'])
         popup.querySelector<HTMLButtonElement>('.button-icon-plugin')!.click()
         await vi.waitFor(() => expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith(expect.objectContaining({ messageIndex: 1, messageId: 'm-1' })))
+    })
+
+    test('opens the action popup again with one tap after a tap closed it, and closes it with a tap on its button', async () => {
+        setWidth(400)
+        await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 })
+        const popup = await openPopup()
+
+        popup.querySelector<HTMLButtonElement>('.button-icon-plugin')!.click()
+        expect(live.popup.children).toBeNull()
+        menuButton().click()
+        await vi.waitFor(() => expect(live.popup.children).not.toBeNull())
+
+        menuButton().click()
+        await tick()
+        expect(live.popup.children).toBeNull()
+        menuButton().click()
+        await vi.waitFor(() => expect(live.popup.children).not.toBeNull())
+    })
+
+    test('closes the action popup when its remove button is held', async () => {
+        setWidth(400)
+        await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 })
+        const popup = await openPopup()
+
+        // No click follows a held press, so the popup's own click handler never runs.
+        popup.querySelector('.button-icon-remove')!.dispatchEvent(new PointerEvent('pointerdown', {
+            bubbles: true, pointerId: 2, pointerType: 'touch', isPrimary: true, button: 0,
+        }))
+        await vi.waitFor(() => expect(alertCheckboxConfirm).toHaveBeenCalledOnce())
+        expect(live.popup).toMatchObject({ children: null, openId: 0 })
+    })
+
+    test('offers a row without a stored message only the actions that work on it', async () => {
+        // A chat nothing was sent in keeps no message list to read.
+        const install = (options: Record<string, unknown>) => {
+            installCharacter(createMetadataOnlySelectedConversation({ id: 'conversation-a', name: 'Chat', note: '', localLore: [], bookmarks: [] }))
+            Object.assign(live.db, { enableBookmark: true, translator: 'llm', translatorType: 'llm', translateBeforeHTMLFormatting: true }, options)
+        }
+        const greeting = { message: 'greeting', role: 'char', idx: -1, firstMessage: true, totalLength: 0 }
+        const actions = (root: ParentNode) => [...root.querySelectorAll('button')].flatMap((element) => element.className.match(/button-icon-[\w-]+/) ?? [])
+
+        install({ useChatCopy: true })
+        await mountChat(greeting)
+        expect(actions(target)).toEqual(['button-icon-translate', 'button-icon-copy'])
+
+        vi.mocked(getLLMCache).mockResolvedValue('Cached translation')
+        target.querySelector<HTMLButtonElement>('.button-icon-translate')!.click()
+        ;(await vi.waitFor(() => {
+            const edit = [...target.querySelectorAll('button')].find((element) => element.textContent?.includes(language.editTranslation))
+            expect(edit).toBeDefined()
+            return edit!
+        })).click()
+        await vi.waitFor(() => expect(target.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')?.value).toBe('Cached translation'))
+
+        setWidth(400)
+        target.replaceChildren()
+        await mountChat(greeting)
+        expect(actions(target)).toEqual(['button-icon-translate', 'button-icon-menu'])
+        expect(actions(await openPopup())).toEqual(['button-icon-copy'])
+
+        install({ useChatCopy: false })
+        const bare = document.createElement('div')
+        document.body.append(bare)
+        await mountChat(greeting, bare)
+        expect(actions(bare)).toEqual(['button-icon-translate'])
     })
 
     test('moves the buttons between the row and the popup when the window is resized', async () => {

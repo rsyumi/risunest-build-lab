@@ -611,7 +611,7 @@ impl PersistentStore {
                 identity: identity.clone(),
                 scope_id: scope.into(),
                 manifest_hash,
-                path: path.map(PathBuf::from),
+                path: path.map(|path| self.stored_capture_path(&path)),
                 file_hash,
             }),
         )
@@ -633,7 +633,7 @@ impl PersistentStore {
                     identity: serde_json::from_str(&identity)?,
                     scope_id,
                     manifest_hash,
-                    path: path.map(PathBuf::from),
+                    path: path.map(|path| self.stored_capture_path(&path)),
                     file_hash,
                 })
             })
@@ -730,6 +730,11 @@ impl PersistentStore {
         }
     }
 
+    /// Capture rows hold the absolute path of the run that wrote them.
+    fn stored_capture_path(&self, stored: &str) -> PathBuf {
+        crate::app_paths::relocated_external_storage_path(Path::new(stored), &self.repository_root)
+    }
+
     fn remove_capture_file(&self, path: &Path) {
         let captures = self
             .repository_root
@@ -819,13 +824,13 @@ impl PersistentStore {
                 tx.execute("DELETE FROM external_storage_captures WHERE id=?1", [&id])?;
                 removed += 1;
                 if let Some(path) = path {
-                    paths.push(PathBuf::from(path));
+                    paths.push(path);
                 }
             }
             tx.commit()?;
         }
         for path in paths {
-            self.remove_capture_file(&path);
+            self.remove_capture_file(&self.stored_capture_path(&path));
         }
         Ok(removed)
     }
@@ -1735,17 +1740,52 @@ mod hydration_tests {
         assert_eq!(captured.catalog.content_fingerprint(&scope).unwrap(), fingerprint);
         assert_eq!(store.revision().unwrap(), 2);
         assert_eq!(captured.catalog.original_backup_units().unwrap().units().unwrap().collect::<StoreResult<BTreeMap<_,_>>>().unwrap(), original_units);
-        assert_eq!(captured.catalog.backup_sections().unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
+        assert_eq!(captured.catalog.backup_sections(directory.path()).unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
         store.retain_external_capture(&captured.id,"synthetic-backup-job").unwrap();
         let reopened = store.reopen_external_capture(&captured.id).unwrap();
         assert_eq!(reopened.catalog.original_backup_units().unwrap().units().unwrap().collect::<StoreResult<BTreeMap<_,_>>>().unwrap(),original_units);
-        assert_eq!(reopened.catalog.backup_sections().unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
+        assert_eq!(reopened.catalog.backup_sections(directory.path()).unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
         assert!(!store.revision_leases.contains_key(&lease.lease));
         assert!(store.capture_external_library_from_lease("backup", &hydration, &lease.lease, &probe).is_err());
         let later = store.acquire_revision(2).unwrap();
         assert!(store.capture_external_library_from_lease("backup", &hydration, &later.lease, &probe).is_err());
         assert!(store.revision_leases.contains_key(&later.lease));
         store.release_revision(&later.lease).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_backup_finds_its_section_bodies_after_the_data_root_moved() {
+        let directory = tempfile::tempdir().unwrap();
+        let earlier = directory.path().join("earlier");
+        let probe = crate::local_backup::NeverCancelled;
+        let id = {
+            let mut store = PersistentStore::open(&earlier).unwrap();
+            let commit = serde_json::from_value(serde_json::json!({
+                "expectedRevision":0,"root":{"username":"synthetic original"}
+            })).unwrap();
+            store.commit(&commit).unwrap();
+            store.device_store_mut().unwrap().write_setting("accountst", &serde_json::json!("synthetic-setting")).unwrap();
+            let hydration = store.hydrate_external_capture_dependencies("backup", &probe).unwrap();
+            let (lease, prepared_sections) = store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
+            // Where a backup job spools them.
+            let spool = earlier.join("external-storage").join("synthetic-job").join("sections");
+            let sections = crate::external_storage::sections::capture_prepared_backup_sections(
+                &prepared_sections,&spool,&crate::external_storage::contract::Cancellation::default(),
+            ).unwrap();
+            assert!(sections.iter().any(|section| !section.sources.is_empty()));
+            let captured = store.capture_external_library_from_lease_with_sections("backup", &hydration, &lease.lease, sections, &probe).unwrap();
+            store.retain_external_capture(&captured.id,"synthetic-backup-job").unwrap();
+            captured.id.clone()
+        };
+        let moved = directory.path().join("moved");
+        fs::rename(&earlier, &moved).unwrap();
+        let store = PersistentStore::open(&moved).unwrap();
+        let reopened = store.reopen_external_capture(&id).unwrap();
+        for section in reopened.catalog.backup_sections(&moved).unwrap() {
+            for source in section.sources {
+                assert!(source.path.is_file(), "{}", source.path.display());
+            }
+        }
     }
 
 

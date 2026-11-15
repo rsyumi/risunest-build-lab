@@ -1,0 +1,2108 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "openAIKey": "sk-synthetic-openai",
+    "proxyKey": "sk-synthetic-proxy",
+    "nanogptKey": "sk-synthetic-nanogpt",
+    "OaiCompAPIKeys": {
+      "deepseek": "sk-synthetic-deepseek"
+    },
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "newOAIHandle": true,
+    "gptVisionQuality": "low",
+    "jsonSchemaEnabled": false,
+    "jsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"]}",
+    "strictJsonSchema": true,
+    "extractJson": "",
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "simplifiedToolUse": false,
+    "modelTools": [],
+    "autofillRequestUrl": false,
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "proxyRequestModel": "",
+    "customProxyRequestModel": "gpt-4.1",
+    "customAPIFormat": 18,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "text-one-chunk",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-chunk-per-event",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-split-mid-event",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: x\ndata: {\"type\":\"response.output_text.delta\",\"del"
+            },
+            {
+              "utf8": "ta\":\"Hi\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"!\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-split-mid-separator",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n"
+            },
+            {
+              "utf8": "\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-crlf",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\r\n\r\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\r\n\r\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-mixed-separators",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\r\n\n"
+            },
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\r\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-three-newlines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "last-event-without-blank-line",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "last-event-with-one-newline",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "trailing-whitespace-only-is-ignored",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": " \n "
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-without-space",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data:{\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-with-two-spaces",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data:  {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-with-tab",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data:\t{\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-with-nbsp",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "multi-line-data-joins-with-newline",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: {\"type\":\"response.output_text.delta\",\ndata: \"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "event-without-data-gives-no-snapshot",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: ping\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": ": comment\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "event-with-other-fields",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "id: 1\nretry: 5\nevent: x\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "done-line",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "data: [DONE]\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "done-line-then-more",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "data: [DONE]\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "malformed-json-gives-a-repeat",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "data: {broken\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "empty-data-gives-a-repeat",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "data: \n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "json-null-and-primitives-give-repeats",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "data: null\n\n"
+            },
+            {
+              "utf8": "data: 5\n\n"
+            },
+            {
+              "utf8": "data: \"x\"\n\n"
+            },
+            {
+              "utf8": "data: []\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unknown-event-type-gives-a-repeat",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\n"
+            },
+            {
+              "utf8": "event: response.in_progress\ndata: {\"type\":\"response.in_progress\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "empty-stream",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": []
+        }
+      ]
+    },
+    {
+      "id": "empty-chunks",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": ""
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "multibyte-split-between-chunks",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "hex": "646174613a207b2274797065223a22726573706f6e73652e6f75747075745f746578742e64656c7461222c2264656c7461223a22e3"
+            },
+            {
+              "hex": "8182227d0a0a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bom-at-stream-start",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "hex": "efbbbf6576656e743a20726573706f6e73652e6f75747075745f746578742e64656c74610a646174613a207b2274797065223a22726573706f6e73652e6f75747075745f746578742e64656c7461222c2264656c7461223a2241227d0a0a"
+            },
+            {
+              "hex": "6576656e743a20726573706f6e73652e6f75747075745f746578742e64656c74610a646174613a207b2274797065223a22726573706f6e73652e6f75747075745f746578742e64656c7461222c2264656c7461223a2242227d0a0a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bom-inside-stream-stays",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "hex": "6576656e743a20726573706f6e73652e6f75747075745f746578742e64656c74610a646174613a207b2274797065223a22726573706f6e73652e6f75747075745f746578742e64656c7461222c2264656c7461223a2241227d0a0a"
+            },
+            {
+              "hex": "efbbbf6576656e743a20726573706f6e73652e6f75747075745f746578742e64656c74610a646174613a207b2274797065223a22726573706f6e73652e6f75747075745f746578742e64656c7461222c2264656c7461223a2242227d0a0a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unicode-text",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"日本語\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" 😀\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "delta-null-and-missing-add-nothing",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":null}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refusal-delta",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.refusal.delta\ndata: {\"type\":\"response.refusal.delta\",\"delta\":\"No.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" Yes.\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-done-replaces",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-done-matching-suffix-keeps",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"lo\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-done-empty-ignored",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-replaces-text",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n"
+            },
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello final\",\"annotations\":[]}]}]}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-with-top-level-text",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n"
+            },
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"Top\"}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-empty-keeps-text",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"
+            },
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-with-null-response",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"
+            },
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":null}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-with-reasoning-resets-streamed-reasoning",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Streamed.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":\"Final.\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\",\"annotations\":[]}]}]}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-text-with-thoughts-tag-clears-reasoning",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Streamed.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"<Thoughts>\\nOwn\\n</Thoughts>\\nAnswer\",\"annotations\":[]}]}]}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-keeps-reasoning-without-tag",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Streamed.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\",\"annotations\":[]}]}]}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "completed-extract-json",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "extractJson": "answer",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"answer\\\":\\\"yes\\\"}\",\"annotations\":[]}]}]}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stream-extract-json",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "extractJson": "answer",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"answer\\\":\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\\"yes\\\"}\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stream-extract-json-partial-is-empty",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "extractJson": "answer",
+      "schema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"]}",
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"answ\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-then-text",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Hmm.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Answer.\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-deltas-join-with-blank-line",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"A.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"B.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Done\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-repeat-suffix-skipped",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"A.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"A.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"B.\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-text-delta",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"Raw.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-legacy-delta",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning.delta\ndata: {\"type\":\"response.reasoning.delta\",\"delta\":\"Old.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-empty-delta-ignored",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-done-replaces",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Hm\"}\n\n"
+            },
+            {
+              "utf8": "event: response.reasoning_summary_text.done\ndata: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"Hmm full.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-text-done-replaces",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Hm\"}\n\n"
+            },
+            {
+              "utf8": "event: response.reasoning_text.done\ndata: {\"type\":\"response.reasoning_text.done\",\"text\":\"Hmm full.\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-done-matching-suffix-keeps",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Hmm full.\"}\n\n"
+            },
+            {
+              "utf8": "event: response.reasoning_summary_text.done\ndata: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"full.\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reasoning-only",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Only.\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "error-event",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"Bad.\"}}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "error-event-without-error-field",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: error\ndata: {\"type\":\"error\",\"message\":\"Bad.\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "response-failed-event",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\"},\"error\":{\"code\":\"x\"}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "response-error-event",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"code\":\"x\"}}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "error-null-uses-event",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: error\ndata: {\"type\":\"error\",\"error\":null}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "status-500",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": "upstream broke"
+        }
+      ]
+    },
+    {
+      "id": "status-400-json",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "text": "{\"error\":{\"message\":\"Bad key.\"}}"
+        }
+      ]
+    },
+    {
+      "id": "status-500-empty",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "status-200-not-an-event-stream",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": "{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Plain.\",\"annotations\":[]}]}]}"
+        }
+      ]
+    },
+    {
+      "id": "status-200-chunks-with-json-type",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "contentType": "application/json",
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "status-200-content-type-with-charset",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "contentType": "text/event-stream; charset=utf-8",
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "status-201-is-not-a-stream",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 201,
+          "text": "created"
+        }
+      ]
+    },
+    {
+      "id": "status-500-bom",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": "﻿broken"
+        }
+      ]
+    },
+    {
+      "id": "function-call-item-declines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "toolReplies": [
+        [
+          {
+            "type": "text",
+            "text": "{\"found\":true}"
+          }
+        ]
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\\\"x\\\"}\",\"status\":\"completed\"}}\n\n"
+            }
+          ]
+        },
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Done.\"}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "tool-round",
+      "terminal": true
+    },
+    {
+      "id": "function-call-arguments-delta-declines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "toolReplies": [
+        [
+          {
+            "type": "text",
+            "text": "{}"
+          }
+        ]
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call_1\",\"delta\":\"{}\"}\n\n"
+            }
+          ]
+        },
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Done.\"}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "tool-round",
+      "terminal": true
+    },
+    {
+      "id": "function-call-in-completed-declines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "toolReplies": [
+        [
+          {
+            "type": "text",
+            "text": "{}"
+          }
+        ]
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\\\"x\\\"}\",\"status\":\"completed\"}]}}\n\n"
+            }
+          ]
+        },
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Done.\"}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "tool-round",
+      "terminal": true
+    },
+    {
+      "id": "delta-number-declines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":5}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "stream-value-not-text"
+    },
+    {
+      "id": "done-text-number-declines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n"
+            },
+            {
+              "utf8": "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":5}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "stream-value-not-text",
+      "terminal": true
+    },
+    {
+      "id": "reasoning-delta-number-declines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":5}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "stream-value-not-text"
+    },
+    {
+      "id": "completed-output-string-declines",
+      "model": "gpt4o-response-api",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "chunks": [
+            {
+              "utf8": "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":\"x\"}}\n\n"
+            }
+          ]
+        }
+      ],
+      "declines": "response-output-not-array"
+    }
+  ]
+}

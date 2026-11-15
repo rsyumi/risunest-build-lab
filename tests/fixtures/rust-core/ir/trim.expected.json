@@ -1,0 +1,225 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/ir.oracle.test.ts",
+  "fixtureSha256": "b82921593bbabc39d63bc157e246a80cb6139603ca5d61c4ad3613f8d59f5162",
+  "tsSourceSha256": {},
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "empty",
+      "result": {
+        "trim": "",
+        "trimStart": "",
+        "trimEnd": ""
+      }
+    },
+    {
+      "id": "space",
+      "result": {
+        "trim": "",
+        "trimStart": "",
+        "trimEnd": ""
+      }
+    },
+    {
+      "id": "padded",
+      "result": {
+        "trim": "a",
+        "trimStart": "a  ",
+        "trimEnd": "  a"
+      }
+    },
+    {
+      "id": "nbsp",
+      "result": {
+        "trim": "a",
+        "trimStart": "a ",
+        "trimEnd": " a"
+      }
+    },
+    {
+      "id": "bom",
+      "result": {
+        "trim": "a",
+        "trimStart": "a﻿",
+        "trimEnd": "﻿a"
+      }
+    },
+    {
+      "id": "line-separators",
+      "result": {
+        "trim": "a",
+        "trimStart": "a ",
+        "trimEnd": " a"
+      }
+    },
+    {
+      "id": "next-line-kept",
+      "result": {
+        "trim": "a",
+        "trimStart": "a",
+        "trimEnd": "a"
+      }
+    },
+    {
+      "id": "mongolian-kept",
+      "result": {
+        "trim": "᠎a᠎",
+        "trimStart": "᠎a᠎",
+        "trimEnd": "᠎a᠎"
+      }
+    },
+    {
+      "id": "zero-width-kept",
+      "result": {
+        "trim": "​a​",
+        "trimStart": "​a​",
+        "trimEnd": "​a​"
+      }
+    },
+    {
+      "id": "all-whitespace",
+      "result": {
+        "trim": "",
+        "trimStart": "",
+        "trimEnd": ""
+      }
+    },
+    {
+      "id": "inner-space",
+      "result": {
+        "trim": "a b",
+        "trimStart": "a b",
+        "trimEnd": "a b"
+      }
+    },
+    {
+      "id": "controls",
+      "result": {
+        "trim": "",
+        "trimStart": "",
+        "trimEnd": ""
+      }
+    },
+    {
+      "id": "emoji",
+      "result": {
+        "trim": "😀",
+        "trimStart": "😀  ",
+        "trimEnd": "  😀"
+      }
+    },
+    {
+      "id": "hangul",
+      "result": {
+        "trim": "한국어",
+        "trimStart": "한국어　",
+        "trimEnd": "　한국어"
+      }
+    },
+    {
+      "id": "no-space",
+      "result": {
+        "trim": "abc",
+        "trimStart": "abc",
+        "trimEnd": "abc"
+      }
+    },
+    {
+      "id": "mixed-edges",
+      "result": {
+        "trim": "x y",
+        "trimStart": "x y  \r",
+        "trimEnd": "\n\t x y"
+      }
+    },
+    {
+      "id": "isolated-inside-spaces",
+      "result": {
+        "trim": {
+          "u": [
+            55296
+          ]
+        },
+        "trimStart": {
+          "u": [
+            55296,
+            32
+          ]
+        },
+        "trimEnd": {
+          "u": [
+            32,
+            55296
+          ]
+        }
+      }
+    },
+    {
+      "id": "isolated-low-leading",
+      "result": {
+        "trim": {
+          "u": [
+            56320
+          ]
+        },
+        "trimStart": {
+          "u": [
+            56320,
+            32
+          ]
+        },
+        "trimEnd": {
+          "u": [
+            56320
+          ]
+        }
+      }
+    },
+    {
+      "id": "isolated-high-trailing",
+      "result": {
+        "trim": {
+          "u": [
+            65,
+            56319
+          ]
+        },
+        "trimStart": {
+          "u": [
+            65,
+            56319
+          ]
+        },
+        "trimEnd": {
+          "u": [
+            32,
+            65,
+            56319
+          ]
+        }
+      }
+    },
+    {
+      "id": "only-isolated",
+      "result": {
+        "trim": {
+          "u": [
+            55296
+          ]
+        },
+        "trimStart": {
+          "u": [
+            55296
+          ]
+        },
+        "trimEnd": {
+          "u": [
+            55296
+          ]
+        }
+      }
+    }
+  ]
+}

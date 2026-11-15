@@ -11,6 +11,7 @@ export const protocolManifests = [
   'crates/external-storage-format/Cargo.toml',
   'crates/release-update/Cargo.toml',
   'crates/small-object-store/Cargo.toml',
+  'crates/core/Cargo.toml',
 ]
 export const hostManifests = [
   'src-tauri/Cargo.toml',
@@ -22,9 +23,33 @@ export const hostManifests = [
 export const harnessManifests = [
   'crates/cbs-experimental/Cargo.toml',
   'benchmarks/rust-cbs/native/Cargo.toml',
+  'crates/regex-compat-experimental/Cargo.toml',
+  'benchmarks/rust-regex-compat/native/Cargo.toml',
+  'crates/native-lua-experimental/Cargo.toml',
+  'crates/regress/Cargo.toml',
 ]
 
+export const mluaHarnessTests = {
+  manifest: 'crates/mlua-terminal/Cargo.toml',
+  runnerManifest: 'benchmarks/native-lua-containment/Cargo.toml',
+  targets: [
+    { name: 'upstream-thread', source: 'crates/mlua-terminal/tests/thread.rs' },
+    { name: 'upstream-function', source: 'crates/mlua-terminal/tests/function.rs' },
+    { name: 'upstream-memory', source: 'crates/mlua-terminal/tests/memory.rs' },
+    { name: 'upstream-userdata', source: 'crates/mlua-terminal/tests/userdata.rs' },
+    { name: 'upstream-table', source: 'crates/mlua-terminal/tests/table.rs' },
+  ],
+}
+
 export const packageCrateTests = [
+  {
+    manifest: 'crates/compression-codecs/Cargo.toml',
+    runnerManifest: 'src-tauri/Cargo.toml',
+    package: 'compression-codecs',
+    platforms: ['win32', 'linux', 'darwin'],
+    withApp: true,
+    doctests: ['crates/compression-codecs/src/brotli/params.rs'],
+  },
   {
     manifest: 'crates/tauri-plugin-window-state/Cargo.toml',
     runnerManifest: 'src-tauri/Cargo.toml',
@@ -50,6 +75,9 @@ export const packageCrateTests = [
     platforms: ['win32', 'linux', 'darwin'],
   },
 ]
+
+export const appTestPackages = ['risunest', ...packageCrateTests.filter(entry => entry.withApp).map(entry => entry.package)]
+  .flatMap(packageName => ['--package', packageName])
 
 export const embeddedCrateTests = [
   {
@@ -99,8 +127,15 @@ export function nativeCommands(group, platform = process.platform) {
     // The Sync server's source observer serves the LWW benchmark and compiles only into test builds
     // with this feature. Its copy of small-object-store repeats that crate's own tests, so they are skipped.
     return [...harnessManifests.map(manifest => [
-      'cargo', 'test', '--manifest-path', manifest, '--release', '--locked',
+      'cargo', 'test', '--manifest-path', manifest,
+      ...(manifest === 'crates/native-lua-experimental/Cargo.toml' ? ['--locked', '--lib']
+        : manifest === 'crates/regress/Cargo.toml' ? ['--locked'] : ['--release', '--locked']),
     ]), [
+      'cargo', 'test', '--manifest-path', 'crates/regress/Cargo.toml', '--locked', '--features', 'utf16',
+    ], [
+      'cargo', 'test', '--manifest-path', mluaHarnessTests.runnerManifest, '--locked', '--jobs', '2',
+      ...mluaHarnessTests.targets.flatMap(target => ['--test', target.name]), '--', '--test-threads=1',
+    ], [
       'cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked', '--lib',
       '--features', 'source-observer', '--', '--skip', 'source_observer::small_object_store::tests',
     ]]
@@ -108,15 +143,19 @@ export function nativeCommands(group, platform = process.platform) {
   const commands = []
   for (const manifest of group === 'protocol' ? protocolManifests : hostManifests) {
     if (manifest === 'src-tauri/Cargo.toml' && platform === 'linux') {
-      commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release', ...appTestProfile])
+      commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release', ...appTestPackages, ...appTestProfile])
     } else if (manifest === 'crates/network-log/Cargo.toml') {
       commands.push(['cargo', 'test', '--manifest-path', manifest, '--features', 'reqwest', '--release', '--locked'])
     } else {
-      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked', ...(manifest === 'src-tauri/Cargo.toml' ? appTestProfile : [])])
+      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked', ...(manifest === 'src-tauri/Cargo.toml' ? [...appTestPackages, ...appTestProfile] : [])])
+    }
+    // The Hugging Face tokenizer families compile only with this feature.
+    if (manifest === 'crates/core/Cargo.toml') {
+      commands.push(['cargo', 'test', '--manifest-path', manifest, '--package', 'risunest-tokenizer', '--features', 'huggingface', '--release', '--locked'])
     }
   }
   if (group === 'host') {
-    for (const entry of packageCrateTests.filter(entry => entry.platforms.includes(platform))) {
+    for (const entry of packageCrateTests.filter(entry => !entry.withApp && entry.platforms.includes(platform))) {
       commands.push([
         'cargo', 'test', '--manifest-path', entry.runnerManifest,
         '--package', entry.package, '--release', '--locked', '--lib',

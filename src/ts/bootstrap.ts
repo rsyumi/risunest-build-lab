@@ -16,6 +16,7 @@ import { setDatabase, getDatabase, type Database } from "./storage/database.svel
 import { getStartupExclusions, loadDeviceSettings } from "./storage/deviceSettings";
 import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
 import { generationDiagnostics } from './generationDiagnostics'
+import { createNativeGenerationPort } from './storage/nativeGeneration'
 import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
@@ -167,6 +168,7 @@ import {
     type RetainableReplacementFence,
 } from './storage/retainableReplacementFence'
 
+const NATIVE_GENERATION_EXIT_CLOSE_MILLIS = 1_500
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 let disposeLifecycleCommitListeners: (() => void) | undefined
 let disposeMacosLifecycle: (() => void) | undefined
@@ -283,6 +285,7 @@ export async function loadData() {
         if (recoveredNativeFileJobs.libraryRestoreCommitted) holdServerSyncAfterRestore()
         const recoveredNativeRestoreJobs =
             recoveredNativeFileJobs.pendingRestoreAcknowledgements
+        configurePersistentDataRuntime({ nativeGeneration: isTauri ? createNativeGenerationPort() : null })
         const runtime = getPersistentDataRuntime()
         const { flush: flushLifecycle, flushForLifecycle } = createLifecycleFlush({
             runtime,
@@ -697,8 +700,11 @@ export async function loadData() {
         let heldExitRevision: number | undefined
         let heldExitFence: RetainableReplacementFence | undefined
         let selectedExitDrain: SyncExitDrainAdapter | null = null
+        const closeNativeGenerationsForExit = () =>
+            runtime.closeNativeGenerations(NATIVE_GENERATION_EXIT_CLOSE_MILLIS)
         const syncExitCoordinator = createSyncExitCoordinator({
             async acquireEditFence() {
+                await closeNativeGenerationsForExit()
                 const token = await runtime.capturePersistentMutationToken(
                     'normal-exit-fence',
                     { publishOfficial: false },
@@ -710,7 +716,10 @@ export async function loadData() {
                 heldExitFence = fence
                 return fence
             },
-            flushLocal: () => runtime.flushPendingDataLocally('normal-exit'),
+            flushLocal: async () => {
+                await closeNativeGenerationsForExit()
+                await runtime.flushPendingDataLocally('normal-exit')
+            },
             checkpointLocal: async () => {
                 if (!isTauri) return
                 const { checkpointNativePersistentStore } = await import(

@@ -109,17 +109,34 @@ impl AssetObjectRegistrar {
     }
 }
 
-fn begin_registration<'a>(
-    connection: &'a mut Connection,
+pub(super) fn register_in_transaction(
+    transaction: &Transaction<'_>,
     objects: &[AssetObjectRegistration],
     created_at_ms: i64,
-) -> StoreResult<Transaction<'a>> {
+) -> StoreResult<()> {
+    validate_registration(objects, created_at_ms)?;
+    for object in objects {
+        register_object(transaction, object, created_at_ms)?;
+    }
+    Ok(())
+}
+
+fn validate_registration(objects: &[AssetObjectRegistration], created_at_ms: i64) -> StoreResult<()> {
     if created_at_ms < 0 {
         return validation("asset object creation time must be nonnegative");
     }
     if objects.len() > ASSET_OBJECT_CATALOG_MAX_PAGE as usize {
         return validation("asset object registration batch exceeds the bounded limit");
     }
+    Ok(())
+}
+
+fn begin_registration<'a>(
+    connection: &'a mut Connection,
+    objects: &[AssetObjectRegistration],
+    created_at_ms: i64,
+) -> StoreResult<Transaction<'a>> {
+    validate_registration(objects, created_at_ms)?;
     Ok(connection.transaction_with_behavior(TransactionBehavior::Immediate)?)
 }
 

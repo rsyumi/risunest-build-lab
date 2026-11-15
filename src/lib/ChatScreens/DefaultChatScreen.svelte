@@ -390,7 +390,7 @@
     function reserveChatGeneration(): ChatGeneration | null {
         const controller = new AbortController()
         const reservation = reserveGeneration(() => controller.abort())
-        return reservation ? { ...reservation, signal: controller.signal } : null
+        return reservation ? Object.assign(reservation, { signal: controller.signal }) : null
     }
 
     async function send(){
@@ -885,6 +885,7 @@
             completed = await captureGeneration(endRun, () => sendChat({
                 signal,
                 continue: continued,
+                nativeIntent: continued ? undefined : 'ordinary',
                 historyLimit,
             }, generation))()
         } catch (error) {
