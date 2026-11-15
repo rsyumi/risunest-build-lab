@@ -235,7 +235,7 @@ impl DurableCasJobState {
         Ok(())
     }
 
-    pub(crate) fn reset_renderer_session(&self, app: &AppHandle) -> Result<(), String> {
+    pub(crate) fn reset_renderer_session<R: tauri::Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
         let abandoned = self.take_abandoned(&repository_root(app)?)?;
         self.release_in_background(app, abandoned);
         Ok(())
@@ -1668,6 +1668,7 @@ mod tests {
             .unwrap();
         app.manage(crate::app_paths::AppPaths {
             data: root.to_owned(),
+            data_entry: root.to_owned(),
             webview: None,
             logs: root.join("logs"),
             cache: root.join("cache"),

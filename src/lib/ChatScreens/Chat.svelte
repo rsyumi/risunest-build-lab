@@ -198,6 +198,10 @@
         return retainedLayout
     })
     let captureTheme = $derived(presentedLayout.theme)
+    // Without the message buttons a long press on the inline editor is the only way to finish editing.
+    let editButtonShown = $derived(captureTheme === 'customHTML'
+        ? !!presentedLayout.gui?.querySelector('risubuttons')
+        : captureTheme !== 'mobilechat')
     let captureIconSize = $derived(captureSettings?.iconSize ?? DBState.db.iconsize)
     let captureZoomSize = $derived(captureSettings?.zoomSize ?? DBState.db.zoomsize)
     let captureLineHeight = $derived(captureSettings?.lineHeight ?? DBState.db.lineHeight ?? 1.25)
@@ -1168,7 +1172,7 @@
         }} />
     {/if}
     {#if inlineEditMode}
-        <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} />
+        <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} touchLongPress={!editButtonShown} />
     {:else if isComment}
         <div class="w-full flex justify-center text-textcolor2 italic mb-12">
 
@@ -1283,13 +1287,13 @@
                 {#if (innerWidth.current ?? 0) >= 640}
                     {@render majorIconButtonsBody(false)}
                     {@render pluginMessageButtons(false)}
-                    {#if DBState.db.characters[selIdState.selId]}
+                    {#if DBState.db.characters[selIdState.selId] && idx > -1}
                         <PopupButton>
                             {@render minorIconButtonsBody(true)}
                         </PopupButton>
                     {/if}
                 {:else}
-                    {#if DBState.db.characters[selIdState.selId]}
+                    {#if DBState.db.characters[selIdState.selId] && (idx > -1 || (DBState.db.useChatCopy && !blankMessage))}
                         <PopupButton>
                             {@render majorIconButtonsBody(true)}
                             {@render pluginMessageButtons(true)}
@@ -1574,7 +1578,12 @@
             {/if}
         </button>
     {/if}
-    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => rm(e, true)}>
+    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => {
+        // A held press ends without the click that closes the action popup.
+        popupStore.children = null
+        popupStore.openId = 0
+        rm(e, true)
+    }}>
             <TrashIcon size={20}/>
 
             {#if showNames}
@@ -1634,7 +1643,8 @@
 {/snippet}
 
 {#snippet minorIconButtonsBody(showNames:boolean)}
-    
+    <!-- These act on a stored message, which the greeting row is not. -->
+    {#if idx > -1}
     {#if DBState.db.enableBookmark}
         <button class="flex items-center hover:text-blue-500 transition-colors button-icon-bookmark {isBookmarked ? 'text-yellow-400' : ''}" onclick={async () => {
             if (mutationBlocked()) return
@@ -1717,6 +1727,7 @@
             <span class="ml-1">{language.disableAbove}</span>
         {/if}
     </button>
+    {/if}
 {/snippet}
 
 {#snippet senderIcon(options:{rounded?:boolean,styleFix?:string} = {})}

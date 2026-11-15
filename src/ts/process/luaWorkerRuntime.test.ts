@@ -114,9 +114,10 @@ test('preserves async rejection handling and parallel promise completion', async
     expect(await runtime.invoke('onOutput', [])).toBe('handled:ab')
 })
 
-test('returns independent decoded views and observes changed JSON and overridden decoders', async () => {
+test('returns independent decoded views, observes changed JSON and overridden decoders, and ignores a script decodeJSON', async () => {
     let text = '[{"data":"original","nested":[1,2]}]'
     const runtime = await create(`
+        function decodeJSON(_) return {{data='script', nested={0}}} end
         function read()
             local a = getFullChat('id')
             a[1].data = 'local'
@@ -137,6 +138,14 @@ test('returns independent decoded views and observes changed JSON and overridden
     expect(await runtime.invoke('read', [])).toBe('changed:2')
     expect(await runtime.invoke('override', [])).toBe('override:3')
     expect(await runtime.invoke('read', [])).toBe('changed:2')
+})
+
+test('leaves a script the 196 main-chunk locals that upstream leaves it', async () => {
+    const locals = Array.from({ length: 196 }, (_, i) => `local v${i} = ${i}`).join('\n')
+    const runtime = await create(`${locals}
+        function read() return v0 + v195 end
+    `)
+    expect(await runtime.invoke('read', [])).toBe(195)
 })
 
 test('does not reuse decoded output after a decoder dependency changes', async () => {
