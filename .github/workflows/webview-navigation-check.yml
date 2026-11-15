@@ -49,7 +49,7 @@ jobs:
           cp .build-lab/source.json artifacts/source.json
           rustc -Vv
           xcodebuild -version
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
         with:
           targets: aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
