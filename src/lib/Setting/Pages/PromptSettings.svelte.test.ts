@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { DBState } from 'src/ts/stores.svelte'
 import { RISU_PROMPT_DRAG_TYPE } from 'src/ts/dragTypes'
+import { language } from 'src/lang'
+import { tokenizePreset } from 'src/ts/process/prompt'
+import { stubDragEvent, touch } from 'src/ts/gui/htmlTouchDrag.testSupport'
 import PromptSettings from './PromptSettings.svelte'
 
 vi.mock('src/ts/stores.svelte', () => {
@@ -9,6 +12,7 @@ vi.mock('src/ts/stores.svelte', () => {
     return { DBState }
 })
 vi.mock('src/ts/process/prompt', () => ({ tokenizePreset: vi.fn(async () => 0) }))
+vi.mock('src/ts/tokenizer', async () => (await import('src/ts/tokenizer.testSupport')).tokenizerStubModule())
 vi.mock('src/ts/process/templates/templateCheck', () => ({ templateCheck: () => [] }))
 vi.mock('src/lib/Others/Help.svelte', () => ({ default: () => {} }))
 vi.mock('src/lib/UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
@@ -30,6 +34,7 @@ async function dragEvent(element: Element, type: string, dataTransfer: ReturnTyp
     Object.assign(event, { dataTransfer, clientY })
     element.dispatchEvent(event)
     await tick()
+    return event
 }
 beforeEach(async () => {
     DBState.db = { promptTemplate: ['First', 'Second', 'Last'].map(name => ({
@@ -41,6 +46,26 @@ beforeEach(async () => {
 afterEach(async () => {
     await unmount(instance)
     document.body.replaceChildren()
+})
+
+describe('prompt token counts', () => {
+    afterEach(() => {
+        vi.mocked(tokenizePreset).mockImplementation(async () => 0)
+    })
+
+    it('counts the fixed and exact preset tokens together', async () => {
+        const pending: { consti: boolean, resolve: (count: number) => void }[] = []
+        vi.mocked(tokenizePreset).mockImplementation((_prompts, consti = false) =>
+            new Promise<number>((resolve) => pending.push({ consti, resolve })))
+        DBState.db.promptTemplate = [{ type: 'plain', name: 'Changed', text: 'text', role: 'system', type2: 'normal' }]
+        await tick()
+        await vi.waitFor(() => expect(pending.map((entry) => entry.consti)).toEqual([true, false]))
+
+        pending[1].resolve(7)
+        pending[0].resolve(5)
+        await vi.waitFor(() => expect(document.body.textContent).toContain(`5 ${language.fixedTokens}`))
+        expect(document.body.textContent).toContain(`7 ${language.exactTokens}`)
+    })
 })
 
 describe('prompt drag ordering', () => {
@@ -57,9 +82,33 @@ describe('prompt drag ordering', () => {
         const data = transfer()
         await dragEvent(header('Last'), 'dragstart', data)
         const gap = header('First').parentElement!.previousElementSibling!
+        // Drag implementations that follow the HTML specification drop only where dragenter was cancelled.
+        expect((await dragEvent(gap, 'dragenter', data)).defaultPrevented).toBe(true)
+        expect((await dragEvent(header('Second').parentElement!, 'dragenter', data)).defaultPrevented).toBe(true)
         await dragEvent(gap, 'dragover', data)
         await dragEvent(gap, 'drop', data)
         expect(DBState.db.promptTemplate.map(item => item.name)).toEqual(['Last', 'First', 'Second'])
+    })
+    it('moves a held header by touch to the gap it is dropped on', async () => {
+        const gap = header('First').parentElement!.previousElementSibling!
+        const name = header('Last').querySelector('span')!
+        vi.useFakeTimers()
+        stubDragEvent()
+        vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList)
+        vi.spyOn(document, 'elementFromPoint').mockReturnValue(gap)
+        try {
+            touch(name, 'touchstart', 30, 200)
+            vi.advanceTimersByTime(450)
+            touch(name, 'touchmove', 30, 20)
+            touch(name, 'touchend', 30, 20)
+            await tick()
+            expect(DBState.db.promptTemplate.map(item => item.name)).toEqual(['Last', 'First', 'Second'])
+        } finally {
+            vi.runOnlyPendingTimers()
+            vi.useRealTimers()
+            vi.unstubAllGlobals()
+            vi.restoreAllMocks()
+        }
     })
     it('keeps the source and open editors stable during hover, drop, and subsequent editing', async () => {
         const first = header('First')
@@ -84,6 +133,7 @@ describe('prompt drag ordering', () => {
     it('ignores unrelated drags and resets a cancelled prompt drag', async () => {
         const data = transfer()
         data.setData('text/plain', 'unrelated')
+        expect((await dragEvent(header('First').parentElement!, 'dragenter', data)).defaultPrevented).toBe(false)
         await dragEvent(header('First').parentElement!, 'drop', data)
         expect(data.types).not.toContain(RISU_PROMPT_DRAG_TYPE)
         await dragEvent(header('Last'), 'dragstart', data)

@@ -1,0 +1,1445 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "textgenWebUIBlockingURL": "https://ooba.example.test/api/",
+    "textgenWebUIStreamURL": "wss://ooba.example.test/api/",
+    "mancerHeader": "sk-synthetic-mancer",
+    "instructChatTemplate": "chatml",
+    "username": "Mina",
+    "ooba": {
+      "max_new_tokens": 180,
+      "do_sample": true,
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "typical_p": 1,
+      "repetition_penalty": 1.15,
+      "encoder_repetition_penalty": 1,
+      "top_k": 20,
+      "min_length": 0,
+      "no_repeat_ngram_size": 0,
+      "num_beams": 1,
+      "penalty_alpha": 0,
+      "length_penalty": 1,
+      "early_stopping": false,
+      "seed": -1,
+      "add_bos_token": true,
+      "truncation_length": 4096,
+      "ban_eos_token": false,
+      "skip_special_tokens": true,
+      "top_a": 0,
+      "tfs": 1,
+      "epsilon_cutoff": 0,
+      "eta_cutoff": 0,
+      "formating": {
+        "header": "Header.",
+        "systemPrefix": "### Instruction:",
+        "userPrefix": "### Input:",
+        "assistantPrefix": "### Response:",
+        "seperator": "",
+        "useName": false
+      }
+    },
+    "reverseProxyOobaArgs": {
+      "mode": "instruct"
+    },
+    "maxContext": 4000,
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "proxyKey": "sk-synthetic-proxy",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 13,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "ooba-basic",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "ooba-multi-turn",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "ooba-unicode-and-escapes",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "日本語 😀"
+        },
+        {
+          "role": "user",
+          "content": "\"quoted\" \\ back\nline  "
+        }
+      ]
+    },
+    {
+      "id": "ooba-max-tokens-argument",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "maxTokens": 77
+    },
+    {
+      "id": "ooba-temperature-zero",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "temperature": 0
+      }
+    },
+    {
+      "id": "ooba-username-in-stop-strings",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "username": "Ren"
+      }
+    },
+    {
+      "id": "ooba-user-prefix-duplicate",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "max_new_tokens": 180,
+          "do_sample": true,
+          "temperature": 0.7,
+          "top_p": 0.9,
+          "typical_p": 1,
+          "repetition_penalty": 1.15,
+          "encoder_repetition_penalty": 1,
+          "top_k": 20,
+          "min_length": 0,
+          "no_repeat_ngram_size": 0,
+          "num_beams": 1,
+          "penalty_alpha": 0,
+          "length_penalty": 1,
+          "early_stopping": false,
+          "seed": -1,
+          "add_bos_token": true,
+          "truncation_length": 4096,
+          "ban_eos_token": false,
+          "skip_special_tokens": true,
+          "top_a": 0,
+          "tfs": 1,
+          "epsilon_cutoff": 0,
+          "eta_cutoff": 0,
+          "formating": {
+            "header": "Header.",
+            "systemPrefix": "### Instruction:",
+            "userPrefix": "### user",
+            "assistantPrefix": "### Response:",
+            "seperator": "",
+            "useName": false
+          }
+        }
+      }
+    },
+    {
+      "id": "ooba-user-prefix-empty",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "max_new_tokens": 180,
+          "do_sample": true,
+          "temperature": 0.7,
+          "top_p": 0.9,
+          "typical_p": 1,
+          "repetition_penalty": 1.15,
+          "encoder_repetition_penalty": 1,
+          "top_k": 20,
+          "min_length": 0,
+          "no_repeat_ngram_size": 0,
+          "num_beams": 1,
+          "penalty_alpha": 0,
+          "length_penalty": 1,
+          "early_stopping": false,
+          "seed": -1,
+          "add_bos_token": true,
+          "truncation_length": 4096,
+          "ban_eos_token": false,
+          "skip_special_tokens": true,
+          "top_a": 0,
+          "tfs": 1,
+          "epsilon_cutoff": 0,
+          "eta_cutoff": 0,
+          "formating": {
+            "header": "Header.",
+            "systemPrefix": "### Instruction:",
+            "userPrefix": "",
+            "assistantPrefix": "### Response:",
+            "seperator": "",
+            "useName": false
+          }
+        }
+      }
+    },
+    {
+      "id": "ooba-user-prefix-missing",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "max_new_tokens": 180,
+          "do_sample": true,
+          "temperature": 0.7,
+          "top_p": 0.9,
+          "typical_p": 1,
+          "repetition_penalty": 1.15,
+          "encoder_repetition_penalty": 1,
+          "top_k": 20,
+          "min_length": 0,
+          "no_repeat_ngram_size": 0,
+          "num_beams": 1,
+          "penalty_alpha": 0,
+          "length_penalty": 1,
+          "early_stopping": false,
+          "seed": -1,
+          "add_bos_token": true,
+          "truncation_length": 4096,
+          "ban_eos_token": false,
+          "skip_special_tokens": true,
+          "top_a": 0,
+          "tfs": 1,
+          "epsilon_cutoff": 0,
+          "eta_cutoff": 0,
+          "formating": {
+            "systemPrefix": "",
+            "assistantPrefix": "",
+            "seperator": "",
+            "useName": false
+          }
+        }
+      }
+    },
+    {
+      "id": "ooba-local-stop-strings-empty",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "localStopStrings": []
+      }
+    },
+    {
+      "id": "ooba-local-stop-strings-declines",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "local-stop-strings",
+      "db": {
+        "localStopStrings": [
+          "STOP\\n"
+        ]
+      }
+    },
+    {
+      "id": "ooba-additional-not-applied-without-flag",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "ooba-additional-number",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "ooba-additional-json",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "grammar",
+            "json::{\"root\":\"x\"}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "ooba-additional-removes-prompt",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "prompt",
+            "{{none}}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "ooba-additional-header",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "header::Authorization",
+            "Bearer synthetic"
+          ],
+          [
+            "header::X-Test",
+            "on"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "ooba-template-alpaca",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "db": {
+        "instructChatTemplate": "alpaca"
+      }
+    },
+    {
+      "id": "ooba-system-content-replacement",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      }
+    },
+    {
+      "id": "ooba-url-path-replaced",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "textgenWebUIBlockingURL": "http://ooba.example.test:5000/some/deep/path"
+      }
+    },
+    {
+      "id": "ooba-url-query-and-hash-kept",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "textgenWebUIBlockingURL": "http://ooba.example.test/api?x=1#frag"
+      }
+    },
+    {
+      "id": "ooba-url-default-port",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "textgenWebUIBlockingURL": "HTTPS://Ooba.Example.Test:443/api/"
+      }
+    },
+    {
+      "id": "ooba-url-invalid-declines",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form",
+      "db": {
+        "textgenWebUIBlockingURL": "localhost:5000"
+      }
+    },
+    {
+      "id": "ooba-url-userinfo-declines",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form",
+      "db": {
+        "textgenWebUIBlockingURL": "http://a:b@ooba.example.test/api"
+      }
+    },
+    {
+      "id": "ooba-penalties-zero-fall-back",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "PresensePenalty": 0,
+        "frequencyPenalty": 0
+      }
+    },
+    {
+      "id": "ooba-penalties-disabled-value",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "PresensePenalty": -1000,
+        "frequencyPenalty": -1000
+      }
+    },
+    {
+      "id": "ooba-ooba-args-copied",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "reverseProxyOobaArgs": {
+          "mode": "instruct",
+          "min_p": 0.1,
+          "top_k": 0,
+          "seed": 12,
+          "custom_token_bans": "1,2",
+          "grammar_string": ""
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-null-deletes-truthy",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "reverseProxyOobaArgs": {
+          "mode": "chat",
+          "temperature": null,
+          "top_p": null,
+          "max_tokens": null
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-unknown-deletes-truthy",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "reverseProxyOobaArgs": {
+          "prompt": "x",
+          "stop": [
+            "a"
+          ],
+          "logit_bias": {
+            "1": 2
+          },
+          "presence_penalty": 0.5
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-falsy-kept",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "temperature": 0,
+        "reverseProxyOobaArgs": {
+          "temperature": null,
+          "frequency_penalty": null
+        }
+      }
+    },
+    {
+      "id": "ooba-ooba-args-array-value",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "reverseProxyOobaArgs": {
+          "sampler_priority": [
+            "a"
+          ],
+          "do_sample": false,
+          "mirostat_mode": 2
+        }
+      }
+    },
+    {
+      "id": "ooba-stream-flag-is-ignored",
+      "model": "ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "stream": true
+    },
+    {
+      "id": "ooba-custom-model",
+      "model": "xcustom:::ooba",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "customModels": [
+        {
+          "id": "xcustom:::ooba",
+          "name": "O",
+          "internalId": "o",
+          "url": "http://ignored.example.test/",
+          "key": "sk-synthetic-custom",
+          "format": 13,
+          "flags": [],
+          "tokenizer": 0,
+          "params": "seed=9"
+        }
+      ]
+    },
+    {
+      "id": "legacy-basic",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "legacy-multi-turn",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "legacy-unicode-and-escapes",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "日本語 😀"
+        },
+        {
+          "role": "user",
+          "content": "\"quoted\" \\ back\nline  "
+        }
+      ]
+    },
+    {
+      "id": "legacy-max-tokens-argument",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "maxTokens": 77
+    },
+    {
+      "id": "legacy-temperature-zero",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "temperature": 0
+      }
+    },
+    {
+      "id": "legacy-username-in-stop-strings",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "username": "Ren"
+      }
+    },
+    {
+      "id": "legacy-user-prefix-duplicate",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "max_new_tokens": 180,
+          "do_sample": true,
+          "temperature": 0.7,
+          "top_p": 0.9,
+          "typical_p": 1,
+          "repetition_penalty": 1.15,
+          "encoder_repetition_penalty": 1,
+          "top_k": 20,
+          "min_length": 0,
+          "no_repeat_ngram_size": 0,
+          "num_beams": 1,
+          "penalty_alpha": 0,
+          "length_penalty": 1,
+          "early_stopping": false,
+          "seed": -1,
+          "add_bos_token": true,
+          "truncation_length": 4096,
+          "ban_eos_token": false,
+          "skip_special_tokens": true,
+          "top_a": 0,
+          "tfs": 1,
+          "epsilon_cutoff": 0,
+          "eta_cutoff": 0,
+          "formating": {
+            "header": "Header.",
+            "systemPrefix": "### Instruction:",
+            "userPrefix": "### user",
+            "assistantPrefix": "### Response:",
+            "seperator": "",
+            "useName": false
+          }
+        }
+      }
+    },
+    {
+      "id": "legacy-user-prefix-empty",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "max_new_tokens": 180,
+          "do_sample": true,
+          "temperature": 0.7,
+          "top_p": 0.9,
+          "typical_p": 1,
+          "repetition_penalty": 1.15,
+          "encoder_repetition_penalty": 1,
+          "top_k": 20,
+          "min_length": 0,
+          "no_repeat_ngram_size": 0,
+          "num_beams": 1,
+          "penalty_alpha": 0,
+          "length_penalty": 1,
+          "early_stopping": false,
+          "seed": -1,
+          "add_bos_token": true,
+          "truncation_length": 4096,
+          "ban_eos_token": false,
+          "skip_special_tokens": true,
+          "top_a": 0,
+          "tfs": 1,
+          "epsilon_cutoff": 0,
+          "eta_cutoff": 0,
+          "formating": {
+            "header": "Header.",
+            "systemPrefix": "### Instruction:",
+            "userPrefix": "",
+            "assistantPrefix": "### Response:",
+            "seperator": "",
+            "useName": false
+          }
+        }
+      }
+    },
+    {
+      "id": "legacy-user-prefix-missing",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "max_new_tokens": 180,
+          "do_sample": true,
+          "temperature": 0.7,
+          "top_p": 0.9,
+          "typical_p": 1,
+          "repetition_penalty": 1.15,
+          "encoder_repetition_penalty": 1,
+          "top_k": 20,
+          "min_length": 0,
+          "no_repeat_ngram_size": 0,
+          "num_beams": 1,
+          "penalty_alpha": 0,
+          "length_penalty": 1,
+          "early_stopping": false,
+          "seed": -1,
+          "add_bos_token": true,
+          "truncation_length": 4096,
+          "ban_eos_token": false,
+          "skip_special_tokens": true,
+          "top_a": 0,
+          "tfs": 1,
+          "epsilon_cutoff": 0,
+          "eta_cutoff": 0,
+          "formating": {
+            "systemPrefix": "",
+            "assistantPrefix": "",
+            "seperator": "",
+            "useName": false
+          }
+        }
+      }
+    },
+    {
+      "id": "legacy-local-stop-strings-empty",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "localStopStrings": []
+      }
+    },
+    {
+      "id": "legacy-local-stop-strings-declines",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "local-stop-strings",
+      "db": {
+        "localStopStrings": [
+          "STOP\\n"
+        ]
+      }
+    },
+    {
+      "id": "legacy-additional-not-applied-without-flag",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "legacy-additional-number",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "legacy-additional-json",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "grammar",
+            "json::{\"root\":\"x\"}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "legacy-additional-removes-prompt",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "prompt",
+            "{{none}}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "legacy-additional-header",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "header::Authorization",
+            "Bearer synthetic"
+          ],
+          [
+            "header::X-Test",
+            "on"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "legacy-template-alpaca",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "db": {
+        "instructChatTemplate": "alpaca"
+      }
+    },
+    {
+      "id": "legacy-system-content-replacement",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      }
+    },
+    {
+      "id": "legacy-url-api-suffix-replaced",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "textgenWebUIBlockingURL": "https://mancer.example.test/api/v2/generate?x=1"
+      }
+    },
+    {
+      "id": "legacy-url-no-api-kept",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "textgenWebUIBlockingURL": "https://mancer.example.test/v1/generate"
+      }
+    },
+    {
+      "id": "legacy-url-first-api-wins",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "textgenWebUIBlockingURL": "https://mancer.example.test/x/apis/api/y"
+      }
+    },
+    {
+      "id": "legacy-url-invalid-declines",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form",
+      "db": {
+        "textgenWebUIBlockingURL": "mancer.example.test/api"
+      }
+    },
+    {
+      "id": "legacy-mancer-header-empty",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "mancerHeader": ""
+      }
+    },
+    {
+      "id": "legacy-ooba-settings",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "max_new_tokens": 180,
+          "do_sample": false,
+          "temperature": 0.7,
+          "top_p": 0.5,
+          "typical_p": 0.95,
+          "repetition_penalty": 1.15,
+          "encoder_repetition_penalty": 1,
+          "top_k": 0,
+          "min_length": 0,
+          "no_repeat_ngram_size": 0,
+          "num_beams": 2,
+          "penalty_alpha": 0,
+          "length_penalty": 1,
+          "early_stopping": false,
+          "seed": -1,
+          "add_bos_token": false,
+          "truncation_length": 4096,
+          "ban_eos_token": true,
+          "skip_special_tokens": true,
+          "top_a": 0,
+          "tfs": 1,
+          "epsilon_cutoff": 0,
+          "eta_cutoff": 0,
+          "formating": {
+            "header": "Header.",
+            "systemPrefix": "### Instruction:",
+            "userPrefix": "### Input:",
+            "assistantPrefix": "### Response:",
+            "seperator": "",
+            "useName": false
+          }
+        }
+      }
+    },
+    {
+      "id": "legacy-ooba-settings-missing-fields",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "db": {
+        "ooba": {
+          "formating": {
+            "header": "Header.",
+            "systemPrefix": "### Instruction:",
+            "userPrefix": "### Input:",
+            "assistantPrefix": "### Response:",
+            "seperator": "",
+            "useName": false
+          },
+          "top_k": 3
+        }
+      }
+    },
+    {
+      "id": "legacy-stream-declines",
+      "model": "mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "websocket-stream",
+      "stream": true
+    },
+    {
+      "id": "legacy-custom-model",
+      "model": "xcustom:::mancer",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "customModels": [
+        {
+          "id": "xcustom:::mancer",
+          "name": "M",
+          "internalId": "m",
+          "url": "http://ignored.example.test/",
+          "key": "sk-synthetic-custom",
+          "format": 11,
+          "flags": [],
+          "tokenizer": 0,
+          "params": "seed=9"
+        }
+      ]
+    }
+  ]
+}

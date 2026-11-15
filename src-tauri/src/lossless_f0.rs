@@ -1488,7 +1488,7 @@ fn display_template(value: Option<&Value>) -> String {
     }
 }
 
-fn is_external_asset_key(key: &str) -> bool {
+pub(crate) fn is_external_asset_key(key: &str) -> bool {
     let lowercase = key.to_ascii_lowercase();
     [
         "http:", "https:", "data:", "blob:", "file:", "content:", "tauri:",

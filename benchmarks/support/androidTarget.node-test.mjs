@@ -95,9 +95,17 @@ await connectSyntheticAndroid(19366, androidTarget(${JSON.stringify({ ...selecti
                     env: { ...process.env, ADB_SERVER_SOCKET: 'tcp:elsewhere:9999', ANDROID_ADB_SERVER_PORT: '9999', RISUNEST_ANDROID_TARGET_TEST_LOG: log },
                 })
                 assert.equal(result.status, 1, result.stderr)
-                const commands = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-                assert.deepEqual(commands, [{ executable: 'fake-adb', args: ['-H', '127.0.0.1', '-P', '16222', '-s', 'emulator-5690', 'emu', 'avd', 'name'],
-                    socket: 'tcp:127.0.0.1:16222', port: '16222' }], result.stderr)
+                const recorded = readFileSync(log, 'utf8').trim()
+                if (runner === 'startup/android-smoke') {
+                    assert.equal(recorded, '')
+                    assert.equal(result.stdout, '')
+                    assert.deepEqual(JSON.parse(result.stderr.trim()), { phase: 'preflight', profile: 'legacy-api21-mutation',
+                        success: false, reason: 'unsupported-legacy-profile' })
+                } else {
+                    const commands = recorded.split('\n').map(line => JSON.parse(line))
+                    assert.deepEqual(commands, [{ executable: 'fake-adb', args: ['-H', '127.0.0.1', '-P', '16222', '-s', 'emulator-5690', 'emu', 'avd', 'name'],
+                        socket: 'tcp:127.0.0.1:16222', port: '16222' }], result.stderr)
+                }
             })
         }
     } finally {

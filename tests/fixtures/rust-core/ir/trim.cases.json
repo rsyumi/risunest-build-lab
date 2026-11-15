@@ -1,0 +1,22 @@
+{"schema": 1, "cases": [
+{"id":"empty","text":""},
+{"id":"space","text":" "},
+{"id":"padded","text":"  a  "},
+{"id":"nbsp","text":" a "},
+{"id":"bom","text":"﻿a﻿"},
+{"id":"line-separators","text":" a "},
+{"id":"next-line-kept","text":"a"},
+{"id":"mongolian-kept","text":"᠎a᠎"},
+{"id":"zero-width-kept","text":"​a​"},
+{"id":"all-whitespace","text":"\t\n\u000b\f\r                  　﻿"},
+{"id":"inner-space","text":"a b"},
+{"id":"controls","text":" \t\n\r\u000b\f"},
+{"id":"emoji","text":"  😀  "},
+{"id":"hangul","text":"　한국어　"},
+{"id":"no-space","text":"abc"},
+{"id":"mixed-edges","text":"\n\t x y  \r"},
+{"id":"isolated-inside-spaces","text":{"u":[32,55296,32]}},
+{"id":"isolated-low-leading","text":{"u":[56320,32]}},
+{"id":"isolated-high-trailing","text":{"u":[32,65,56319]}},
+{"id":"only-isolated","text":{"u":[55296]}}
+]}

@@ -173,6 +173,7 @@ vi.mock('./nativeRegexBatch', () => ({
 
 const {
     createPromptScriptOperationScope,
+    editProcessHasEffects,
     processScriptFull,
     resetScriptCache,
 } = await import('./scripts')
@@ -228,6 +229,31 @@ it('uses frozen capture script inputs without reading the live selected conversa
     expect(getCurrentChat).not.toHaveBeenCalled()
     expect(moduleMocks.getModuleAssets).not.toHaveBeenCalled()
     expect(moduleMocks.getModuleRegexScripts).not.toHaveBeenCalled()
+})
+
+describe('editprocess effects', () => {
+    const editprocess = (output: string, flag = 'g'): customscript => ({ ...makeScript('x', output, flag), type: 'editprocess' })
+
+    afterEach(() => {
+        mocks.database.presetRegex = []
+        mocks.pluginV2.editprocess.clear()
+    })
+
+    it('finds a plugin handler or a script that injects or sets an emotion', () => {
+        expect(editProcessHasEffects(makeCharacter([editprocess('plain'), makeScript('x', '@@emo happy')]))).toBe(false)
+        expect(editProcessHasEffects(makeCharacter([editprocess('@@emo happy')]))).toBe(true)
+        expect(editProcessHasEffects(makeCharacter([editprocess('@@inject')]))).toBe(true)
+        expect(editProcessHasEffects(makeCharacter([editprocess('note', 'g<inject>')]))).toBe(true)
+
+        mocks.database.presetRegex = [editprocess('@@emo happy')]
+        expect(editProcessHasEffects(makeCharacter([]))).toBe(true)
+        mocks.database.presetRegex = []
+        moduleMocks.getModuleRegexScripts.mockReturnValueOnce([editprocess('@@inject')] as never[])
+        expect(editProcessHasEffects(makeCharacter([]))).toBe(true)
+
+        mocks.pluginV2.editprocess.add(async (data) => data)
+        expect(editProcessHasEffects(makeCharacter([]))).toBe(true)
+    })
 })
 
 const emptyResultWithAction = [

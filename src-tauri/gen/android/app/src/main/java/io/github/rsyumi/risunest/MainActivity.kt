@@ -1393,7 +1393,9 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           )
           launchSafSourcePicker(
             launch = {
-              if (content) contentSourcePicker.launch(arrayOf("*/*"))
+              if (content && importDestination != SafContentImportDestination.PRESET) {
+                contentSourcePicker.launch(arrayOf("*/*"))
+              }
               else legacyBackupSourcePicker.launch(arrayOf("*/*"))
             },
             onFailure = {
@@ -1797,7 +1799,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             contentResolverSource(uri, displayName, totalBytes)
           }
         }
-        val (supported, unsupported) = partitionDocumentSources(sources, pending.content)
+        val (supported, unsupported) = partitionDocumentSources(sources, pending.content, pending.importDestination)
         if (supported.isEmpty()) {
           SafSpoolBatch(emptyList(), unsupported)
         } else {

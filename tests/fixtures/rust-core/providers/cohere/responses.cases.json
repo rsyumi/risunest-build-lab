@@ -1,0 +1,689 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "cohereAPIKey": "sk-synthetic-cohere",
+    "mistralKey": "sk-synthetic-mistral",
+    "proxyKey": "sk-synthetic-proxy",
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "newOAIHandle": true,
+    "reverseProxyOobaMode": false,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "extractJson": "",
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 8,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "text",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": "Hello there."
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-unicode",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": "日本語 😀 \"q\" \\ \n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-whitespace-only",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": " "
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-with-extra-fields",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": "Hi",
+            "generation_id": "g",
+            "meta": {
+              "tokens": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-empty-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-missing-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "generation_id": "g"
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-null-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-zero-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-false-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "data-null-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": null
+        }
+      ]
+    },
+    {
+      "id": "data-array-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": [
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-string-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": "text"
+        }
+      ]
+    },
+    {
+      "id": "data-number-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": 5
+        }
+      ]
+    },
+    {
+      "id": "data-numbers-echo",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": "{\"x\":1.0,\"y\":1e21,\"z\":0.1,\"big\":12345678901234567890,\"s\":\"\\u00e9\",\"t\":[1,2,{\"a\":null}]}"
+        }
+      ]
+    },
+    {
+      "id": "text-bom",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": "﻿{\"text\":\"Bom.\"}"
+        }
+      ]
+    },
+    {
+      "id": "http-400-json",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "message": "invalid api token"
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-with-text",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "text": "Looks like success",
+            "message": "no"
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-500-json-null",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "json": null
+        }
+      ]
+    },
+    {
+      "id": "http-401-text",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 401,
+          "text": "unauthorized"
+        }
+      ]
+    },
+    {
+      "id": "http-500-empty",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "http-500-html",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": "<html>oops</html>"
+        }
+      ]
+    },
+    {
+      "id": "http-200-not-json",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": "not json"
+        }
+      ]
+    },
+    {
+      "id": "http-200-empty-body",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "http-201-ok",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 201,
+          "json": {
+            "text": "Created."
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-302-with-text",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 302,
+          "json": {
+            "text": "Redirected."
+          }
+        }
+      ]
+    },
+    {
+      "id": "transport-error",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "throws": "fetch failed"
+        }
+      ]
+    },
+    {
+      "id": "http-error-long-message",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "id": "text-number-declines",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": 5
+          }
+        }
+      ],
+      "declines": "response-text-not-text"
+    },
+    {
+      "id": "text-true-declines",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": true
+          }
+        }
+      ],
+      "declines": "response-text-not-text"
+    },
+    {
+      "id": "text-object-declines",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": {
+              "a": 1
+            }
+          }
+        }
+      ],
+      "declines": "response-text-not-text"
+    },
+    {
+      "id": "text-array-declines",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "text": [
+              "a"
+            ]
+          }
+        }
+      ],
+      "declines": "response-text-not-text"
+    }
+  ]
+}

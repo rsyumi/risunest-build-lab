@@ -1,0 +1,350 @@
+{
+  "schema": 1,
+  "base": {
+    "root": {
+      "formatversion": 3,
+      "botPresetsId": 0,
+      "selectedPersona": 0,
+      "personas": [
+        {
+          "id": "persona-a",
+          "name": "Synthetic user",
+          "personaPrompt": "",
+          "note": "",
+          "icon": ""
+        }
+      ],
+      "requestRetrys": 0,
+      "useStreaming": false,
+      "ollamaURL": "http://127.0.0.1",
+      "ollamaModel": "synthetic-memory-model",
+      "ollamaModelSource": "local",
+      "ollamaThinkingMode": "auto",
+      "plugins": [],
+      "modules": [],
+      "enabledModules": [],
+      "loadouts": [],
+      "presetChain": "",
+      "additionalPrompt": "",
+      "descriptionPrefix": "",
+      "hanuraiEnable": false,
+      "hypav2": false,
+      "hypaV3": false,
+      "hypaMemory": false,
+      "supaModelType": "subModel",
+      "supaMemoryPrompt": "Summarize the synthetic history.",
+      "maxSupaChunkSize": 1200,
+      "futureRoot": {
+        "preserve": true
+      }
+    },
+    "preset": {
+      "id": "preset-a",
+      "name": "Synthetic memory preset",
+      "aiModel": "ollama-hosted",
+      "subModel": "ollama-hosted",
+      "mainPrompt": "",
+      "jailbreak": "",
+      "globalNote": "",
+      "maxContext": 4000,
+      "maxResponse": 8,
+      "promptTemplate": null,
+      "promptPreprocess": false,
+      "formatingOrder": [
+        "main",
+        "description",
+        "personaPrompt",
+        "chats",
+        "lastChat",
+        "jailbreak",
+        "lorebook",
+        "globalNote",
+        "authorNote"
+      ],
+      "seperateModelsForAxModels": false,
+      "fallbackModels": {
+        "model": [],
+        "memory": [],
+        "emotion": [],
+        "translate": [],
+        "otherAx": []
+      },
+      "futurePreset": {
+        "preserve": true
+      }
+    },
+    "character": {
+      "type": "character",
+      "chaId": "character",
+      "name": "Synthetic character",
+      "chatPage": 0,
+      "supaMemory": true,
+      "desc": "",
+      "firstMessage": "",
+      "alternateGreetings": [],
+      "bias": [],
+      "globalLore": [],
+      "customscript": [],
+      "triggerscript": [],
+      "newGenData": {},
+      "futureCharacter": {
+        "preserve": true
+      }
+    },
+    "conversation": {
+      "id": "conversation",
+      "name": "Synthetic memory conversation",
+      "note": "",
+      "fmIndex": -1,
+      "localLore": [],
+      "scriptstate": {
+        "preserve": "value"
+      },
+      "lastMemory": "prior-memory-marker",
+      "futureConversation": {
+        "keep": [
+          true,
+          1
+        ]
+      }
+    },
+    "messages": [
+      {
+        "role": "user",
+        "data": "Turn 1. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-1",
+        "futureMessage": {
+          "keep": 0
+        }
+      },
+      {
+        "role": "char",
+        "data": "Turn 2. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-2",
+        "futureMessage": {
+          "keep": 1
+        }
+      },
+      {
+        "role": "user",
+        "data": "Turn 3. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-3",
+        "futureMessage": {
+          "keep": 2
+        }
+      },
+      {
+        "role": "char",
+        "data": "Turn 4. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-4",
+        "futureMessage": {
+          "keep": 3
+        }
+      },
+      {
+        "role": "user",
+        "data": "Turn 5. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-5",
+        "futureMessage": {
+          "keep": 4
+        }
+      },
+      {
+        "role": "char",
+        "data": "Turn 6. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-6",
+        "futureMessage": {
+          "keep": 5
+        }
+      },
+      {
+        "role": "user",
+        "data": "Turn 7. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-7",
+        "futureMessage": {
+          "keep": 6
+        }
+      },
+      {
+        "role": "char",
+        "data": "Turn 8. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.",
+        "chatId": "memory-message-8",
+        "futureMessage": {
+          "keep": 7
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "supa-under-limit-existing",
+      "mode": "supa",
+      "conversation": {
+        "supaMemoryData": "seed-memo\nEarlier synthetic memory."
+      },
+      "steps": [
+        {
+          "phase": "main",
+          "content": "Synthetic final response."
+        }
+      ],
+      "expected": "success",
+      "summaryCount": 0
+    },
+    {
+      "id": "supa-summary-success",
+      "mode": "supa",
+      "preset": {
+        "maxContext": 280
+      },
+      "steps": [
+        {
+          "phase": "summary",
+          "content": "Synthetic summary A."
+        },
+        {
+          "phase": "main",
+          "content": "Synthetic final response."
+        }
+      ],
+      "expected": "success",
+      "summaryCount": 1
+    },
+    {
+      "id": "supa-summary-retained-after-main-failure",
+      "mode": "supa",
+      "preset": {
+        "maxContext": 280
+      },
+      "steps": [
+        {
+          "phase": "summary",
+          "content": "Synthetic summary A."
+        },
+        {
+          "phase": "main",
+          "status": 503,
+          "error": "Synthetic main failure."
+        }
+      ],
+      "expected": "main-failure",
+      "summaryCount": 1
+    },
+    {
+      "id": "hypav3-under-limit",
+      "mode": "hypav3",
+      "root": {
+        "hypaV3": true,
+        "hypaV3PresetId": 0,
+        "hypaV3Presets": [
+          {
+            "name": "Synthetic memory",
+            "settings": {
+              "summarizationModel": "subModel",
+              "summarizationPrompt": "Summarize the synthetic history.",
+              "memoryTokensRatio": 0.2,
+              "recentMemoryRatio": 1,
+              "similarMemoryRatio": 0,
+              "enableSimilarityCorrection": false,
+              "useExperimentalImpl": false,
+              "maxChatsPerSummary": 4,
+              "queryChatCount": 3
+            }
+          }
+        ]
+      },
+      "conversation": {
+        "hypaV3Data": {
+          "summaries": []
+        }
+      },
+      "steps": [
+        {
+          "phase": "main",
+          "content": "Synthetic final response."
+        }
+      ],
+      "expected": "success",
+      "summaryCount": 0
+    },
+    {
+      "id": "hypav3-summary-success",
+      "mode": "hypav3",
+      "root": {
+        "hypaV3": true,
+        "hypaV3PresetId": 0,
+        "hypaV3Presets": [
+          {
+            "name": "Synthetic memory",
+            "settings": {
+              "summarizationModel": "subModel",
+              "summarizationPrompt": "Summarize the synthetic history.",
+              "memoryTokensRatio": 0.2,
+              "recentMemoryRatio": 1,
+              "similarMemoryRatio": 0,
+              "enableSimilarityCorrection": false,
+              "useExperimentalImpl": false,
+              "maxChatsPerSummary": 4,
+              "queryChatCount": 3
+            }
+          }
+        ]
+      },
+      "preset": {
+        "maxContext": 280
+      },
+      "steps": [
+        {
+          "phase": "summary",
+          "content": "Synthetic summary A."
+        },
+        {
+          "phase": "main",
+          "content": "Synthetic final response."
+        }
+      ],
+      "expected": "success",
+      "summaryCount": 1
+    },
+    {
+      "id": "hypav3-partial-summary-retained",
+      "mode": "hypav3",
+      "root": {
+        "hypaV3": true,
+        "hypaV3PresetId": 0,
+        "hypaV3Presets": [
+          {
+            "name": "Synthetic memory",
+            "settings": {
+              "summarizationModel": "subModel",
+              "summarizationPrompt": "Summarize the synthetic history.",
+              "memoryTokensRatio": 0.2,
+              "recentMemoryRatio": 1,
+              "similarMemoryRatio": 0,
+              "enableSimilarityCorrection": false,
+              "useExperimentalImpl": false,
+              "maxChatsPerSummary": 2,
+              "queryChatCount": 3
+            }
+          }
+        ]
+      },
+      "preset": {
+        "maxContext": 240
+      },
+      "steps": [
+        {
+          "phase": "summary",
+          "content": "Synthetic summary A."
+        },
+        {
+          "phase": "summary",
+          "status": 503,
+          "error": "Synthetic second summary failure."
+        }
+      ],
+      "expected": "memory-failure",
+      "summaryCount": 1
+    }
+  ]
+}

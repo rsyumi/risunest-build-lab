@@ -6,6 +6,8 @@ mod app_paths;
 mod desktop_notifications;
 #[cfg(desktop)]
 mod startup_appearance;
+#[cfg(desktop)]
+mod startup_notice;
 mod cleanup_secrets;
 mod device_secrets;
 mod cleanup_webview;
@@ -45,6 +47,8 @@ pub mod native_file_jobs;
 pub(crate) mod native_log;
 mod diagnostics;
 mod generation_diagnostics;
+mod native_generation;
+mod native_script;
 mod network_log;
 mod native_media;
 mod native_tokenizer;
@@ -68,6 +72,7 @@ mod publication_upload;
     target_os = "macos"
 ))]
 mod regex_shadow;
+mod render_display;
 #[cfg(not(target_os = "android"))]
 mod renderer_recovery;
 mod server_sync;
@@ -326,6 +331,75 @@ fn ipc_read_guard_script() -> String {
     )
 }
 
+/// Resets the per-document native state when the main document starts. Page
+/// starts arrive on the main thread, so the persistent store waits for the
+/// outgoing document's operations elsewhere and holds new ones until then.
+fn reset_renderer_sessions<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use persistent_store::commands::RendererReset;
+    let persistent_reset = app
+        .try_state::<persistent_store::PersistentStoreState>()
+        .and_then(|state| match state.begin_renderer_reset() {
+            Ok(reset) => Some(reset),
+            Err(error) => {
+                crate::nlog!("error", "failed to reset persistent renderer session: {error}");
+                None
+            }
+        });
+    // Server sync work registers before it enters the store, so the drain does
+    // not order it; cancelling it now also shortens the drain.
+    if let Some(state) = app.try_state::<server_sync::commands::ServerSyncCommandState>() {
+        if let Err(error) = state.reset_renderer_session() {
+            crate::nlog!(
+                "error",
+                "failed to reset server sync renderer session: {}",
+                error.code
+            );
+        }
+    }
+    let reset = match persistent_reset {
+        // The earlier start's reset clears these sessions once its document's operations end.
+        Some(RendererReset::Pending) => return,
+        Some(reset) => reset,
+        None => {
+            reset_admitted_sessions(app);
+            return;
+        }
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let maintenance = match reset {
+            RendererReset::Started(maintenance) => maintenance,
+            // Other maintenance may still wait for the outgoing document's
+            // operations, so the reset starts when that maintenance ends.
+            RendererReset::AfterMaintenance(reset) => reset.wait_for_gate(),
+            RendererReset::Pending => return,
+        };
+        let state = app.state::<persistent_store::PersistentStoreState>();
+        // The outgoing document's operations may still open these sessions, so
+        // they are cleared after those operations end and before the new
+        // document can begin its own.
+        let reset = state.finish_renderer_reset(maintenance, || reset_admitted_sessions(&app));
+        if let Err(error) = reset {
+            crate::nlog!("error", "failed to reset persistent renderer session: {error}");
+        }
+    });
+}
+
+/// Clears the durable CAS and native media sessions, which only admitted
+/// renderer operations open.
+fn reset_admitted_sessions<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(state) = app.try_state::<asset_repository::commands::DurableCasJobState>() {
+        if let Err(error) = state.reset_renderer_session(app) {
+            crate::nlog!("error", "failed to reset durable CAS renderer session: {error}");
+        }
+    }
+    if let Some(state) = app.try_state::<native_media::ipc::NativeMediaIpcState>() {
+        if let Err(error) = state.reset_renderer_session() {
+            crate::nlog!("error", "failed to reset native media renderer session: {error}");
+        }
+    }
+}
+
 /// Product initialization shared by native entry points. An alternative entry
 /// manages its own [`AppPaths`] before building.
 pub fn builder() -> tauri::Builder<tauri::Wry> {
@@ -422,47 +496,10 @@ fn builder_with_main_window(
                     && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                 {
                     generation_diagnostics::document_started();
-                    if let Some(state) =
-                        webview.try_state::<persistent_store::PersistentStoreState>()
-                    {
-                        if let Err(error) = state.reset_renderer_session() {
-                            crate::nlog!(
-                                "error",
-                                "failed to reset persistent renderer session: {error}"
-                            );
-                        }
+                    if let Some(state) = webview.try_state::<render_display::RenderDisplaySessions>() {
+                        state.reset_renderer_session();
                     }
-                    if let Some(state) =
-                        webview.try_state::<asset_repository::commands::DurableCasJobState>()
-                    {
-                        if let Err(error) = state.reset_renderer_session(webview.app_handle()) {
-                            crate::nlog!(
-                                "error",
-                                "failed to reset durable CAS renderer session: {error}"
-                            );
-                        }
-                    }
-                    if let Some(state) =
-                        webview.try_state::<native_media::ipc::NativeMediaIpcState>()
-                    {
-                        if let Err(error) = state.reset_renderer_session() {
-                            crate::nlog!(
-                                "error",
-                                "failed to reset native media renderer session: {error}"
-                            );
-                        }
-                    }
-                    if let Some(state) =
-                        webview.try_state::<server_sync::commands::ServerSyncCommandState>()
-                    {
-                        if let Err(error) = state.reset_renderer_session() {
-                            crate::nlog!(
-                                "error",
-                                "failed to reset server sync renderer session: {}",
-                                error.code
-                            );
-                        }
-                    }
+                    reset_renderer_sessions(webview.app_handle());
                     webview
                         .state::<android_commit_transport::AndroidCommitState>()
                         .reset();
@@ -476,44 +513,11 @@ fn builder_with_main_window(
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
                 generation_diagnostics::document_started();
+                if let Some(state) = webview.try_state::<render_display::RenderDisplaySessions>() {
+                    state.reset_renderer_session();
+                }
                 renderer_recovery::document_started(webview.app_handle());
-                if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
-                    if let Err(error) = state.reset_renderer_session() {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset persistent renderer session: {error}"
-                        );
-                    }
-                }
-                if let Some(state) =
-                    webview.try_state::<asset_repository::commands::DurableCasJobState>()
-                {
-                    if let Err(error) = state.reset_renderer_session(webview.app_handle()) {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset durable CAS renderer session: {error}"
-                        );
-                    }
-                }
-                if let Some(state) = webview.try_state::<native_media::ipc::NativeMediaIpcState>() {
-                    if let Err(error) = state.reset_renderer_session() {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset native media renderer session: {error}"
-                        );
-                    }
-                }
-                if let Some(state) =
-                    webview.try_state::<server_sync::commands::ServerSyncCommandState>()
-                {
-                    if let Err(error) = state.reset_renderer_session() {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset server sync renderer session: {}",
-                            error.code
-                        );
-                    }
-                }
+                reset_renderer_sessions(webview.app_handle());
                 let _ = webview.with_webview(|_| persistent_commit_transport::reset());
             }
         });
@@ -526,49 +530,16 @@ fn builder_with_main_window(
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
                 generation_diagnostics::document_started();
+                if let Some(state) = webview.try_state::<render_display::RenderDisplaySessions>() {
+                    state.reset_renderer_session();
+                }
                 #[cfg(target_os = "ios")]
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
                 #[cfg(target_os = "linux")]
                 renderer_recovery::document_started(webview.app_handle());
-                if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
-                    if let Err(error) = state.reset_renderer_session() {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset persistent renderer session: {error}"
-                        );
-                    }
-                }
-                if let Some(state) =
-                    webview.try_state::<asset_repository::commands::DurableCasJobState>()
-                {
-                    if let Err(error) = state.reset_renderer_session(webview.app_handle()) {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset durable CAS renderer session: {error}"
-                        );
-                    }
-                }
-                if let Some(state) = webview.try_state::<native_media::ipc::NativeMediaIpcState>() {
-                    if let Err(error) = state.reset_renderer_session() {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset native media renderer session: {error}"
-                        );
-                    }
-                }
-                if let Some(state) =
-                    webview.try_state::<server_sync::commands::ServerSyncCommandState>()
-                {
-                    if let Err(error) = state.reset_renderer_session() {
-                        crate::nlog!(
-                            "error",
-                            "failed to reset server sync renderer session: {}",
-                            error.code
-                        );
-                    }
-                }
+                reset_renderer_sessions(webview.app_handle());
             }
         });
     }
@@ -587,7 +558,7 @@ fn builder_with_main_window(
     }
 
     builder
-        .setup(move |app| {
+        .setup(move |app| exit_on_setup_failure((move || -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(mobile)]
             app.manage(app_paths::AppPaths::resolve(app)?);
             // `run` resolves the desktop manifest before the builder, because the
@@ -598,6 +569,12 @@ fn builder_with_main_window(
                 app.manage(app_paths::AppPaths::desktop(app.config())?.prepared()?);
             }
             let app_data_dir = app_paths::data_root(app)?;
+            // After the single-instance plugin has handed a second launch of
+            // this profile to the running one, so only another profile whose
+            // data root leads here can find the lock held.
+            #[cfg(desktop)]
+            app.manage(app_cleanup::DataRootLock::acquire(&app_data_dir)
+                .map_err(|error| startup_notice::lock_error(app, error, &app_data_dir))?);
             let _ = native_log::logged_without_detail(
                 "network_log_initialize",
                 network_log::initialize(&app.state::<app_paths::AppPaths>()),
@@ -746,12 +723,13 @@ fn builder_with_main_window(
                 setup_native_startup_state.record_failure(error, persistent_gate, native_file_gate);
             }
             Ok(())
-        })
+        })()))
         .manage(asset_repository::commands::DurableCasJobState::default())
         .manage(native_media::ipc::NativeMediaIpcState::default())
         .manage(persistent_store::PersistentStoreState::default())
         .manage(persistent_store::commands::data_health::DataHealthState::default())
         .manage(server_sync::commands::ServerSyncCommandState::default())
+        .manage(render_display::RenderDisplaySessions::default())
         .manage(external_storage::connection_commands::ConnectionCommandState::default())
         .manage(external_storage::job_store::JobCommandState::default())
         .plugin(tauri_plugin_http::init_with_client_builder(platform_tls::apply))
@@ -850,6 +828,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_configure,
         server_sync::commands::server_sync_lww_push,
         server_sync::commands::server_sync_lww_pull,
+        server_sync::commands::server_sync_lww_apply_receive,
         server_sync::commands::server_sync_lww_ack,
         server_sync::commands::server_sync_lww_fence,
         server_sync::commands::server_sync_lww_activate,
@@ -911,11 +890,22 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         diagnostics::diagnostic_device_info,
         native_log::native_log_error,
         generation_diagnostics::native_generation_diagnostic,
+        native_generation::commands::native_generation_host_init,
+        native_generation::commands::native_generation_reserve_ollama,
+        native_generation::commands::native_generation_execute,
+        native_generation::commands::native_generation_cancel,
+        native_generation::commands::native_generation_status,
+        native_generation::commands::native_generation_active,
+        native_generation::commands::native_generation_capture_witness,
+        native_generation::commands::native_generation_proof,
         native_log::native_log_file_path,
         native_log::file_page::native_log_file_read,
         native_log::file_export::native_log_file_export,
         native_log::native_log_set_file_enabled,
         native_tokenizer::tokenize_batch,
+        render_display::render_display_start,
+        render_display::render_display_resume,
+        render_display::render_display_cancel,
         native_media::native_media_encode_inlay_image,
         native_media::ipc::native_media_encode_canvas_webp,
         native_media::ipc::native_media_encode_canvas_webp_finish,
@@ -951,6 +941,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_content_source_metadata,
         native_file_jobs::native_file_job_status,
         native_file_jobs::native_file_job_prepared_content,
+        native_file_jobs::native_file_job_prepared_preset,
+        native_file_jobs::native_file_job_preset_source,
+        native_file_jobs::native_preset_handoff_cleanup,
         native_file_jobs::native_file_job_stage_inline_asset,
         native_file_jobs::native_file_job_list,
         native_file_jobs::native_file_job_finalize,
@@ -1004,6 +997,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_read_conversation,
         persistent_store::commands::pds_read_conversation_metadata,
         persistent_store::commands::pds_read_conversation_window,
+        persistent_store::commands::pds_rebase_conversation_history,
         persistent_store::commands::pds_read_conversation_message_metadata_window,
         persistent_store::commands::pds_query_plugin_storage,
         persistent_store::commands::pds_list_plugin_storage,
@@ -1066,6 +1060,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_archive_preview,
         persistent_store::commands::pds_archive_character,
         persistent_store::commands::pds_restore_character,
+        persistent_store::commands::pds_hydrate_archive_reconcile,
+        persistent_store::commands::pds_reconcile_archived_character,
+        persistent_store::commands::pds_archive_reconcile_histories,
+        persistent_store::commands::pds_read_native_receive_evidence,
         persistent_store::commands::pds_cancel_character_archive_operation,
         persistent_store::commands::pds_replace_begin,
         persistent_store::commands::pds_replace_put_root,
@@ -1159,11 +1157,17 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_working_set_change_page,
         persistent_store::commands::pds_commit_working_set_change_cursor,
     ]);
+    #[cfg(all(test, target_os = "windows"))]
+    let verification_handler = ollama_ui_verification::controller::handler();
     move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
         if app_cleanup::pending(invoke.message.webview_ref().app_handle())
             && !invoke.message.command().starts_with("app_cleanup_") {
             invoke.resolver.reject("cleanup-pending");
             return true;
+        }
+        #[cfg(all(test, target_os = "windows"))]
+        if invoke.message.command().starts_with("ollama_ui_") {
+            return verification_handler(invoke);
         }
         handler(invoke)
     }
@@ -1209,11 +1213,32 @@ fn cancel_incomplete_boot(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(desktop)]
+    let arguments = std::env::args_os().skip(1);
+    #[cfg(not(desktop))]
+    let arguments = std::iter::empty();
+    run_with_arguments(
+        arguments,
+        #[cfg(all(test, target_os = "windows"))]
+        false,
+    );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "../../tests/native/ollama-route/native/entry.rs"]
+mod ollama_ui_verification;
+
+fn run_with_arguments(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+    #[cfg(all(test, target_os = "windows"))] verification: bool,
+) {
+    #[cfg(not(desktop))]
+    let _ = arguments;
     native_log::install_panic_hook();
     // The profile decides every root and identity, so it is settled before any
     // of them is resolved. A malformed option never falls back to the default.
     #[cfg(desktop)]
-    let (profile, arguments) = match launch_profile::split(std::env::args_os().skip(1)) {
+    let (profile, arguments) = match launch_profile::split(arguments) {
         Ok(selection) => selection,
         Err(error) => {
             launch_profile::report_rejected_option(&error);
@@ -1223,6 +1248,11 @@ pub fn run() {
     let mut context = tauri::generate_context!();
     #[cfg(desktop)]
     let profiles = app_paths::DesktopProfiles::new(context.config());
+    #[cfg(all(test, target_os = "windows"))]
+    if verification {
+        ollama_ui_verification::validate_startup(&profiles, profile.as_ref(), cfg!(feature = "custom-protocol"))
+            .expect("native UI verification startup refused");
+    }
     #[cfg(desktop)]
     if let Some(window) = context.config_mut().app.windows.iter_mut().find(|window| window.label == "main") {
         window.visible = false;
@@ -1237,6 +1267,21 @@ pub fn run() {
     if let Some(code) = app_cleanup::run_cli(&arguments, &profiles, profile.as_ref()) {
         std::process::exit(code);
     }
+    // A data root link whose target is gone stops here rather than starting
+    // with an empty store.
+    #[cfg(desktop)]
+    let entry = paths.data_entry.clone();
+    #[cfg(desktop)]
+    let paths = match paths.prepared() {
+        Ok(paths) => paths,
+        Err(error) => {
+            native_log::record_startup_failure(&error.to_string());
+            if let Some(refusal) = error.refusal {
+                startup_notice::show(startup_notice::Refusal::Link(refusal), &entry);
+            }
+            std::process::exit(1);
+        }
+    };
     #[cfg(target_os = "macos")]
     let data_store = profile.as_ref().map(|profile| launch_profile::webview_store(profiles.agent(), profile));
     #[cfg(all(desktop, not(target_os = "macos")))]
@@ -1259,25 +1304,42 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder
-            .manage(paths.prepared().expect("application data root unavailable"))
-            .manage(launch_profile::LaunchProfile(profile));
+            .manage(paths)
+            .manage(launch_profile::LaunchProfile(profile))
+            .manage(startup_notice::Enabled);
+    }
+    #[cfg(all(test, target_os = "windows"))]
+    if verification {
+        builder = builder.any_thread().manage(ollama_ui_verification::controller::Controller::default());
     }
     match builder.build(context) {
         Ok(app) => app.run(handle_run_event),
         Err(error) => {
-            // Cleanup lock contention is an expected refusal while its owner runs.
-            // Other prerequisite failures still terminate, with a native diagnostic.
             native_log::record_startup_failure(&error.to_string());
-            std::process::exit(startup_failure_exit_code(&error));
+            std::process::exit(startup_failure_exit_code(&error.to_string()));
         }
     }
 }
 
-fn startup_failure_exit_code(error: &tauri::Error) -> i32 {
-    match error {
-        tauri::Error::Setup(error) if error.to_string() == "cleanup-app-still-running" => 0,
-        _ => 1,
+/// Tauri runs the setup hook inside the event loop and panics on its error, so
+/// a desktop refusal there is logged and ends the process with its own code.
+fn exit_on_setup_failure(result: Result<(), Box<dyn std::error::Error>>) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(desktop)]
+    if let Err(error) = &result {
+        let message = error.to_string();
+        native_log::record_startup_failure(&message);
+        if let Some(refused) = error.downcast_ref::<startup_notice::Refused>() {
+            refused.show();
+        }
+        std::process::exit(startup_failure_exit_code(&message));
     }
+    result
+}
+
+fn startup_failure_exit_code(message: &str) -> i32 {
+    // Cleanup lock contention is an expected refusal while its owner runs.
+    // Other prerequisite failures still terminate, with a native diagnostic.
+    if message == "cleanup-app-still-running" { 0 } else { 1 }
 }
 
 fn header_map_to_json(header_map: &HeaderMap) -> serde_json::Value {
@@ -1297,10 +1359,10 @@ mod header_map_tests {
 
     #[test]
     fn cleanup_owner_refusal_is_a_logged_exit_not_a_panic() {
-        let setup = |message: &str| tauri::Error::Setup(Box::<dyn std::error::Error>::from(message).into());
-        assert_eq!(startup_failure_exit_code(&setup("cleanup-app-still-running")), 0);
-        assert_eq!(startup_failure_exit_code(&setup("cleanup-lock-unavailable")), 1);
-        assert_eq!(startup_failure_exit_code(&setup("invalid native path")), 1);
+        assert_eq!(startup_failure_exit_code("cleanup-app-still-running"), 0);
+        assert_eq!(startup_failure_exit_code("cleanup-lock-unavailable"), 1);
+        assert_eq!(startup_failure_exit_code("data-root-in-use"), 1);
+        assert_eq!(startup_failure_exit_code("invalid native path"), 1);
     }
 
     #[test]
@@ -1352,6 +1414,52 @@ mod header_map_tests {
             error.chars().count(),
             "Native setup failed: ".chars().count() + MAX_NATIVE_STARTUP_ERROR_CHARS
         );
+    }
+
+    #[test]
+    fn a_page_start_frees_media_uploads_the_outgoing_document_opens_before_its_operations_end() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(persistent_store::PersistentStoreState::default());
+        app.manage(native_media::ipc::NativeMediaIpcState::default());
+        let persistent = app.state::<persistent_store::PersistentStoreState>();
+        let media = app.state::<native_media::ipc::NativeMediaIpcState>();
+
+        let outgoing = persistent.admit_renderer_operation().unwrap();
+        reset_renderer_sessions(app.handle());
+        // Admitted before the page started, the outgoing upload registers after it.
+        let filled = std::iter::from_fn(|| media.open_input_upload(directory.path()).ok()).count();
+        assert!(filled > 0);
+        // Another start leaves the uploads to the pending reset while the operation runs.
+        reset_renderer_sessions(app.handle());
+        assert!(media.open_input_upload(directory.path()).is_err(), "a second start freed the running operation's uploads");
+        drop(outgoing);
+
+        // Admission reopens once the reset has finished.
+        drop(persistent.admit_renderer_operation().unwrap());
+        for _ in 0..filled {
+            media.open_input_upload(directory.path()).expect("the new document gets every upload slot");
+        }
+
+        // The next page starts while a capture waits for this document, which
+        // keeps opening uploads until its operation ends.
+        let outgoing = persistent.admit_renderer_operation().unwrap();
+        std::thread::scope(|scope| {
+            let capture = scope.spawn(|| persistent.acquire_raw_capture().unwrap());
+            while !persistent.maintenance_active() {
+                std::thread::yield_now();
+            }
+            reset_renderer_sessions(app.handle());
+            while media.open_input_upload(directory.path()).is_ok() {}
+            drop(outgoing);
+            drop(capture.join().unwrap());
+        });
+        drop(persistent.admit_renderer_operation().unwrap());
+        for _ in 0..filled {
+            media.open_input_upload(directory.path()).expect("the new document gets every upload slot after the capture");
+        }
     }
 
     #[test]

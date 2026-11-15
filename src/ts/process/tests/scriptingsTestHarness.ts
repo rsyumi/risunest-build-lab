@@ -19,6 +19,9 @@ export function persistentRuntimeModule(
 ) {
     return {
         peekActiveConversationSession: session,
+        getPersistentDataRuntime: vi.fn((): never => { throw new Error('Unexpected production persistence runtime in Lua scripting test') }),
+        capturePersistentMutationToken: vi.fn((): never => { throw new Error('Unexpected persistent mutation token in Lua scripting test') }),
+        acquireDestructiveReplacementFence: vi.fn((): never => { throw new Error('Unexpected persistent replacement fence in Lua scripting test') }),
         captureSelectedConversationAuthority: vi.fn(() => null),
         getActiveConversationViewportSource: vi.fn(() => null),
     } satisfies Partial<PersistentRuntimeModule>
@@ -39,8 +42,20 @@ export function alertModule() {
     } satisfies Partial<typeof import('../../alert')>
 }
 
-export function tokenizerModule() {
-    return { tokenize: vi.fn() } satisfies Partial<typeof import('../../tokenizer')>
+/** A tokenizer whose list counts are zero. Trigger suites share it with the scripting suites. */
+export function tokenizerModule(overrides: Overrides<typeof import('../../tokenizer')> = {}) {
+    // Without a native tokenizer a counter prefetches nothing and counts each text through `tokenize`.
+    const counter = () => ({
+        prefetch: async () => {},
+        count: async (text: string) => await (result.tokenize as (text: string) => Promise<number>)(text),
+    }) as unknown as import('../../tokenizer').TokenCounter
+    const module = {
+        tokenize: vi.fn(),
+        encodeCounts: vi.fn(async (texts: string[]) => texts.map(() => 0)),
+        tokenCounter: vi.fn(counter),
+    } satisfies Partial<typeof import('../../tokenizer')>
+    const result = { ...module, ...overrides }
+    return result
 }
 
 export function utilModule() {

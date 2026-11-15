@@ -13,6 +13,8 @@ export interface HistoryWindowSelectionInput {
     reader: HistoryWindowReader
     tokenBudget: number
     countTokens(text: string): Promise<number>
+    /** Counts the texts of a page the walk just loaded, before the walk counts them one at a time. */
+    prefetchTokens?(texts: string[]): Promise<void>
     /** Enabled messages the window keeps even when fewer reach the token budget. */
     minimumMessages: number
     /** The window starts at or before this absolute index when it is set. */
@@ -51,6 +53,18 @@ export async function selectHistoryWindow(
             bodyPages += 1
         }
     }
+    // The texts the walk can count from `end` back to the first loaded message, newest first.
+    const prefetch = async (end: number) => {
+        if (!input.prefetchTokens) return
+        const texts: string[] = []
+        for (let index = end - 1; index >= loadedStart; index -= 1) {
+            const message = loaded[index - loadedStart]
+            if (message.disabled === 'allBefore') break
+            if (message.disabled !== true) texts.push(typeof message.data === 'string' ? message.data : '')
+        }
+        await input.prefetchTokens(texts)
+        input.assertCurrent?.()
+    }
 
     let start = total
     let tokens = 0
@@ -58,7 +72,10 @@ export async function selectHistoryWindow(
     let endedAtAllBefore = false
     let reachedBudget = false
     while (start > 0 && !reachedBudget && !endedAtAllBefore) {
-        if (loadedStart >= start) await loadBefore(Math.max(start - pageSize, 0))
+        if (loadedStart >= start) {
+            await loadBefore(Math.max(start - pageSize, 0))
+            await prefetch(start)
+        }
         const index = start - 1
         const message = loaded[index - loadedStart]
         start = index

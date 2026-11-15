@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertInventory, assertListedTestsExist, discoverTestEntries, extendedAppTests, nodeAppTests, luaWorkerTests, ownerOf, selectNodeTests } from './suiteOwnership.mjs'
+import { assertInventory, assertListedTestsExist, discoverTestEntries, discoverNodeTestEntries, extendedAppTests, nodeAppTests, luaWorkerTests, ownerOf, selectNodeTests } from './suiteOwnership.mjs'
 import { parseVitestInventory, webExportInventory } from './testInventory.mjs'
 
 const ordinary = 'src/ts/storage/newRegression.test.ts'
@@ -20,6 +20,12 @@ test('classifies ordinary, extended, harness, Node and independent entries', () 
     ['tests/release/contract.node-test.mjs', 'node'],
     ['benchmarks/sync-server/transfer-comparison.test.mjs', 'harness-node'],
     ['benchmarks/startup/startup.node-test.mjs', 'harness-node'],
+    ['tests/native/execution-profile/probe.node-test.mjs', 'harness-node'],
+    ['tests/native/ollama-route/commandWitness.node-test.mjs', 'harness-node'],
+    ['tests/native/ollama-route/driver.node-test.mjs', 'harness-node'],
+    ['tests/native/ollama-route/launch.node-test.mjs', 'harness-node'],
+    ['tests/native/ollama-route/nativeControls.node-test.mjs', 'harness-node'],
+    ['tests/native/ollamaFixture.node-test.mjs', 'node'],
     ['crates/sync-wire/tests/golden.test.mjs', 'node'],
     ['server/manager/gui/tests/App.test.ts', 'manager'],
     ['server/endpoint-registry/tests/registry.worker.ts', 'registry'],
@@ -78,9 +84,9 @@ test('the web export inventory matches only what its own test script runs', () =
 })
 
 test('Node selection is bounded, deterministic and never selects measurement scripts', () => {
-  const files = [ordinary, 'tests/externalStorageWasm.mjs', 'tests/b.node-test.mjs', 'tests/a.node-test.mjs', 'benchmarks/startup/startup.node-test.mjs']
-  assert.deepEqual(selectNodeTests(files), ['tests/a.node-test.mjs', 'tests/b.node-test.mjs'])
-  assert.deepEqual(selectNodeTests(files, 'harness-node'), ['benchmarks/startup/startup.node-test.mjs'])
+  const files = [ordinary, 'tests/externalStorageWasm.mjs', 'tests/b.node-test.mjs', 'tests/a.node-test.mjs', 'benchmarks/startup/startup.node-test.mjs', 'tests/native/execution-profile/probe.node-test.mjs', 'tests/native/ollama-route/commandWitness.node-test.mjs', 'tests/native/ollama-route/driver.node-test.mjs', 'tests/native/ollamaFixture.node-test.mjs']
+  assert.deepEqual(selectNodeTests(files), ['tests/a.node-test.mjs', 'tests/b.node-test.mjs', 'tests/native/ollamaFixture.node-test.mjs'])
+  assert.deepEqual(selectNodeTests(files, 'harness-node'), ['benchmarks/startup/startup.node-test.mjs', 'tests/native/execution-profile/probe.node-test.mjs', 'tests/native/ollama-route/commandWitness.node-test.mjs', 'tests/native/ollama-route/driver.node-test.mjs'])
   assert.throws(() => selectNodeTests([ordinary]), /No Node/)
   assert.throws(() => selectNodeTests(['tests/a.node-test.mjs', 'tests/a.node-test.mjs']), /Duplicate/)
 })
@@ -88,12 +94,23 @@ test('Node selection is bounded, deterministic and never selects measurement scr
 test('filesystem discovery includes untracked unknown roots, but not helpers, builds or symlinks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'risunest-test-inventory-'))
   try {
-    for (const directory of ['src', 'new-package', 'target', 'node_modules']) await mkdir(join(root, directory))
-    for (const file of ['src/new.test.ts', 'src/helper.test.svelte.ts', 'new-package/unknown.test.ts', 'target/generated.test.ts', 'node_modules/vendor.test.ts']) {
+    for (const directory of ['src', 'new-package', 'target', 'node_modules', 'benchmarks', 'tests']) await mkdir(join(root, directory))
+    await mkdir(join(root, 'tests/native/execution-profile'), { recursive: true })
+    await mkdir(join(root, 'tests/native/ollama-route'), { recursive: true })
+    for (const file of ['benchmarks/profile.node-test.mjs', 'tests/plain.node-test.mjs', 'tests/native/execution-profile/probe.node-test.mjs', 'tests/native/ollama-route/commandWitness.node-test.mjs', 'tests/native/ollama-route/driver.node-test.mjs', 'tests/native/ollamaFixture.node-test.mjs', 'src/new.test.ts', 'src/helper.test.svelte.ts', 'new-package/unknown.test.ts', 'target/generated.test.ts', 'node_modules/vendor.test.ts']) {
       await writeFile(join(root, file), '')
     }
     await symlink(join(root, 'src'), join(root, 'linked'), 'junction')
-    assert.deepEqual(await discoverTestEntries(root), ['new-package/unknown.test.ts', 'src/new.test.ts'])
+    assert.deepEqual(await discoverTestEntries(root), [
+      'benchmarks/profile.node-test.mjs', 'new-package/unknown.test.ts', 'src/new.test.ts',
+      'tests/native/execution-profile/probe.node-test.mjs', 'tests/native/ollama-route/commandWitness.node-test.mjs', 'tests/native/ollama-route/driver.node-test.mjs',
+      'tests/native/ollamaFixture.node-test.mjs', 'tests/plain.node-test.mjs',
+    ])
+    assert.deepEqual(selectNodeTests(await discoverNodeTestEntries(root)), ['tests/native/ollamaFixture.node-test.mjs', 'tests/plain.node-test.mjs'])
+    assert.deepEqual(selectNodeTests(await discoverNodeTestEntries(root, true), 'harness-node'), [
+      'benchmarks/profile.node-test.mjs', 'tests/native/execution-profile/probe.node-test.mjs',
+      'tests/native/ollama-route/commandWitness.node-test.mjs', 'tests/native/ollama-route/driver.node-test.mjs',
+    ])
   } finally {
     await rm(root, { recursive: true, force: true })
   }

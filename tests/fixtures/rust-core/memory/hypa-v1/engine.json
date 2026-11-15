@@ -1,0 +1,14 @@
+{
+  "node": "v24.12.0",
+  "v8": "13.6.233.17-node.37",
+  "unicode": "16.0",
+  "tsSourceSha256": {
+    "src/ts/process/memory/hypamemory.ts": "faeba0e8b215247f2fe5e80c105d0e6a222e16af92a7e5bb20ff2c2428abf16f",
+    "src/ts/process/memory/hypaCacheKey.ts": "a6c42ed599c02102fd790299e9b60e06a2d4aa61c031e42f993e243dd1ba5738",
+    "src/ts/storage/hypaEmbeddingCache.ts": "b6d7f069d90a8e29e34d4c1f356b235a0c74dc90866f5ca5f413146b2d9a0e74",
+    "src/ts/runtimePerformanceProfile.ts": "c78f4d0c12dcd0c0feddf54dcb689f56804885d3325b7ee56da684d515a50f50",
+    "src/ts/process/memory/hanuraiMemory.ts": "54f0307476d5f102b7d67b3c92c3dc943a7aa1fd5cdb38d82865dc77ce62139e",
+    "src/ts/tokenizer.ts": "363e56f9db56fb0d6782b87253a92e5d29c4954e75acc12438f7521d83a83eec",
+    "src/ts/globalApi.svelte.ts": "153d6ecb403c35b61154860bb7bde49ddf891d4ee56400f995cec885d8b552d1"
+  }
+}

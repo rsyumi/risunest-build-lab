@@ -1,0 +1,1223 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/generation-send/ollama-memory-send.oracle.test.ts",
+  "fixtureSha256": "b3514136fb9a8926cef264a5975593732ebd203502ab2820f5e55e06fb2f3507",
+  "tsSourceSha256": {
+    "src/ts/process/index.svelte.ts": "8e65836d68bcb5e9abee4ec1c4efa2e8789b74270555474765e2d123f1b0e9c9",
+    "src/ts/process/memory/supaMemory.ts": "6bb15d32e97c79bd61358143453702a058192685337baf32ea8d91bbd7329c5d",
+    "src/ts/process/memory/hypav3.ts": "3da8b301346e469f064f963dd6b098083662faa338e29195152ebdc418fda8ce",
+    "src/ts/process/request/request.ts": "2d280c8be7499f92798cc1d1f7f6e4dae3203e55decda7eb3ce2e07d55be4d79",
+    "src/ts/process/generationState.ts": "074a54e2364e1cc4e9dcb70710ddcfa06e445d38d6d0957354f97629b57c162f",
+    "src/ts/tokenizer.ts": "6c906e19de1968870c3b4deea1b42b4038bf331ef0b1b53c48e25e91890d3d6a",
+    "src/ts/storage/database.svelte.ts": "7565a9014f26828f19dcf3ba97b3d6d93a70bcc0c839699075f2ed660240ecc6",
+    "src/ts/storage/effectiveIdentityState.ts": "d36fb54e264303668f71f06c5a2a9324d62ebbfaae9db08094314975ac3e15c7",
+    "src/ts/storage/persistentDataRuntime.svelte.ts": "d599402643be06a79a164d74a7d65ce919c0fbc69b824787f845b3ce91641ec4",
+    "src/ts/model/modellist.ts": "1c4c97cf87d85b06d891531ef8ab65700a220840f116ba425173d0d8061033ae",
+    "benchmarks/generation-send/ollama-memory-send.oracle.test.ts": "0d95fe78a6f673ecce4df4b3adc066318bec65bbf862ff8b1d74305c96596558"
+  },
+  "node": "v24.12.0",
+  "unicode": "16.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "supa-under-limit-existing",
+      "result": {
+        "id": "supa-under-limit-existing",
+        "trace": [
+          {
+            "phase": "main",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"system\",\"content\":\"[Start a new chat]\"},{\"role\":\"user\",\"content\":\"Turn 1. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 2. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 3. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 4. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 5. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 6. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 7. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 8. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": true,
+                "value": "seed-memo\nEarlier synthetic memory."
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": true,
+                "value": "seed-memo\nEarlier synthetic memory."
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          }
+        ],
+        "before": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "seed-memo\nEarlier synthetic memory."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "historyTextTokens": [
+          {
+            "id": "memory-message-1",
+            "count": 25
+          },
+          {
+            "id": "memory-message-2",
+            "count": 25
+          },
+          {
+            "id": "memory-message-3",
+            "count": 25
+          },
+          {
+            "id": "memory-message-4",
+            "count": 25
+          },
+          {
+            "id": "memory-message-5",
+            "count": 25
+          },
+          {
+            "id": "memory-message-6",
+            "count": 25
+          },
+          {
+            "id": "memory-message-7",
+            "count": 25
+          },
+          {
+            "id": "memory-message-8",
+            "count": 25
+          }
+        ],
+        "outcome": {
+          "kind": "returned",
+          "value": true
+        },
+        "alerts": [],
+        "afterFlush": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "seed-memo\nEarlier synthetic memory."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "output": {
+          "role": "char",
+          "data": "Synthetic final response.",
+          "inputTokens": 233,
+          "outputTokens": 8
+        },
+        "afterReload": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "seed-memo\nEarlier synthetic memory."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "afterReloadStored": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "seed-memo\nEarlier synthetic memory."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "violations": []
+      }
+    },
+    {
+      "id": "supa-summary-success",
+      "result": {
+        "id": "supa-summary-success",
+        "trace": [
+          {
+            "phase": "summary",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"user\",\"content\":\"Synthetic user: [Start a new chat]\\n\\nSynthetic character: \\n\\nSynthetic user: Turn 1. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\\n\\nSynthetic character: Turn 2. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\\n\\n\"},{\"role\":\"system\",\"content\":\"Summarize the synthetic history.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          },
+          {
+            "phase": "main",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"system\",\"content\":\"<Previous Conversation>Synthetic summary A.</Previous Conversation>\"},{\"role\":\"user\",\"content\":\"Turn 3. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 4. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 5. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 6. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 7. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 8. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": true,
+                "value": "memory-message-3\nSynthetic summary A."
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "memory-message-3"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": true,
+                "value": "memory-message-3\nSynthetic summary A."
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "memory-message-3"
+              }
+            }
+          }
+        ],
+        "before": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "historyTextTokens": [
+          {
+            "id": "memory-message-1",
+            "count": 25
+          },
+          {
+            "id": "memory-message-2",
+            "count": 25
+          },
+          {
+            "id": "memory-message-3",
+            "count": 25
+          },
+          {
+            "id": "memory-message-4",
+            "count": 25
+          },
+          {
+            "id": "memory-message-5",
+            "count": 25
+          },
+          {
+            "id": "memory-message-6",
+            "count": 25
+          },
+          {
+            "id": "memory-message-7",
+            "count": 25
+          },
+          {
+            "id": "memory-message-8",
+            "count": 25
+          }
+        ],
+        "outcome": {
+          "kind": "returned",
+          "value": true
+        },
+        "alerts": [],
+        "afterFlush": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "memory-message-3\nSynthetic summary A."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "memory-message-3"
+          }
+        },
+        "output": {
+          "role": "char",
+          "data": "Synthetic final response.",
+          "inputTokens": 183,
+          "outputTokens": 8
+        },
+        "afterReload": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "memory-message-3\nSynthetic summary A."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "memory-message-3"
+          }
+        },
+        "afterReloadStored": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "memory-message-3\nSynthetic summary A."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "memory-message-3"
+          }
+        },
+        "violations": []
+      }
+    },
+    {
+      "id": "supa-summary-retained-after-main-failure",
+      "result": {
+        "id": "supa-summary-retained-after-main-failure",
+        "trace": [
+          {
+            "phase": "summary",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"user\",\"content\":\"Synthetic user: [Start a new chat]\\n\\nSynthetic character: \\n\\nSynthetic user: Turn 1. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\\n\\nSynthetic character: Turn 2. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\\n\\n\"},{\"role\":\"system\",\"content\":\"Summarize the synthetic history.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          },
+          {
+            "phase": "main",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"system\",\"content\":\"<Previous Conversation>Synthetic summary A.</Previous Conversation>\"},{\"role\":\"user\",\"content\":\"Turn 3. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 4. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 5. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 6. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 7. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 8. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": true,
+                "value": "memory-message-3\nSynthetic summary A."
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "memory-message-3"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": true,
+                "value": "memory-message-3\nSynthetic summary A."
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "memory-message-3"
+              }
+            }
+          }
+        ],
+        "before": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "historyTextTokens": [
+          {
+            "id": "memory-message-1",
+            "count": 25
+          },
+          {
+            "id": "memory-message-2",
+            "count": 25
+          },
+          {
+            "id": "memory-message-3",
+            "count": 25
+          },
+          {
+            "id": "memory-message-4",
+            "count": 25
+          },
+          {
+            "id": "memory-message-5",
+            "count": 25
+          },
+          {
+            "id": "memory-message-6",
+            "count": 25
+          },
+          {
+            "id": "memory-message-7",
+            "count": 25
+          },
+          {
+            "id": "memory-message-8",
+            "count": 25
+          }
+        ],
+        "outcome": {
+          "kind": "thrown",
+          "error": {
+            "name": "ResponseError",
+            "message": "Synthetic main failure."
+          }
+        },
+        "alerts": [],
+        "afterFlush": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "memory-message-3\nSynthetic summary A."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "memory-message-3"
+          }
+        },
+        "output": null,
+        "afterReload": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "memory-message-3\nSynthetic summary A."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "memory-message-3"
+          }
+        },
+        "afterReloadStored": {
+          "supaMemoryData": {
+            "present": true,
+            "value": "memory-message-3\nSynthetic summary A."
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "memory-message-3"
+          }
+        },
+        "violations": []
+      }
+    },
+    {
+      "id": "hypav3-under-limit",
+      "result": {
+        "id": "hypav3-under-limit",
+        "trace": [
+          {
+            "phase": "main",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"system\",\"content\":\"<Previous Conversation><Past Events Summary>\\n\\n</Past Events Summary></Previous Conversation>\"},{\"role\":\"system\",\"content\":\"[Start a new chat]\"},{\"role\":\"user\",\"content\":\"Turn 1. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 2. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 3. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 4. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 5. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 6. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 7. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 8. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": true,
+                "value": {
+                  "summaries": []
+                }
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": true,
+                "value": {
+                  "summaries": []
+                }
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          }
+        ],
+        "before": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "summaries": []
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "historyTextTokens": [
+          {
+            "id": "memory-message-1",
+            "count": 25
+          },
+          {
+            "id": "memory-message-2",
+            "count": 25
+          },
+          {
+            "id": "memory-message-3",
+            "count": 25
+          },
+          {
+            "id": "memory-message-4",
+            "count": 25
+          },
+          {
+            "id": "memory-message-5",
+            "count": 25
+          },
+          {
+            "id": "memory-message-6",
+            "count": 25
+          },
+          {
+            "id": "memory-message-7",
+            "count": 25
+          },
+          {
+            "id": "memory-message-8",
+            "count": 25
+          }
+        ],
+        "outcome": {
+          "kind": "returned",
+          "value": true
+        },
+        "alerts": [],
+        "afterFlush": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "summaries": []
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "output": {
+          "role": "char",
+          "data": "Synthetic final response.",
+          "inputTokens": 252,
+          "outputTokens": 8
+        },
+        "afterReload": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "summaries": []
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "afterReloadStored": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "summaries": []
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "violations": []
+      }
+    },
+    {
+      "id": "hypav3-summary-success",
+      "result": {
+        "id": "hypav3-summary-success",
+        "trace": [
+          {
+            "phase": "summary",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"user\",\"content\":\"user: Turn 1. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\\nassistant: Turn 2. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"system\",\"content\":\"Summarize the synthetic history.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          },
+          {
+            "phase": "main",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"system\",\"content\":\"<Previous Conversation><Past Events Summary>\\nSynthetic summary A.\\n</Past Events Summary></Previous Conversation>\"},{\"role\":\"user\",\"content\":\"Turn 3. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 4. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 5. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 6. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"user\",\"content\":\"Turn 7. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"assistant\",\"content\":\"Turn 8. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": true,
+                "value": {
+                  "summaries": [
+                    {
+                      "text": "Synthetic summary A.",
+                      "chatMemos": [
+                        "memory-message-1",
+                        "memory-message-2"
+                      ],
+                      "isImportant": false,
+                      "categoryId": {
+                        "js": "undefined"
+                      },
+                      "tags": []
+                    }
+                  ],
+                  "metrics": {
+                    "lastImportantSummaries": [],
+                    "lastRecentSummaries": [
+                      0
+                    ],
+                    "lastSimilarSummaries": [],
+                    "lastRandomSummaries": []
+                  }
+                }
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": true,
+                "value": {
+                  "summaries": [
+                    {
+                      "text": "Synthetic summary A.",
+                      "chatMemos": [
+                        "memory-message-1",
+                        "memory-message-2"
+                      ],
+                      "isImportant": false,
+                      "tags": []
+                    }
+                  ],
+                  "metrics": {
+                    "lastImportantSummaries": [],
+                    "lastRecentSummaries": [
+                      0
+                    ],
+                    "lastSimilarSummaries": [],
+                    "lastRandomSummaries": []
+                  }
+                }
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          }
+        ],
+        "before": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "historyTextTokens": [
+          {
+            "id": "memory-message-1",
+            "count": 25
+          },
+          {
+            "id": "memory-message-2",
+            "count": 25
+          },
+          {
+            "id": "memory-message-3",
+            "count": 25
+          },
+          {
+            "id": "memory-message-4",
+            "count": 25
+          },
+          {
+            "id": "memory-message-5",
+            "count": 25
+          },
+          {
+            "id": "memory-message-6",
+            "count": 25
+          },
+          {
+            "id": "memory-message-7",
+            "count": 25
+          },
+          {
+            "id": "memory-message-8",
+            "count": 25
+          }
+        ],
+        "outcome": {
+          "kind": "returned",
+          "value": true
+        },
+        "alerts": [],
+        "afterFlush": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "metrics": {
+                "lastImportantSummaries": [],
+                "lastRandomSummaries": [],
+                "lastRecentSummaries": [
+                  0
+                ],
+                "lastSimilarSummaries": []
+              },
+              "summaries": [
+                {
+                  "chatMemos": [
+                    "memory-message-1",
+                    "memory-message-2"
+                  ],
+                  "isImportant": false,
+                  "tags": [],
+                  "text": "Synthetic summary A."
+                }
+              ]
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "output": {
+          "role": "char",
+          "data": "Synthetic final response.",
+          "inputTokens": 192,
+          "outputTokens": 8
+        },
+        "afterReload": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "metrics": {
+                "lastImportantSummaries": [],
+                "lastRandomSummaries": [],
+                "lastRecentSummaries": [
+                  0
+                ],
+                "lastSimilarSummaries": []
+              },
+              "summaries": [
+                {
+                  "chatMemos": [
+                    "memory-message-1",
+                    "memory-message-2"
+                  ],
+                  "isImportant": false,
+                  "tags": [],
+                  "text": "Synthetic summary A."
+                }
+              ]
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "afterReloadStored": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "metrics": {
+                "lastImportantSummaries": [],
+                "lastRandomSummaries": [],
+                "lastRecentSummaries": [
+                  0
+                ],
+                "lastSimilarSummaries": []
+              },
+              "summaries": [
+                {
+                  "chatMemos": [
+                    "memory-message-1",
+                    "memory-message-2"
+                  ],
+                  "isImportant": false,
+                  "tags": [],
+                  "text": "Synthetic summary A."
+                }
+              ]
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "violations": []
+      }
+    },
+    {
+      "id": "hypav3-partial-summary-retained",
+      "result": {
+        "id": "hypav3-partial-summary-retained",
+        "trace": [
+          {
+            "phase": "summary",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"user\",\"content\":\"user: Turn 1. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\\nassistant: Turn 2. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"system\",\"content\":\"Summarize the synthetic history.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          },
+          {
+            "phase": "summary",
+            "body": "{\"model\":\"synthetic-memory-model\",\"messages\":[{\"role\":\"user\",\"content\":\"user: Turn 3. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\\nassistant: Turn 4. A synthetic traveller finds a quiet river beside the ancient forest and returns to the village with a silver lantern.\"},{\"role\":\"system\",\"content\":\"Summarize the synthetic history.\"}],\"stream\":false}",
+            "liveMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            },
+            "jsonMemory": {
+              "supaMemoryData": {
+                "present": false
+              },
+              "hypaV2Data": {
+                "present": false
+              },
+              "hypaV3Data": {
+                "present": false
+              },
+              "lastMemory": {
+                "present": true,
+                "value": "prior-memory-marker"
+              }
+            }
+          }
+        ],
+        "before": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": false
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "historyTextTokens": [
+          {
+            "id": "memory-message-1",
+            "count": 25
+          },
+          {
+            "id": "memory-message-2",
+            "count": 25
+          },
+          {
+            "id": "memory-message-3",
+            "count": 25
+          },
+          {
+            "id": "memory-message-4",
+            "count": 25
+          },
+          {
+            "id": "memory-message-5",
+            "count": 25
+          },
+          {
+            "id": "memory-message-6",
+            "count": 25
+          },
+          {
+            "id": "memory-message-7",
+            "count": 25
+          },
+          {
+            "id": "memory-message-8",
+            "count": 25
+          }
+        ],
+        "outcome": {
+          "kind": "returned",
+          "value": false
+        },
+        "alerts": [
+          "[HypaV3] Summarization failed: ResponseError: Synthetic second summary failure."
+        ],
+        "afterFlush": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "summaries": [
+                {
+                  "chatMemos": [
+                    "memory-message-1",
+                    "memory-message-2"
+                  ],
+                  "isImportant": false,
+                  "tags": [],
+                  "text": "Synthetic summary A."
+                }
+              ]
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "output": null,
+        "afterReload": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "summaries": [
+                {
+                  "chatMemos": [
+                    "memory-message-1",
+                    "memory-message-2"
+                  ],
+                  "isImportant": false,
+                  "tags": [],
+                  "text": "Synthetic summary A."
+                }
+              ]
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "afterReloadStored": {
+          "supaMemoryData": {
+            "present": false
+          },
+          "hypaV2Data": {
+            "present": false
+          },
+          "hypaV3Data": {
+            "present": true,
+            "value": {
+              "summaries": [
+                {
+                  "chatMemos": [
+                    "memory-message-1",
+                    "memory-message-2"
+                  ],
+                  "isImportant": false,
+                  "tags": [],
+                  "text": "Synthetic summary A."
+                }
+              ]
+            }
+          },
+          "lastMemory": {
+            "present": true,
+            "value": "prior-memory-marker"
+          }
+        },
+        "violations": []
+      }
+    }
+  ]
+}

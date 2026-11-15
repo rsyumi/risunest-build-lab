@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/lua-edit.oracle.test.ts",
+  "fixtureSha256": "0726472e19479e3bdcd33f049e443211383135ee17ef701e18c2ac5597404349",
+  "tsSourceSha256": {
+    "src/ts/process/scriptings.ts": "c8dcc5d6cacd76560e96b6e9450c58b42e61fa65e4c768223879ff857f3c72dc",
+    "src/ts/process/luaCodeWrapper.ts": "22c8f2a12159181924c5c6cf0417ea30a94e75fa01648bb29595e6aeaf1db567",
+    "src/ts/process/luaRuntime.ts": "7a0ad48421ce5f05abec45fa5ad867e15704e212105595ceb358c9ea81583f46",
+    "public/lua/json.lua": "89a5c26188288e882bbe62834102671cbb485d78e82cef69d191affc8792df29",
+    "src/ts/process/scriptConversationAccess.ts": "8c56b6dc848cd3c93aba7ca7fc84215c844527e4c4ee660991609e9c320ed0cd",
+    "src/ts/storage/activeConversationSession.ts": "7f0b1043efa412b6d5aed6b9761c362dd3706a5e611e82de80aa7f6c500f888a",
+    "src/ts/storage/saveCoordinatorHelpers.ts": "cc7678b2f01aaeced11b0cb05e7472b3656d8ed3a9e782b3eab2ccaf412d4880",
+    "src/ts/storage/indexedDbPersistentDataStore.ts": "b780e52e9a27931f899b2c1b3b80277d23cc16edcaa144b464319ae4a61d980c",
+    "src/ts/process/conversationOperationContext.ts": "04e0d1455ae70dbcc8d289815bacae4eb8bc98d1674ad095f4907f315a14eecb",
+    "src/ts/process/triggers.ts": "caa16d43c21e9024a09140fb51a178ae01fb8355b80d86619dc5a8528377e4f8",
+    "src/ts/parser/parser.svelte.ts": "bab3c2f7907e2e1be35bf9544d0402b46c4389a92cc5a9228ec8167b475a9f75",
+    "src/ts/parser/chatVar.svelte.ts": "ec7c553d09a4ed5983a309a5d7f1ceb1252cd4873e2cce6a10621d3f4cece187",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/storage/nativePersistenceValue.ts": "4aafec4240a458b6a0d9f2fed62eacc2883250ef5fd6474795b54e5dc83b04de"
+  },
+  "node": "v24.12.0",
+  "unicode": "16.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "empty-code",
+      "result": "297414fb907989cc1ba3c396b633912bbb32e3dae22ddb5248c8791b80e6ff73"
+    }
+  ]
+}

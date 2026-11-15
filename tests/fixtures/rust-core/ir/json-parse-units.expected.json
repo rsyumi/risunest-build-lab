@@ -1,0 +1,2318 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/ir.oracle.test.ts",
+  "fixtureSha256": "4dc68f2ff7a82e1cb334c9710fa8d6fb67e1c57d5cc81e68102f042588ce9a7d",
+  "tsSourceSha256": {},
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "plain",
+      "result": {
+        "value": [
+          "string",
+          "plain 한국어 😀"
+        ],
+        "text": "\"plain 한국어 😀\""
+      }
+    },
+    {
+      "id": "plain-object",
+      "result": {
+        "value": [
+          "object",
+          [
+            [
+              "2",
+              [
+                "number",
+                "2"
+              ]
+            ],
+            [
+              "b",
+              [
+                "number",
+                "1"
+              ]
+            ],
+            [
+              "a",
+              [
+                "array",
+                [
+                  [
+                    "bool",
+                    true
+                  ],
+                  [
+                    "null"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "{\"2\":2,\"b\":1,\"a\":[true,null]}"
+      }
+    },
+    {
+      "id": "raw-high",
+      "result": {
+        "value": [
+          "string",
+          {
+            "u": [
+              55296
+            ]
+          }
+        ],
+        "text": "\"\\ud800\""
+      }
+    },
+    {
+      "id": "raw-low",
+      "result": {
+        "value": [
+          "string",
+          {
+            "u": [
+              57343
+            ]
+          }
+        ],
+        "text": "\"\\udfff\""
+      }
+    },
+    {
+      "id": "raw-reversed-pair",
+      "result": {
+        "value": [
+          "string",
+          {
+            "u": [
+              56832,
+              55357
+            ]
+          }
+        ],
+        "text": "\"\\ude00\\ud83d\""
+      }
+    },
+    {
+      "id": "raw-high-high-low",
+      "result": {
+        "value": [
+          "string",
+          {
+            "u": [
+              55296,
+              55296,
+              56320
+            ]
+          }
+        ],
+        "text": "\"\\ud800𐀀\""
+      }
+    },
+    {
+      "id": "raw-high-escaped-low",
+      "result": {
+        "value": [
+          "string",
+          "😀"
+        ],
+        "text": "\"😀\""
+      }
+    },
+    {
+      "id": "escaped-high-raw-low",
+      "result": {
+        "value": [
+          "string",
+          "😀"
+        ],
+        "text": "\"😀\""
+      }
+    },
+    {
+      "id": "raw-high-then-quote-escape",
+      "result": {
+        "value": [
+          "string",
+          {
+            "u": [
+              55296,
+              34
+            ]
+          }
+        ],
+        "text": "\"\\ud800\\\"\""
+      }
+    },
+    {
+      "id": "raw-low-after-emoji",
+      "result": {
+        "value": [
+          "string",
+          {
+            "u": [
+              55357,
+              56832,
+              56320
+            ]
+          }
+        ],
+        "text": "\"😀\\udc00\""
+      }
+    },
+    {
+      "id": "raw-around-escapes",
+      "result": {
+        "value": [
+          "string",
+          {
+            "u": [
+              55296,
+              10,
+              65,
+              56319
+            ]
+          }
+        ],
+        "text": "\"\\ud800\\nA\\udbff\""
+      }
+    },
+    {
+      "id": "raw-in-key",
+      "result": {
+        "value": [
+          "object",
+          [
+            [
+              {
+                "u": [
+                  56320
+                ]
+              },
+              [
+                "number",
+                "1"
+              ]
+            ],
+            [
+              "a",
+              [
+                "number",
+                "2"
+              ]
+            ]
+          ]
+        ],
+        "text": "{\"\\udc00\":1,\"a\":2}"
+      }
+    },
+    {
+      "id": "raw-and-escaped-key",
+      "result": {
+        "value": [
+          "object",
+          [
+            [
+              {
+                "u": [
+                  55296
+                ]
+              },
+              [
+                "number",
+                "3"
+              ]
+            ],
+            [
+              "b",
+              [
+                "number",
+                "2"
+              ]
+            ]
+          ]
+        ],
+        "text": "{\"\\ud800\":3,\"b\":2}"
+      }
+    },
+    {
+      "id": "raw-index-keys",
+      "result": {
+        "value": [
+          "object",
+          [
+            [
+              "0",
+              [
+                "number",
+                "2"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "1"
+              ]
+            ],
+            [
+              {
+                "u": [
+                  55296
+                ]
+              },
+              [
+                "number",
+                "0"
+              ]
+            ]
+          ]
+        ],
+        "text": "{\"0\":2,\"1\":1,\"\\ud800\":0}"
+      }
+    },
+    {
+      "id": "raw-nested",
+      "result": {
+        "value": [
+          "object",
+          [
+            [
+              "outer",
+              [
+                "array",
+                [
+                  [
+                    "string",
+                    {
+                      "u": [
+                        55296
+                      ]
+                    }
+                  ],
+                  [
+                    "object",
+                    [
+                      [
+                        "inner",
+                        [
+                          "string",
+                          {
+                            "u": [
+                              120,
+                              57343,
+                              121
+                            ]
+                          }
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            [
+              "after",
+              [
+                "number",
+                "-0"
+              ]
+            ]
+          ]
+        ],
+        "text": "{\"outer\":[\"\\ud800\",{\"inner\":\"x\\udfffy\"}],\"after\":0}"
+      }
+    },
+    {
+      "id": "raw-whitespace-around",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\"]"
+      }
+    },
+    {
+      "id": "invalid-raw-outside-string",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "invalid-raw-before-value",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "invalid-raw-after-value",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "invalid-raw-then-garbage",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "invalid-raw-unterminated",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "invalid-raw-key-unquoted",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-null",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "null"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",null]"
+      }
+    },
+    {
+      "id": "wrapped-true",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "bool",
+              true
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",true]"
+      }
+    },
+    {
+      "id": "wrapped-false",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "bool",
+              false
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",false]"
+      }
+    },
+    {
+      "id": "wrapped-zero",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "0"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0]"
+      }
+    },
+    {
+      "id": "wrapped-negative-zero",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "-0"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0]"
+      }
+    },
+    {
+      "id": "wrapped-negative-zero-fraction",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "-0"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0]"
+      }
+    },
+    {
+      "id": "wrapped-zero-exponent",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "0"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0]"
+      }
+    },
+    {
+      "id": "wrapped-negative-zero-exponent",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "-0"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0]"
+      }
+    },
+    {
+      "id": "wrapped-one",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "1"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",1]"
+      }
+    },
+    {
+      "id": "wrapped-negative-one",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "-1"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",-1]"
+      }
+    },
+    {
+      "id": "wrapped-fraction",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "1.5"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",1.5]"
+      }
+    },
+    {
+      "id": "wrapped-exponent-21",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "1e+21"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",1e+21]"
+      }
+    },
+    {
+      "id": "wrapped-exponent-upper",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "1e+21"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",1e+21]"
+      }
+    },
+    {
+      "id": "wrapped-exponent-plus",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "100"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",100]"
+      }
+    },
+    {
+      "id": "wrapped-exponent-minus",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "0.01"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0.01]"
+      }
+    },
+    {
+      "id": "wrapped-small",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "1e-7"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",1e-7]"
+      }
+    },
+    {
+      "id": "wrapped-thirty-digits",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "1.2345678901234568e+29"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",1.2345678901234568e+29]"
+      }
+    },
+    {
+      "id": "wrapped-beyond-safe",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "9007199254740992"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",9007199254740992]"
+      }
+    },
+    {
+      "id": "wrapped-overflow",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "Infinity"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",null]"
+      }
+    },
+    {
+      "id": "wrapped-negative-overflow",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "-Infinity"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",null]"
+      }
+    },
+    {
+      "id": "wrapped-underflow",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "0"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0]"
+      }
+    },
+    {
+      "id": "wrapped-negative-underflow",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "-0"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0]"
+      }
+    },
+    {
+      "id": "wrapped-tenth",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "0.1"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0.1]"
+      }
+    },
+    {
+      "id": "wrapped-subnormal-round-up",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "5e-324"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",5e-324]"
+      }
+    },
+    {
+      "id": "wrapped-min-subnormal",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "5e-324"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",5e-324]"
+      }
+    },
+    {
+      "id": "wrapped-max",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "1.7976931348623157e+308"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",1.7976931348623157e+308]"
+      }
+    },
+    {
+      "id": "wrapped-above-max",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "Infinity"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",null]"
+      }
+    },
+    {
+      "id": "wrapped-long-fraction",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "number",
+              "0.30000000000000004"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",0.30000000000000004]"
+      }
+    },
+    {
+      "id": "wrapped-empty-string",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              ""
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\"]"
+      }
+    },
+    {
+      "id": "wrapped-ascii-string",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "abc"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"abc\"]"
+      }
+    },
+    {
+      "id": "wrapped-escape-letter",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "A"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"A\"]"
+      }
+    },
+    {
+      "id": "wrapped-isolated-high",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\\ud800\"]"
+      }
+    },
+    {
+      "id": "wrapped-isolated-low",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              {
+                "u": [
+                  57343
+                ]
+              }
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\\udfff\"]"
+      }
+    },
+    {
+      "id": "wrapped-escaped-pair",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "😀"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"😀\"]"
+      }
+    },
+    {
+      "id": "wrapped-upper-hex-pair",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "𐀀"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"𐀀\"]"
+      }
+    },
+    {
+      "id": "wrapped-high-then-letter",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              {
+                "u": [
+                  55357,
+                  120
+                ]
+              }
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\\ud83dx\"]"
+      }
+    },
+    {
+      "id": "wrapped-reversed-pair",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              {
+                "u": [
+                  56832,
+                  55357
+                ]
+              }
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\\ude00\\ud83d\"]"
+      }
+    },
+    {
+      "id": "wrapped-short-escapes",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "\\\"/\b\f\n\r\t"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\\\\\\\"/\\b\\f\\n\\r\\t\"]"
+      }
+    },
+    {
+      "id": "wrapped-control-escapes",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "\u0000\u001f"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\\u0000\\u001f\"]"
+      }
+    },
+    {
+      "id": "wrapped-line-separators",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "  "
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"  \"]"
+      }
+    },
+    {
+      "id": "wrapped-hangul",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "한국어"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"한국어\"]"
+      }
+    },
+    {
+      "id": "wrapped-raw-emoji",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              "😀"
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"😀\"]"
+      }
+    },
+    {
+      "id": "wrapped-escaped-high-raw-low",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "string",
+              {
+                "u": [
+                  55357,
+                  55357,
+                  56832
+                ]
+              }
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",\"\\ud83d😀\"]"
+      }
+    },
+    {
+      "id": "wrapped-empty-array",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "array",
+              []
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",[]]"
+      }
+    },
+    {
+      "id": "wrapped-nested-array",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "array",
+              [
+                [
+                  "number",
+                  "1"
+                ],
+                [
+                  "array",
+                  [
+                    [
+                      "number",
+                      "2"
+                    ],
+                    [
+                      "array",
+                      [
+                        [
+                          "number",
+                          "3"
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",[1,[2,[3]]]]"
+      }
+    },
+    {
+      "id": "wrapped-mixed-array",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "array",
+              [
+                [
+                  "null"
+                ],
+                [
+                  "bool",
+                  true
+                ],
+                [
+                  "string",
+                  "x"
+                ],
+                [
+                  "object",
+                  []
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",[null,true,\"x\",{}]]"
+      }
+    },
+    {
+      "id": "wrapped-json-whitespace",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "array",
+              [
+                [
+                  "number",
+                  "1"
+                ],
+                [
+                  "number",
+                  "2"
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",[1,2]]"
+      }
+    },
+    {
+      "id": "wrapped-empty-object",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              []
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{}]"
+      }
+    },
+    {
+      "id": "wrapped-object",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "a",
+                  [
+                    "number",
+                    "1"
+                  ]
+                ],
+                [
+                  "b",
+                  [
+                    "number",
+                    "2"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"a\":1,\"b\":2}]"
+      }
+    },
+    {
+      "id": "wrapped-duplicate-key",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "a",
+                  [
+                    "number",
+                    "3"
+                  ]
+                ],
+                [
+                  "b",
+                  [
+                    "number",
+                    "2"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"a\":3,\"b\":2}]"
+      }
+    },
+    {
+      "id": "wrapped-proto-key",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "__proto__",
+                  [
+                    "object",
+                    [
+                      [
+                        "x",
+                        [
+                          "number",
+                          "1"
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"__proto__\":{\"x\":1}}]"
+      }
+    },
+    {
+      "id": "wrapped-index-keys",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "0",
+                  [
+                    "number",
+                    "5"
+                  ]
+                ],
+                [
+                  "1",
+                  [
+                    "number",
+                    "3"
+                  ]
+                ],
+                [
+                  "2",
+                  [
+                    "number",
+                    "2"
+                  ]
+                ],
+                [
+                  "b",
+                  [
+                    "number",
+                    "1"
+                  ]
+                ],
+                [
+                  "a",
+                  [
+                    "number",
+                    "4"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"0\":5,\"1\":3,\"2\":2,\"b\":1,\"a\":4}]"
+      }
+    },
+    {
+      "id": "wrapped-index-boundary",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "1",
+                  [
+                    "number",
+                    "4"
+                  ]
+                ],
+                [
+                  "4294967294",
+                  [
+                    "number",
+                    "1"
+                  ]
+                ],
+                [
+                  "4294967295",
+                  [
+                    "number",
+                    "2"
+                  ]
+                ],
+                [
+                  "01",
+                  [
+                    "number",
+                    "3"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"1\":4,\"4294967294\":1,\"4294967295\":2,\"01\":3}]"
+      }
+    },
+    {
+      "id": "wrapped-non-index-numbers",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "1",
+                  [
+                    "number",
+                    "3"
+                  ]
+                ],
+                [
+                  "-1",
+                  [
+                    "number",
+                    "1"
+                  ]
+                ],
+                [
+                  "1.5",
+                  [
+                    "number",
+                    "2"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"1\":3,\"-1\":1,\"1.5\":2}]"
+      }
+    },
+    {
+      "id": "wrapped-duplicate-index",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "0",
+                  [
+                    "string",
+                    "b"
+                  ]
+                ],
+                [
+                  "1",
+                  [
+                    "string",
+                    "c"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"0\":\"b\",\"1\":\"c\"}]"
+      }
+    },
+    {
+      "id": "wrapped-isolated-key",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  {
+                    "u": [
+                      55296
+                    ]
+                  },
+                  [
+                    "number",
+                    "1"
+                  ]
+                ],
+                [
+                  "a",
+                  [
+                    "number",
+                    "2"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"\\ud800\":1,\"a\":2}]"
+      }
+    },
+    {
+      "id": "wrapped-nested-object",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "outer",
+                  [
+                    "object",
+                    [
+                      [
+                        "inner",
+                        [
+                          "array",
+                          [
+                            [
+                              "object",
+                              [
+                                [
+                                  "deep",
+                                  [
+                                    "null"
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ],
+                [
+                  "after",
+                  [
+                    "string",
+                    "x"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"outer\":{\"inner\":[{\"deep\":null}]},\"after\":\"x\"}]"
+      }
+    },
+    {
+      "id": "wrapped-empty-key",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "object",
+              [
+                [
+                  "",
+                  [
+                    "number",
+                    "1"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",{\"\":1}]"
+      }
+    },
+    {
+      "id": "wrapped-depth-20",
+      "result": {
+        "value": [
+          "array",
+          [
+            [
+              "string",
+              {
+                "u": [
+                  55296
+                ]
+              }
+            ],
+            [
+              "array",
+              [
+                [
+                  "array",
+                  [
+                    [
+                      "array",
+                      [
+                        [
+                          "array",
+                          [
+                            [
+                              "array",
+                              [
+                                [
+                                  "array",
+                                  [
+                                    [
+                                      "array",
+                                      [
+                                        [
+                                          "array",
+                                          [
+                                            [
+                                              "array",
+                                              [
+                                                [
+                                                  "array",
+                                                  [
+                                                    [
+                                                      "array",
+                                                      [
+                                                        [
+                                                          "array",
+                                                          [
+                                                            [
+                                                              "array",
+                                                              [
+                                                                [
+                                                                  "array",
+                                                                  [
+                                                                    [
+                                                                      "array",
+                                                                      [
+                                                                        [
+                                                                          "array",
+                                                                          [
+                                                                            [
+                                                                              "array",
+                                                                              [
+                                                                                [
+                                                                                  "array",
+                                                                                  [
+                                                                                    [
+                                                                                      "array",
+                                                                                      [
+                                                                                        [
+                                                                                          "array",
+                                                                                          [
+                                                                                            [
+                                                                                              "number",
+                                                                                              "1"
+                                                                                            ]
+                                                                                          ]
+                                                                                        ]
+                                                                                      ]
+                                                                                    ]
+                                                                                  ]
+                                                                                ]
+                                                                              ]
+                                                                            ]
+                                                                          ]
+                                                                        ]
+                                                                      ]
+                                                                    ]
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ],
+        "text": "[\"\\ud800\",[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]"
+      }
+    },
+    {
+      "id": "wrapped-invalid-empty-source",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-blank-source",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-leading-zero",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-plus",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-trailing-dot",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-leading-dot",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-bare-exponent",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-minus",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-array-trailing-comma",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-object-trailing-comma",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-unquoted-key",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-single-quote",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-hex-escape",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-short-unicode",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-bad-unicode",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-unterminated",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-raw-newline",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-raw-tab",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-nan",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-infinity",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-negative-infinity",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-two-values",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-partial-literal",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-missing-comma",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-missing-colon",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-nbsp",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-bom",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-vertical-tab",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-form-feed",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-unclosed-array",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-hex-number",
+      "result": {
+        "error": "SyntaxError"
+      }
+    },
+    {
+      "id": "wrapped-invalid-negative-leading-zero",
+      "result": {
+        "error": "SyntaxError"
+      }
+    }
+  ]
+}

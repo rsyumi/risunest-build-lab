@@ -1,5 +1,6 @@
 import { runContractScenarios, verifyContractReadback } from './contractScenarios'
 import { endsByNativeExit, runNativeExitPhase, verifySessionEndReadback } from './lifecycleScenarios'
+import { isGenerationPhase, runGenerationPhase } from './generationScenarios'
 import { invoke } from '@tauri-apps/api/core'
 import { failureRecord } from '../../benchmarks/failureRecord'
 import { Buffer } from 'buffer'
@@ -61,7 +62,10 @@ try {
         await runNativeExitPhase(phase, store, fixture)
         await new Promise<never>(() => {})
     }
-    if (phase.phase === 'official-account-benchmark') {
+    if (isGenerationPhase(phase.phase)) {
+        // A phase that a later document finishes leaves this one waiting for its loss.
+        if (await runGenerationPhase(phase, store.lastOpenResult?.revision, cases)) await new Promise<never>(() => {})
+    } else if (phase.phase === 'official-account-benchmark') {
         const { runOfficialAccountMeasurements } = await import('../../benchmarks/official-account/suite')
         measurements = await runOfficialAccountMeasurements(store, phase.accountOrigin ?? '')
         cases.push('official-account-assets-and-ledger')

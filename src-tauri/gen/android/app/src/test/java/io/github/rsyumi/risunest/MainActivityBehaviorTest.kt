@@ -45,6 +45,14 @@ class MainActivityBehaviorTest {
     }
     assertEquals(false, isNativeContentSource("database.risudat"))
     assertEquals(false, isNativeContentSource("program.exe"))
+    for (name in listOf("preset.json", "preset.PRESET", "preset.risupreset", "preset.RISUP")) {
+      assertTrue(name, isNativeContentSource(name, SafContentImportDestination.PRESET))
+    }
+    for (name in listOf("card.png", "module.risum", "card.charx", "preset.risup.txt")) {
+      assertFalse(name, isNativeContentSource(name, SafContentImportDestination.PRESET))
+    }
+    assertFalse(isNativeContentSource("preset.risup", SafContentImportDestination.CHARACTER))
+    assertFalse(isNativeContentSource("preset.risupreset", SafContentImportDestination.MODULE))
   }
 
   @Test
@@ -62,6 +70,13 @@ class MainActivityBehaviorTest {
       listOf(SafSpoolFailure("notes.txt", "unsupported-source"), SafSpoolFailure("backup.bin", "unsupported-source")),
       contentRefused,
     )
+
+    val presets = listOf(source("preset.risup"), source("preset.PRESET"), source("card.png"))
+    val (preset, presetRefused) = partitionDocumentSources(
+      presets, content = true, destination = SafContentImportDestination.PRESET,
+    )
+    assertEquals(listOf("preset.risup", "preset.PRESET"), preset.map { it.displayName })
+    assertEquals(listOf(SafSpoolFailure("card.png", "unsupported-source")), presetRefused)
 
     val (backup, backupRefused) = partitionDocumentSources(picked, content = false)
     assertEquals(listOf("backup.bin"), backup.map { it.displayName })
@@ -97,6 +112,12 @@ class MainActivityBehaviorTest {
 
   @Test
   fun `long native SAF candidate names preserve their persisted extension for dispatch`() {
+    for (suffix in listOf(".preset", ".risupreset", ".RISUP")) {
+      val preset = safeSafDisplayName("a".repeat(181) + suffix)
+      assertEquals(180, preset.length)
+      assertTrue(preset.endsWith(suffix))
+      assertTrue(isNativeContentSource(preset, SafContentImportDestination.PRESET))
+    }
     val character = safeSafDisplayName("a".repeat(181) + ".charx")
     val risuSave = safeSafDisplayName("b".repeat(181) + ".risudat")
     val png = safeSafDisplayName("p".repeat(181) + ".PNG")

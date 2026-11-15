@@ -5,7 +5,8 @@ import { openSync, closeSync } from 'node:fs'
 import path from 'node:path'
 import { connectVerifiedIdentity, delay, waitForInteractive } from './cdp.mjs'
 import { addSyntheticAssets, seedExpression } from './fixture.mjs'
-import { sanitizeMetrics } from './metrics.mjs'
+import { sanitizeMetrics, assertObservationIdentity, assertCompleteObservation, OBSERVATION_MANIFEST } from './metrics.mjs'
+import { readObservationInputs, verifyObservationManifest } from './observe.mjs'
 
 const options = Object.fromEntries(
     process.argv.slice(2).map((arg) => arg.replace(/^--/, '').split('=')),
@@ -22,6 +23,7 @@ let phase = 'preflight'
 let client
 let provisioned = false
 let previousStayAwake
+let observation
 
 function command(args, extra = {}) {
     const result = spawnSync(adb, ['-s', serial, ...args], {
@@ -82,6 +84,10 @@ async function launch() {
     if (!(await client.evaluate("document.visibilityState === 'visible'")))
         throw new Error('Android app is hidden; unlock the device before measuring')
     await waitForInteractive(client)
+    assertObservationIdentity(await client.evaluate(`({
+        ipcObservation: window.__startupMetrics?.ipcObservation,
+        observerFailure: window.__startupMetrics?.observerFailure,
+    })`), observation)
 }
 
 function walBytes() {
@@ -127,6 +133,10 @@ async function main() {
         throw new Error('Explicit build revision required')
     if (!adb || !/^[a-zA-Z0-9]+$/.test(serial ?? '') || !Number.isSafeInteger(runs) || runs < 1)
         throw new Error('Explicit device and positive runs required')
+    observation = verifyObservationManifest(JSON.parse(await readFile(
+        options.manifest ?? path.join('.tmp/startup-benchmark-dist', OBSERVATION_MANIFEST), 'utf8',
+    )), await readObservationInputs(process.cwd(), 'android'))
+    if (observation.sourceRevision !== options.revision) throw new Error('Android build revision differs from observer')
     await mkdir(directory, { recursive: true })
     if (options.provision === 'true') {
         if (
@@ -190,7 +200,9 @@ async function main() {
                 characters: 500,
                 bytes: 104857600,
                 images: true,
-                compatibility: true,
+                compatibility: false,
+                zeroPlugins: true,
+                pluginBytes: 0,
             })
                 .replace(
                     'let step = 0;',
@@ -322,6 +334,7 @@ async function main() {
                     build: 'debug-agent',
                     revision: options.revision,
                     binarySha256: ownership.apkSha256,
+                    ipcObservation: observation,
                     fixture: JSON.parse(
                         await readFile(path.join(directory, 'fixture.json'), 'utf8'),
                     ),
@@ -362,6 +375,7 @@ async function main() {
         const host = { wal: { startBytes, endBytes: walBytes() }, memory: memory() }
         samples.push({ kind, warmup, ...sample, host })
         await persist()
+        assertCompleteObservation(sample, observation)
         console.log(
             JSON.stringify({
                 kind,

@@ -1,3 +1,5 @@
+import { caseUnicode, type EngineUnicode } from '../process/caseUnicode'
+
 const openTag = '<Thoughts>'
 const closeTag = '</Thoughts>'
 const maxPreviewLength = 800
@@ -6,6 +8,21 @@ const segmenter =
     typeof Intl.Segmenter === 'function'
         ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
         : undefined
+
+export type UnicodeVersion = EngineUnicode
+
+/**
+ * The Unicode version of the grapheme tables the preview splits with, `null` without `Intl.Segmenter`: U+113D1
+ * prepends from Unicode 16 and U+1ACF extends from Unicode 17. No grapheme probe for Unicode 18 is known, so an engine
+ * whose case mapping is Unicode 18 counts as Unicode 18 here too, since one ICU serves both in the WebView engines.
+ */
+export function graphemeSegmenterUnicode(): UnicodeVersion | null {
+    if (!segmenter) return null
+    if (caseUnicode() === 'from18') return 'from18'
+    const first = (text: string) => segmenter.segment(text)[Symbol.iterator]().next().value?.segment
+    if (first('\u{113D1}a') !== '\u{113D1}a') return 'before16'
+    return first('a\u{1ACF}') === 'a\u{1ACF}' ? 'unicode17' : 'unicode16'
+}
 
 export interface StreamingThoughtPreview {
     readonly before: string

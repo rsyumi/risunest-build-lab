@@ -1,0 +1,4807 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "claudeAPIKey": "sk-ant-synthetic",
+    "proxyKey": "sk-proxy-synthetic",
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "thinkingType": "budget",
+    "adaptiveThinkingEffort": "high",
+    "claude1HourCaching": false,
+    "claudeBatching": false,
+    "claudeRetrivalCaching": false,
+    "antiServerOverloads": false,
+    "jsonSchemaEnabled": false,
+    "jsonSchema": "answer",
+    "extractJson": "",
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "simplifiedToolUse": false,
+    "autofillRequestUrl": false,
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "claude-proxy-model",
+    "customAPIFormat": 2,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "polls-until-ended",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "stream-setting-is-removed-from-the-batch",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "stream": true,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "thinking-and-text",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Hmm.\",\"signature\":\"s\"},{\"type\":\"text\",\"text\":\"Done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "redacted-thinking",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"redacted_thinking\",\"data\":\"x\"},{\"type\":\"text\",\"text\":\"Done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "thinking-only-closes-at-the-end",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Hmm.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "text-blocks-join",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"One. \"},{\"type\":\"text\",\"text\":\"Two.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "tool-use-blocks-are-ignored",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Look.\"},{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{}}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "tools-and-system-in-the-batch",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Looks a word up.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The word."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "description": "Tells the time.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "image-in-the-batch",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Look.",
+          "multimodals": [
+            {
+              "type": "image",
+              "base64": "data:image/png;base64,AAAA"
+            }
+          ]
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "max-tokens-and-caching-headers",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true,
+        "claude1HourCaching": true
+      },
+      "maxTokens": 16000,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "additional-params",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true,
+        "applyAdditionalParamsToAll": true,
+        "additionalParams": [
+          [
+            "top_k",
+            "7"
+          ],
+          [
+            "header::x-route",
+            "r"
+          ]
+        ]
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-url",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true,
+        "forceReplaceUrl": "https://proxy.example.test/v1/messages"
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-trailing-slash",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true,
+        "forceReplaceUrl": "https://proxy.example.test/v1/messages/"
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-url",
+      "model": "xcustom:::one",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-claude",
+          "url": "https://llm.example.test/v1/messages",
+          "key": "sk-custom-synthetic",
+          "format": 2,
+          "flags": [
+            7
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "plain-fetch-off-has-no-browser-header",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true,
+        "usePlainFetch": false
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ],
+      "transport": "risu-proxy"
+    },
+    {
+      "id": "unicode-result",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Café 😀   end\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "create-status-400-json",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "type": "error",
+            "error": {
+              "type": "invalid_request_error",
+              "message": "Bad."
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-status-401-plain",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "status": 401,
+          "contentType": "text/plain",
+          "text": "unauthorized"
+        }
+      ]
+    },
+    {
+      "id": "create-status-500-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "status": 500,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "create-status-201-is-a-failure",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "status": 201,
+          "json": {
+            "id": "msgbatch_synthetic"
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-without-id",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "type": "message_batch"
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-id-empty-string",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-id-null",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-id-zero",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-body-array-has-no-id",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": []
+        }
+      ]
+    },
+    {
+      "id": "create-body-string-has-no-id",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": "text"
+        }
+      ]
+    },
+    {
+      "id": "create-body-null-throws",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "text": "null"
+        }
+      ]
+    },
+    {
+      "id": "create-body-not-json-throws",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "status": 200,
+          "text": "not json"
+        }
+      ]
+    },
+    {
+      "id": "create-body-empty-throws",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "status": 200,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "create-transport-error-throws",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "throws": "fetch failed"
+        }
+      ]
+    },
+    {
+      "id": "create-id-number-declines",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": 5
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ],
+      "declines": "batch-id-not-text",
+      "terminal": true
+    },
+    {
+      "id": "create-id-object-declines",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": {
+              "a": 1
+            }
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ],
+      "declines": "batch-id-not-text",
+      "terminal": true
+    },
+    {
+      "id": "create-id-true-declines",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": true
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ],
+      "declines": "batch-id-not-text",
+      "terminal": true
+    },
+    {
+      "id": "create-id-with-slash-declines",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "a/b"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ],
+      "declines": "batch-id-form",
+      "terminal": true
+    },
+    {
+      "id": "create-id-with-space-declines",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "a b"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ],
+      "declines": "batch-id-form",
+      "terminal": true
+    },
+    {
+      "id": "create-id-with-query-declines",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "a?b"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ],
+      "declines": "batch-id-form",
+      "terminal": true
+    },
+    {
+      "id": "status-500-ends-the-stream",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "status": 500,
+          "contentType": "text/plain",
+          "text": "Internal."
+        }
+      ]
+    },
+    {
+      "id": "status-404-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "status": 404,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "status-after-polls-fails",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "status": 503,
+          "json": {
+            "error": {
+              "message": "Down."
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "status-huge-body",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "status": 500,
+          "contentType": "text/plain",
+          "text": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
+        }
+      ]
+    },
+    {
+      "id": "status-transport-error-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "throws": "net down"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-not-json-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "text": "oops"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-null-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "text": "null"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-array-is-not-ended",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": []
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-string-is-not-ended",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": "ended"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-ended-in-other-case-is-not-ended",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "processing_status": "ENDED"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-field-missing-keeps-polling",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {}
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-byte-order-mark-is-stripped",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "chunks": [
+            {
+              "hex": "efbbbf"
+            },
+            {
+              "utf8": "{\"processing_status\":\"ended\"}"
+            }
+          ],
+          "contentType": "application/json"
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "status-canceling-keeps-polling",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "processing_status": "canceling"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-500-ends-the-stream",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "status": 500,
+          "contentType": "text/plain",
+          "text": "Internal."
+        }
+      ]
+    },
+    {
+      "id": "results-404-json",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "status": 404,
+          "json": {
+            "error": {
+              "message": "Gone."
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "results-transport-error-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "throws": "net down"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-empty-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": ""
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-only-blank-lines-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "\n  \n \n"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-unknown-type-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"mystery\"}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-invalid-lines-are-dropped",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "not json\n{\"broken\":\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-null-and-scalars-are-skipped",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "null\n5\n\"text\"\n[]\ntrue\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-crlf-lines",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\r\n"
+        }
+      ]
+    },
+    {
+      "id": "results-no-trailing-newline",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}"
+        }
+      ]
+    },
+    {
+      "id": "results-no-break-space-line-is-dropped",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": " {\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Lost.\"}]}}}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}"
+        }
+      ]
+    },
+    {
+      "id": "results-byte-order-mark-is-stripped",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "chunks": [
+            {
+              "hex": "efbbbf"
+            },
+            {
+              "utf8": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "results-invalid-utf8-byte",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "chunks": [
+            {
+              "utf8": "{\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a"
+            },
+            {
+              "hex": "ff"
+            },
+            {
+              "utf8": "b\"}]}}}\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "results-first-succeeded-wins",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"First.\"}]}}}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Second.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-noise-before-succeeded",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"mystery\"}}\n{\"other\":1}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-succeeded-before-errored",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Won.\"}]}}}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"x\",\"message\":\"Lost.\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-errored-before-succeeded",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"x\",\"message\":\"Won.\"}}}}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Lost.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-canceled-ends-without-text",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"canceled\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-expired",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"expired\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-without-result-key",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"x\"}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-result-null",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"result\":null}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-result-string-type",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"result\":\"succeeded\"}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "results-type-not-text",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"result\":{\"type\":[\"succeeded\"]}}\n{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-message-missing-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\"}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-message-null-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":null}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-message-string-is-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":\"text\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-message-array-is-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":[]}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-missing-is-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"m\"}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-null-is-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":null}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-empty-array-is-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-string-is-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":\"abc\"}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-empty-string-is-empty",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":\"\"}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-object-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":{\"type\":\"text\",\"text\":\"x\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-number-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":5}}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-zero-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":0}}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-false-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":false}}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-null-entry-is-retried",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"A\"},null]}}}\n",
+          "contentType": "application/x-jsonl"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-content-scalar-entries-are-ignored",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[5,\"x\",{\"type\":\"text\",\"text\":\"Kept.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-text-field-missing",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-text-field-null",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":null}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-text-field-number",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":5}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "succeeded-text-field-object",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":{\"a\":1}}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-with-nested-message",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Bad.\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-type-missing",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"message\":\"Bad.\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-message-number",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":5}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-message-true",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":true}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-type-number",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":7,\"message\":\"Bad.\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-type-null",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":null,\"message\":\"Bad.\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-message-empty-uses-json",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":\"\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-message-null-uses-json",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":null}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-message-zero-uses-json",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":0}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-without-nested-error-uses-json",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"type\":\"api_error\",\"message\":\"Flat.\"}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-error-is-a-string",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":\"plain\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-error-is-a-number",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":42}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-error-is-null",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":null}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-error-is-an-array",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":[1,\"a\"]}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-error-missing",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-error-is-a-string",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":\"text\"}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-unicode-message",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":\"Clé invalide 😀\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-message-object",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":{\"a\":1}}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-type-object",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":{\"a\":1},\"message\":\"Bad.\"}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "errored-nested-message-array",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"errored\",\"error\":{\"error\":{\"type\":\"e\",\"message\":[\"a\"]}}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "abort-cancels-the-batch",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 1,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {}
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"canceled\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "abort-after-a-poll",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 2,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {}
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"canceled\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "abort-cancel-transport-error-is-ignored",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 1,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "throws": "net down"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"canceled\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "abort-cancel-status-500-is-ignored",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 1,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "status": 500,
+          "text": "no"
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"canceled\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "abort-is-cancelled-once",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 1,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {}
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"canceled\"}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "abort-but-the-batch-succeeds",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 1,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {}
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "abort-then-status-fails",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 1,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {}
+        },
+        {
+          "status": 500,
+          "text": "down"
+        }
+      ]
+    },
+    {
+      "id": "abort-then-timeout",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "abortAtSleep": 1,
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {},
+          "advanceMs": 87000001
+        }
+      ]
+    },
+    {
+      "id": "timeout-after-a-long-poll",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "processing_status": "in_progress"
+          },
+          "advanceMs": 87000000
+        }
+      ]
+    },
+    {
+      "id": "timeout-at-the-limit-keeps-polling",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "processing_status": "in_progress"
+          },
+          "advanceMs": 86994000
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    },
+    {
+      "id": "timeout-one-millisecond-over",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "processing_status": "in_progress"
+          },
+          "advanceMs": 86994001
+        }
+      ]
+    },
+    {
+      "id": "timeout-while-results-keep-failing",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "throws": "down",
+          "advanceMs": 87000000
+        }
+      ]
+    },
+    {
+      "id": "retried-success-does-not-time-out",
+      "model": "claude-opus-4-6",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "clock": "2026-01-02T03:04:05Z",
+      "db": {
+        "claudeBatching": true
+      },
+      "replies": [
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "type": "message_batch",
+            "processing_status": "in_progress"
+          }
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "",
+          "advanceMs": 60000000
+        },
+        {
+          "json": {
+            "id": "msgbatch_synthetic",
+            "processing_status": "ended"
+          }
+        },
+        {
+          "text": "{\"custom_id\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Batch done.\"}]}}}\n",
+          "contentType": "application/x-jsonl"
+        }
+      ]
+    }
+  ]
+}

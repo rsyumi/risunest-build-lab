@@ -7,7 +7,7 @@ import { getModelInfo, LLMFlags, LLMFormat, type LLMModel } from "../../model/mo
 import { risuChatParser, risuEscape, risuUnescape } from "../../parser/parser.svelte";
 import { pluginProcess, pluginV2 } from "../../plugins/plugins.svelte";
 import { getCurrentCharacter, getCurrentChat, getDatabase, type character } from "../../storage/database.svelte";
-import { tokenizeNum } from "../../tokenizer";
+import { prefetchTokenIds, tokenizeNum } from "../../tokenizer";
 import { sleep } from "../../util";
 import type { OpenAIChat } from "../index.svelte";
 import { getTools } from "../mcp/mcp";
@@ -574,9 +574,10 @@ async function requestNovelAI(arg:RequestDataArgumentExtended):Promise<requestDa
         }
     }
 
+    const biasIds = await prefetchTokenIds(biasString.map((bia) => bia[0]))
     for(let i=0;i<biasString.length;i++){
         const bia = biasString[i]
-        const tokens = await tokenizeNum(bia[0])
+        const tokens = biasIds.get(bia[0]) ?? await tokenizeNum(bia[0])
 
         const tokensInNumberArray:number[] = []
 

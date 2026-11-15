@@ -254,6 +254,12 @@ export class PluginDeviceKeyspace {
         }
     }
 
+    fenceUnknownRemoteChanges(): boolean {
+        const observed = this.#observed.size > 0
+        this.invalidate()
+        return observed
+    }
+
     invalidate(): void {
         this.#generation += 1
         this.#cache = null
@@ -413,6 +419,15 @@ export function getPluginDeviceKeyspace(owner: string): PluginDeviceKeyspace {
         keyspaces.set(owner, keyspace)
     }
     return keyspace
+}
+
+/** Unknown remote writes invalidate every live wrapper without inventing changed keys. */
+export function fenceUnknownPluginDeviceStorageRemoteChanges(): void {
+    let reload = false
+    for (const keyspace of liveKeyspaces) {
+        if (keyspace.fenceUnknownRemoteChanges()) reload = true
+    }
+    if (reload) requestPluginStorageReload()
 }
 
 /** Invalidates held wrappers too; plugin-owned copies remain outside this cache. */

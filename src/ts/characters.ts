@@ -18,7 +18,7 @@ import { updateInlayScreen } from "./process/inlayScreen";
 import { parseMarkdownSafe } from "./parser/parser.svelte";
 import { translateHTML } from "./translator/translator";
 import { beginMobileBackgroundTask, type MobileBackgroundTask } from "./mobileBackgroundTask";
-import { doingChat } from "./process/index.svelte";
+import { doingChat, isNativeGenerationNavigationAllowed } from "./process/generationState";
 import { importCharacter } from "./characterCards";
 import { PngChunk } from "./pngChunk";
 import {
@@ -1038,7 +1038,7 @@ export async function changeChar(index: number, arg:{
         reseter()
         return true
     }
-    if(get(doingChat)){
+    if(get(doingChat) && !isNativeGenerationNavigationAllowed()){
       alertToast(language.navigationBlockedWhileGenerating)
       return false
     }

@@ -1,11 +1,14 @@
 import { DatabaseSync } from 'node:sqlite'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile, readdir } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 import { crc32 } from 'crc'
 import path from 'node:path'
+import { assertAgentDataRoot } from './runtime.mjs'
 
-export function assertSyntheticProfile(root, identifier) {
+export function assertSyntheticProfile(root, identifier, profile) {
+    if (!/^RisuNest\.phase3benchmark\.r[0-9a-f]{12}\.[a-zA-Z0-9]+$/.test(identifier)) throw new Error('Refusing non-benchmark profile')
+    if (profile) { assertAgentDataRoot(root, profile); return }
     if (
         !/^RisuNest\.phase3benchmark\.r[0-9a-f]{12}\.[a-zA-Z0-9]+$/.test(identifier) ||
         path.basename(path.resolve(root)) !== identifier
@@ -18,6 +21,7 @@ export function seedExpression({
     characters = 11,
     bytes = 98_000_000,
     compatibility = true,
+    zeroPlugins = false,
     images = false,
     mutation = false,
     investigation = false,
@@ -38,8 +42,9 @@ export function seedExpression({
         root.coldstorage = ${coldStorage}; root.modules = []; root.didFirstSetup = true;
         root.plugins = [{name: 'Synthetic no-op', version: '2.1', enabled: ${compatibility},
             script: ${JSON.stringify(mutation ? 'const db = getDatabase(); db.temperature = db.temperature === 0.81 ? 0.82 : 0.81;' : '// Synthetic no-op')}, arg: {}, realArg: {}}];
+        if (${zeroPlugins}) root.plugins = [];
         root.language = ${JSON.stringify(locale)};
-        root.pluginCustomStorage = {synthetic: 'x'.repeat(${investigation ? 46_756_003 : pluginBytes})};
+        root.pluginCustomStorage = ${zeroPlugins} ? {} : {synthetic: 'x'.repeat(${investigation ? 46_756_003 : pluginBytes})};
         root.syntheticRootPadding = 'x'.repeat(${investigation ? 6_500_000 : 0});
         const shape = ${
             investigation
@@ -117,8 +122,8 @@ export function seedExpression({
 }
 
 // The app must be stopped before calling this offline fixture writer.
-export async function addSyntheticAssets(root, identifier, count, images = false) {
-    assertSyntheticProfile(root, identifier)
+export async function addSyntheticAssets(root, identifier, count, images = false, profile) {
+    assertSyntheticProfile(root, identifier, profile)
     const db = new DatabaseSync(path.join(root, 'persistent/persistent.sqlite'))
     try {
         const active = JSON.parse(
@@ -209,4 +214,10 @@ export function syntheticPng(index) {
         chunk('IDAT', deflateSync(pixels)),
         chunk('IEND', Buffer.alloc(0)),
     ])
+}
+
+export async function countSyntheticAssetEntries(root, identifier, profile) {
+    assertSyntheticProfile(root, identifier, profile)
+    try { return (await readdir(path.join(root, 'assets'))).length }
+    catch (error) { if (error.code === 'ENOENT') return 0; throw error }
 }

@@ -3,6 +3,7 @@
     import { language } from "src/lang";
     import PromptDataItem from "src/lib/UI/PromptDataItem.svelte";
     import { tokenizePreset, type PromptItem } from "src/ts/process/prompt";
+    import { countTogether } from "src/ts/tokenizer";
     import { templateCheck } from "src/ts/process/templates/templateCheck";
     
     import { DBState } from 'src/ts/stores.svelte';
@@ -18,6 +19,7 @@
     import { onDestroy, onMount } from "svelte";
     import {defaultAutoSuggestPrompt} from "../../../ts/storage/defaultPrompts";
     import AuxModelSelectors from './Model/AuxModelSelectors.svelte'
+    import { htmlTouchDrag } from "src/ts/gui/htmlTouchDrag";
 
     let warns: string[] = $state([])
     let tokens = $state(0)
@@ -35,8 +37,12 @@
   let { onGoBack = () => {}, mode = 'independent', subMenu = $bindable(0) }: Props = $props();
 
     async function executeTokenize(prest: PromptItem[]){
-        tokens = await tokenizePreset(prest, true)
-        extokens = await tokenizePreset(prest, false)
+        const [constant, extended] = await countTogether(
+            () => tokenizePreset(prest, true),
+            () => tokenizePreset(prest, false),
+        )
+        tokens = constant
+        extokens = extended
     }
 
     $effect.pre(() => {
@@ -125,7 +131,7 @@
 {/if}
 
 {#if subMenu === 0}
-    <div class="contain w-full max-w-full mt-4 flex flex-col p-3 rounded-md">
+    <div class="contain w-full max-w-full mt-4 flex flex-col p-3 rounded-md" use:htmlTouchDrag>
         {#if DBState.db.promptTemplate.length === 0}
                 <div class="text-textcolor2">No Format</div>
         {/if}
