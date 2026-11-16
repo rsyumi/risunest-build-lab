@@ -16,7 +16,8 @@ export const isGenerationPhase = (phase: string): boolean => generationPhases.ha
 const characterId = 'character'
 const conversationId = 'conversation'
 const messagesKey = JSON.stringify(['messages', characterId, conversationId])
-const effectKeys = [['root', 'statics'], ['character', characterId, 'lastInteraction'], ['conversation', characterId, conversationId, 'lastMemory']].map(key => JSON.stringify(key))
+const effectKeys = [['root', 'statics'], ['character', characterId, 'lastInteraction'], ['conversation', characterId, conversationId, 'scriptstate'],
+    ['conversation', characterId, conversationId, 'note'], ['conversation', characterId, conversationId, 'lastMemory']].map(key => JSON.stringify(key))
 const terminal = (status: NativeGenerationStatus) => !['reserved', 'running'].includes(status.phase)
 
 function check(condition: unknown, name: string): asserts condition {

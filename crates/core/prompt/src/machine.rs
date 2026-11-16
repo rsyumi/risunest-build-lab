@@ -1435,17 +1435,27 @@ pub(crate) mod tests {
             "trigger-template-default-preset", "trigger-lore-then-trigger-var", "trigger-low-level-off", "trigger-triggercode-any-mode",
             "trigger-modifychat", "trigger-cutchat", "trigger-cutchat-allbefore", "trigger-impersonate", "trigger-decline-lua",
             "trigger-decline-command", "trigger-decline-run-llm", "trigger-decline-similarity", "trigger-decline-request-type",
-            "trigger-decline-output-type", "trigger-decline-trigger-id", "trigger-decline-module-trigger"];
+            "trigger-decline-output-type", "trigger-decline-trigger-id", "trigger-decline-module-trigger", "lua-read-after-cbs-setvar",
+            "lua-read-earlier-trigger-write", "lua-setchat", "lua-setchatrole", "lua-cutchat", "lua-addchat", "lua-insertchat", "lua-removechat",
+            "lua-setfullchat", "lua-runtime-error", "lua-runtrigger-manual", "lua-low-level-on", "lua-low-level-off",
+            "lua-edit-request-listener", "lua-module-trigger"];
         let triggered: Vec<_> = params.iter().filter(|params| matches!(get(params, "observeTriggers", &budget), Some(Value::Bool(true))))
             .map(|params| string(at(params, "id", &budget))).collect();
         // Trigger rows these literal stages cannot reproduce: a `Math.random()` draw the literal CBS does not take, a
         // variable the lore stage writes, and a request trigger, which runs at the request this replay does not reach.
         let unreplayed = ["trigger-random-cbs-order", "trigger-lore-then-trigger-var", "trigger-decline-request-type"];
         // Trigger rows TS sends that the machine refuses at start: effects the trigger runner does not run, and a selected
-        // module with triggers.
+        // module with triggers. The `lua-*` rows run Lua start triggers.
         let trigger_declines = [("trigger-decline-lua", "trigger-effect-triggerlua"), ("trigger-decline-command", "trigger-effect-command"),
             ("trigger-decline-run-llm", "trigger-effect-v2RunLLM"), ("trigger-decline-similarity", "trigger-effect-v2CheckSimilarity"),
-            ("trigger-decline-module-trigger", "modules")];
+            ("trigger-decline-module-trigger", "modules"), ("lua-read-after-cbs-setvar", "trigger-effect-triggerlua"),
+            ("lua-read-earlier-trigger-write", "trigger-effect-triggerlua"), ("lua-setchat", "trigger-effect-triggerlua"),
+            ("lua-setchatrole", "trigger-effect-triggerlua"), ("lua-cutchat", "trigger-effect-triggerlua"),
+            ("lua-addchat", "trigger-effect-triggerlua"), ("lua-insertchat", "trigger-effect-triggerlua"),
+            ("lua-removechat", "trigger-effect-triggerlua"), ("lua-setfullchat", "trigger-effect-triggerlua"),
+            ("lua-runtime-error", "trigger-effect-triggerlua"), ("lua-runtrigger-manual", "trigger-effect-triggerlua"),
+            ("lua-low-level-on", "trigger-effect-triggerlua"), ("lua-low-level-off", "trigger-effect-triggerlua"),
+            ("lua-edit-request-listener", "trigger-effect-triggerlua"), ("lua-module-trigger", "modules")];
         if ollama {
             // These exact cases require the application's CBS, shared entropy and L05 composition; its comparator
             // consumes all fixture rows. This literal-stage replay retains the original cases and decline controls.
@@ -1548,7 +1558,7 @@ pub(crate) mod tests {
     #[test]
     fn the_ollama_literal_cases_reproduce_through_the_machine() {
         let (cases, declined, mismatches) = replay(OLLAMA_EXPECTED, OLLAMA_CASES, true);
-        assert_eq!((cases, declined), (72, 35));
+        assert_eq!((cases, declined), (87, 50));
         assert!(mismatches.is_empty(), "{} mismatches:\n{}", mismatches.len(), mismatches.join("\n"));
     }
 

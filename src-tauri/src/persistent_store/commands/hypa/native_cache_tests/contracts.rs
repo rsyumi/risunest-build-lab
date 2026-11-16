@@ -30,6 +30,8 @@ pub(super) struct Fixture {
     _app: tauri::App<MockRuntime>,
     notify: Arc<dyn Fn() + Send + Sync>,
 }
+// The app's listener holds the state, and a mock app never drops its listeners.
+impl Drop for Fixture { fn drop(&mut self) { self.state.close_for_test(); } }
 impl Fixture {
     pub fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();

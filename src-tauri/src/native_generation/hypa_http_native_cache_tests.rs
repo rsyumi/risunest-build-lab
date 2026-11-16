@@ -13,6 +13,8 @@ struct StoreFixture {
     notify: Arc<dyn Fn() + Send + Sync>,
     _app: tauri::App<MockRuntime>,
 }
+// The app's listener holds the state, and a mock app never drops its listeners.
+impl Drop for StoreFixture { fn drop(&mut self) { self.state.close_for_test(); } }
 impl StoreFixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();

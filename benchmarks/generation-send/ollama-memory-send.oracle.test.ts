@@ -34,16 +34,37 @@ import { reserveGeneration } from '../../src/ts/process/generationState'
 import { resetScriptCache } from '../../src/ts/process/scripts'
 import { tokenize } from '../../src/ts/tokenizer'
 import { safeStructuredClone } from '../../src/ts/safeStructuredClone'
+import localforage from 'localforage'
 import { luaJsonModuleResponse } from './happyDomLuaRuntime'
 
 type RecordValue = Record<string, unknown>
-type Step = { phase: 'summary' | 'main'; content?: string; status?: number; error?: string }
-type Entry = { id: string; mode: 'supa' | 'hypav3'; root?: RecordValue; preset?: RecordValue; conversation?: RecordValue;
-    steps: Step[]; expected: 'success' | 'main-failure' | 'memory-failure'; summaryCount: number }
-type Base = { root: RecordValue; preset: RecordValue; character: RecordValue; conversation: RecordValue; messages: unknown[] }
+// `summary` and `main` go to the hosted Ollama model; `completions` and `embedding` are `globalFetch` calls, answered with
+// `reply` or `vectors`. `abort` is the user's stop while that request is in flight.
+type Step = { phase: 'summary' | 'main' | 'completions' | 'embedding'; content?: string; status?: number; error?: string;
+    url?: string; reply?: unknown; vectors?: number[][]; abort?: boolean }
+// `nativeDecline` is the refusal the native route's memory admission applies to the row, or null when it sends natively.
+type Entry = { id: string; mode: 'supa' | 'hypav3' | 'hypav2' | 'hanurai'; nativeDecline: string | null; root?: RecordValue; preset?: RecordValue;
+    conversation?: RecordValue; steps: Step[]; expected: 'success' | 'main-failure' | 'memory-failure' | 'aborted'; summaryCount: number;
+    summaryMemos?: string[]; alert?: string; consoleError?: string }
+type Base = { root: RecordValue; preset: RecordValue; character: RecordValue; conversation: RecordValue; messages: unknown[]; randomSeed: number }
 const set = readOracleCases<Entry>('memory', 'send')
 const base = (JSON.parse(readFileSync(set.casesPath, 'utf8')) as { base: Base }).base
 const memoryFields = ['supaMemoryData', 'hypaV2Data', 'hypaV3Data', 'lastMemory'] as const
+const hostedEndpoint = 'http://127.0.0.1:80/api/chat'
+const completionsEndpoint = 'https://api.openai.com/v1/completions'
+// The web build's embedding cache, which survives rows unless cleared.
+const vectorStore = localforage.createInstance({ name: 'hypaVector' })
+
+// mulberry32: every row draws the same sequence, without the repeats a constant would give generated ids.
+function seededRandom(seed: number) {
+    let state = seed >>> 0
+    return () => {
+        state = (state + 0x6D2B79F5) >>> 0
+        let value = Math.imul(state ^ (state >>> 15), state | 1)
+        value ^= value + Math.imul(value ^ (value >>> 7), value | 61)
+        return ((value ^ (value >>> 14)) >>> 0) / 4294967296
+    }
+}
 
 function encoded(value: unknown): unknown {
     if (value === undefined) return { js: 'undefined' }
@@ -80,6 +101,7 @@ async function reload(label: string) {
     await immediate()
 }
 async function activate(entry: Entry) {
+    await vectorStore.clear()
     const store = getPersistentDataStore()
     const database = normalizeDatabaseDefaults(databaseFor(entry))
     characterFormatUpdate(database.characters[0])
@@ -104,7 +126,7 @@ afterEach(() => {
     vi.restoreAllMocks()
 })
 
-it('captures Supa and HypaV3 Send requests and persisted memory through real closed boundaries', async () => {
+it('captures memory Send requests and persisted memory through real closed boundaries', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(console, 'debug').mockImplementation(() => {})
     const diagnostics = process.env.RISUNEST_MEMORY_SEND_DIAGNOSTICS
@@ -115,6 +137,8 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
     const failures: { id: string; error: ReturnType<typeof failure> }[] = []
     let fetchHandler: ((input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) | undefined
     const outside: string[] = []
+    // A rejection the row plans, such as the abort a stop gives an in-flight fetch.
+    const planned = new WeakSet<object>()
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const luaJson = luaJsonModuleResponse(input)
         if (luaJson) return luaJson
@@ -124,7 +148,10 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
             throw new Error(message)
         }
         try { return await fetchHandler(input, init) }
-        catch (error) { outside.push(`Fetch observation failed: ${failure(error).message}`); throw error }
+        catch (error) {
+            if (!(typeof error === 'object' && error !== null && planned.has(error))) outside.push(`Fetch observation failed: ${failure(error).message}`)
+            throw error
+        }
     }))
     for (const entry of set.cases) {
         const violations: string[] = []
@@ -135,6 +162,7 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
         let timer: ReturnType<typeof setTimeout> | undefined
         let expired = false
         const restoreClock = vi.spyOn(Date, 'now').mockReturnValue(1767225600000)
+        const restoreRandom = vi.spyOn(Math, 'random').mockImplementation(seededRandom(base.randomSeed))
         const restoreError = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
             const error = args[0] as { name?: string; message?: string; stack?: string } | null
             const message = args.map(String).join(' ')
@@ -151,6 +179,11 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
                 consoleErrors.push({ kind: 'planned-summary-failure', message })
                 return
             }
+            // Logged text that the row plans, such as an abort's engine-specific error; kept out of the result.
+            if (entry.consoleError && message.includes(entry.consoleError)) {
+                consoleErrors.push({ kind: 'planned', message })
+                return
+            }
             violations.push(`Unexpected console error: ${message}`)
         })
         const reject = (message: string): never => { violations.push(message); throw new Error(message) }
@@ -164,6 +197,8 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
             expect(getDatabase().modules).toEqual([])
             expect(getDatabase().enabledModules).toEqual([])
             for (const hooks of [pluginV2.replacerbeforeRequest, pluginV2.replacerafterRequest, pluginV2.chatOutput]) expect(hooks.size).toBe(0)
+            // The send reads the row's settings, so a decline row's setting survives normalization and the preset mirror.
+            expect(getDatabase(), entry.id).toMatchObject({ ...entry.root, ...entry.preset })
             const before = (await store.readConversation('character', 'conversation'))!.value
             observation.before = memory(before)
             // These are the actual hosted model's cl100k counts, never stand-in policy counts.
@@ -172,17 +207,41 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
             fetchHandler = async (input, init) => {
                 const step = entry.steps[position++]
                 if (!step) return reject(`${entry.id}: unplanned request ${position}`)
-                if (String(input) !== 'http://127.0.0.1:80/api/chat' || init?.method !== 'POST') return reject(`${entry.id}: unexpected endpoint or method`)
+                const hosted = step.phase === 'summary' || step.phase === 'main'
+                const endpoint = hosted ? hostedEndpoint : step.phase === 'completions' ? completionsEndpoint : step.url
+                if (String(input) !== endpoint || init?.method !== 'POST') return reject(`${entry.id}: unexpected endpoint or method ${String(input)}`)
                 if (typeof init?.body !== 'string') return reject(`${entry.id}: expected a buffered request body`)
                 const body = init.body
-                const parsed = JSON.parse(body) as { model?: string; stream?: boolean; messages?: unknown[] }
-                if (parsed.model !== 'synthetic-memory-model' || parsed.stream !== false || !Array.isArray(parsed.messages)) return reject(`${entry.id}: unexpected hosted body`)
-                if ('temperature' in parsed || 'max_tokens' in parsed) return reject(`${entry.id}: unplanned hosted parameters`)
                 const live = getDatabase().characters[0].chats[0]
-                trace.push({ phase: step.phase, body, liveMemory: memory(live), jsonMemory: jsonMemory(live) })
-                return new Response(JSON.stringify(step.error ? { error: step.error } : {
-                    model: 'synthetic-memory-model', done: true, message: { role: 'assistant', content: step.content },
-                }), { status: step.status ?? 200, headers: { 'Content-Type': 'application/json' } })
+                let reply: unknown
+                if (hosted) {
+                    const parsed = JSON.parse(body) as { model?: string; stream?: boolean; messages?: unknown[] }
+                    if (parsed.model !== 'synthetic-memory-model' || parsed.stream !== false || !Array.isArray(parsed.messages)) return reject(`${entry.id}: unexpected hosted body`)
+                    if ('temperature' in parsed || 'max_tokens' in parsed) return reject(`${entry.id}: unplanned hosted parameters`)
+                    trace.push({ phase: step.phase, body, liveMemory: memory(live), jsonMemory: jsonMemory(live) })
+                    reply = step.error ? { error: step.error } : { model: 'synthetic-memory-model', done: true, message: { role: 'assistant', content: step.content } }
+                } else {
+                    // The plain fetch transport sends what `fetchWithTauri` sends: these headers and this body.
+                    const headers = init.headers instanceof Headers ? [...init.headers] : Object.entries(init.headers ?? {})
+                    trace.push({ phase: step.phase, url: endpoint, headers, body, liveMemory: memory(live), jsonMemory: jsonMemory(live) })
+                    if (step.vectors) {
+                        const request = JSON.parse(body) as { input?: unknown }
+                        const count = Array.isArray(request.input) ? request.input.length : 1
+                        if (count !== step.vectors.length) return reject(`${entry.id}: ${count} embedding inputs for ${step.vectors.length} planned vectors`)
+                        reply = { object: 'list', data: step.vectors.map((embedding, index) => ({ object: 'embedding', index, embedding })) }
+                    } else reply = step.reply
+                }
+                if (step.abort) {
+                    controller.abort()
+                    // A fetch the stop reaches rejects with the signal's reason; one it does not reach is answered.
+                    const signal = init.signal
+                    if (signal?.aborted) {
+                        const reason = signal.reason as unknown
+                        if (typeof reason === 'object' && reason !== null) planned.add(reason)
+                        throw reason
+                    }
+                }
+                return new Response(JSON.stringify(reply), { status: step.status ?? 200, headers: { 'Content-Type': 'application/json' } })
             }
             resetScriptCache()
             const reservation = reserveGeneration()
@@ -209,6 +268,8 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
             await reload(`memory-send-${entry.id}-after-reload`)
             observation.afterReload = memory(getDatabase().characters[0].chats[0])
             observation.afterReloadStored = memory((await store.readConversation('character', 'conversation'))!.value)
+            // What the send left in the device embedding cache, for the rows that embed.
+            if (entry.steps.some(step => step.phase === 'embedding')) observation.embeddingCache = (await vectorStore.keys()).sort()
             expect(violations, entry.id).toEqual([])
             expect(position, entry.id).toBe(entry.steps.length)
             expect(saved.message.slice(0, before.message.length), entry.id).toEqual(before.message)
@@ -216,6 +277,7 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
             expect((saved as unknown as RecordValue).futureConversation, entry.id).toEqual((before as unknown as RecordValue).futureConversation)
             expect(observation.afterReload, entry.id).toEqual(observation.afterFlush)
             expect(observation.afterReloadStored, entry.id).toEqual(observation.afterFlush)
+            const main = trace.find(step => step.phase === 'main')
             if (entry.expected === 'success') {
                 expect(outcome, entry.id).toEqual({ kind: 'returned', value: true })
                 expect(saved.message.at(-1)?.data, entry.id).toBe('Synthetic final response.')
@@ -223,13 +285,16 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
             } else if (entry.expected === 'main-failure') {
                 expect(outcome, entry.id).toEqual({ kind: 'thrown', error: { name: 'ResponseError', message: 'Synthetic main failure.' } })
                 expect(alerts.errors, entry.id).toEqual([])
+            } else if (entry.expected === 'aborted') {
+                expect(outcome, entry.id).toEqual({ kind: 'returned', value: false })
+                expect(alerts.errors, entry.id).toEqual([])
+                expect(main, entry.id).toBeUndefined()
             } else {
                 expect(outcome, entry.id).toEqual({ kind: 'returned', value: false })
                 expect(alerts.errors, entry.id).toHaveLength(1)
-                expect(alerts.errors[0], entry.id).toContain('Synthetic second summary failure.')
-                expect(trace.every(step => step.phase === 'summary'), entry.id).toBe(true)
+                expect(alerts.errors[0], entry.id).toContain(entry.alert)
+                expect(main, entry.id).toBeUndefined()
             }
-            const main = trace.find(step => step.phase === 'main')
             if (entry.mode === 'supa') {
                 if (entry.summaryCount === 0) {
                     expect(saved.supaMemoryData, entry.id).toBe(before.supaMemoryData)
@@ -238,14 +303,23 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
                     expect(saved.supaMemoryData, entry.id).toContain('Synthetic summary A.')
                     expect(saved.supaMemoryData?.split('\n')[0], entry.id).toBe(saved.lastMemory)
                     expect(saved.lastMemory, entry.id).not.toBe(before.lastMemory)
-                    expect(main?.jsonMemory, entry.id).toEqual(memory(saved))
+                    if (entry.expected !== 'aborted') expect(main?.jsonMemory, entry.id).toEqual(memory(saved))
                 }
-            } else {
-                expect(saved.hypaV3Data?.summaries.map(summary => summary.text), entry.id)
+            } else if (entry.mode === 'hypav3') {
+                // Summaries the row stores before the send stay first; the send appends its own.
+                const stored = before.hypaV3Data?.summaries.length ?? 0
+                expect(saved.hypaV3Data?.summaries.slice(stored).map(summary => summary.text), entry.id)
                     .toEqual(entry.summaryCount ? ['Synthetic summary A.'] : [])
                 expect(saved.lastMemory, entry.id).toBe(before.lastMemory)
-                expect(saved.hypaV3Data?.summaries.map(summary => summary.chatMemos), entry.id)
-                    .toEqual(entry.summaryCount ? [['memory-message-1', 'memory-message-2']] : [])
+                expect(saved.hypaV3Data?.summaries.slice(stored).map(summary => summary.chatMemos), entry.id)
+                    .toEqual(entry.summaryCount ? [entry.summaryMemos ?? ['memory-message-1', 'memory-message-2']] : [])
+                if (main) expect(main.jsonMemory, entry.id).toEqual(memory(saved))
+            } else {
+                // Hanurai and HypaV2 leave `lastMemory` alone; Hanurai stores nothing in the conversation.
+                expect(saved.lastMemory, entry.id).toBe(before.lastMemory)
+                if (entry.mode === 'hanurai') expect(memory(saved), entry.id).toEqual(memory(before))
+                else expect(saved.hypaV2Data?.mainChunks.map(chunk => chunk.text), entry.id)
+                    .toEqual(entry.summaryCount ? ['Synthetic summary A.'] : [])
                 if (main) expect(main.jsonMemory, entry.id).toEqual(memory(saved))
             }
             results.push(observation)
@@ -259,6 +333,7 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
             observation.violations = [...violations]
             if (diagnostics) appendFileSync(diagnostics, JSON.stringify({ ...observation, consoleErrors }) + '\n')
             restoreClock.mockRestore()
+            restoreRandom.mockRestore()
             restoreError.mockRestore()
         }
     }
@@ -266,6 +341,8 @@ it('captures Supa and HypaV3 Send requests and persisted memory through real clo
     expect(failures).toEqual([])
     expect(settleOracle(set, results, { generator: import.meta.url, tsSources: [
         'src/ts/process/index.svelte.ts', 'src/ts/process/memory/supaMemory.ts', 'src/ts/process/memory/hypav3.ts',
+        'src/ts/process/memory/hypav2.ts', 'src/ts/process/memory/hanuraiMemory.ts', 'src/ts/process/memory/hypamemory.ts',
+        'src/ts/storage/hypaEmbeddingCache.ts', 'src/ts/globalApi.svelte.ts', 'src/ts/cbs.ts',
         'src/ts/process/request/request.ts', 'src/ts/process/generationState.ts', 'src/ts/tokenizer.ts',
         'src/ts/storage/database.svelte.ts', 'src/ts/storage/effectiveIdentityState.ts',
         'src/ts/storage/persistentDataRuntime.svelte.ts', 'src/ts/model/modellist.ts',

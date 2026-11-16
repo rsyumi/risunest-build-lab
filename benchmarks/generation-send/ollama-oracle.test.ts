@@ -50,8 +50,9 @@ type RecordValue = Record<string, unknown>
 // recorded instead of compared with the history the send read.
 type OracleCase = { id: string; responseContent?: string; expectedOutput?: string; root?: RecordValue; preset?: RecordValue; character?: RecordValue; conversation?: RecordValue; messages?: unknown[]; expectedIdAssignments?: number[]; now?: number; random?: number[]; timeZone?: string; startupExclusions?: RecoveryExclusion[]; observeLore?: boolean; observeTriggers?: boolean; triggerEditsMessages?: boolean }
 // `status` is the provider failure's HTTP status (500 when absent); `network-failure` is a fetch that rejects; `stop` is a
-// start trigger that stops the send before any request.
-type EffectCase = OracleCase & { outcome: 'success' | 'context-failure' | 'provider-failure' | 'network-failure' | 'abort' | 'abort-before-request' | 'invalid-host' | 'stop'; status?: number }
+// start trigger that stops the send before any request; `trigger-error` is a start trigger that throws, which rejects the
+// send before any request.
+type EffectCase = OracleCase & { outcome: 'success' | 'context-failure' | 'provider-failure' | 'network-failure' | 'abort' | 'abort-before-request' | 'invalid-host' | 'stop' | 'trigger-error'; status?: number }
 type LoreObservation = { assignments: { name: string; value: string }[]; requestScriptstate: RecordValue | null; storedScriptstate: RecordValue }
 // `jsonUnsafe` lists the values the JSON output cannot hold (undefined, NaN, infinities, -0) by path, as `jsValue` writes them.
 type TriggerObservation = { requestScriptstate: RecordValue | null; storedScriptstate: unknown; storedNote: unknown; storedMessages: unknown[];
@@ -310,6 +311,8 @@ it('captures native preparation expectations from real sendChat and the built-in
             if (stage === 3 && entry.outcome === 'abort-before-request') controller.abort()
         })
         vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const luaJson = luaJsonModuleResponse(input)
+            if (luaJson) return luaJson
             expect(String(input)).toBe('http://synthetic-ollama.invalid:80/api/chat')
             expect(init?.method).toBe('POST')
             requests += 1
@@ -345,13 +348,13 @@ it('captures native preparation expectations from real sendChat and the built-in
         // The Ollama SDK rejects a non-OK response or a failed fetch, and the TS send lets that error reach its caller
         // without another attempt or a retry delay, whatever `requestRetrys` holds.
         let error: string | null = null
-        if (['invalid-host', 'provider-failure', 'network-failure'].includes(entry.outcome)) {
+        if (['invalid-host', 'provider-failure', 'network-failure', 'trigger-error'].includes(entry.outcome)) {
             error = await sent.then(() => { throw new Error(`${entry.id} resolved`) }, (reason: unknown) => reason instanceof Error ? reason.message : String(reason))
             if (entry.outcome === 'provider-failure') expect(error, entry.id).toBe('Synthetic provider failure.')
         } else expect(await sent, entry.id).toBe(entry.outcome === 'success')
         expect(Date.now() - sendStarted, entry.id).toBeLessThan(1000)
         unsubscribeStage()
-        expect(requests, entry.id).toBe(Number(!['context-failure', 'abort-before-request', 'invalid-host', 'stop'].includes(entry.outcome)))
+        expect(requests, entry.id).toBe(Number(!['context-failure', 'abort-before-request', 'invalid-host', 'stop', 'trigger-error'].includes(entry.outcome)))
         await runtime.flushPendingDataLocally('synthetic-ollama-effects-after')
         const sendEnded = Date.now()
         const saved = (await store.readConversation('character', 'conversation'))!.value
@@ -377,7 +380,8 @@ it('captures native preparation expectations from real sendChat and the built-in
             storedMessages: saved.message.slice(0, original.message.length), sendEffects, requests, body, error,
             ...(loreObservation ? { loreObservation: { ...loreObservation, storedScriptstate: saved.scriptstate ?? {} } } : {}),
             ...(entry.observeTriggers ? { triggerObservation: triggerObservation(triggerRequestScriptstate, saved, saved.message) } : {}) })
-        if (entry.outcome === 'invalid-host') continue
+        // A throwing start trigger throws again on the retry.
+        if (entry.outcome === 'invalid-host' || entry.outcome === 'trigger-error') continue
         // A later complete send reuses the published identities even after a failed/aborted send; a stopping trigger
         // stops only while its variable is unset, so the retry sends.
         vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ done: true, message: { role: 'assistant', content: 'Synthetic retry.' } }), {

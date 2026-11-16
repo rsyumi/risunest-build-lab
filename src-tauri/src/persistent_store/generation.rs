@@ -1860,12 +1860,14 @@ impl PersistentStore {
         Ok(next)
     }
 
+    #[cfg(test)]
     pub(crate) fn generation_start_preparation(&mut self, ticket: &Ticket) -> StoreResult<Start> {
         if self.generation_record(ticket)?.preparation.is_none() { return Err(invalid("preparation-required")); }
         self.generation_start(ticket)
     }
 
     // The native service holds its execution gate while recovering this existing owner.
+    #[cfg(test)]
     pub(crate) fn generation_resume_preparation(&mut self, ticket: &Ticket) -> StoreResult<Start> {
         self.generation_reconcile_orphans()?;
         let gate = segment_gate(ticket)?;
@@ -2053,16 +2055,19 @@ impl PersistentStore {
         Ok(status(&owner.ticket, &record))
     }
 
+    #[cfg(test)]
     pub(crate) fn generation_fail_preparation_with_variables(&mut self, owner: &Owner, error: PreparationError, plan: &PreparedVariablePlan) -> StoreResult<Status> {
         self.generation_end_preparation_with_variables(owner, PreparationEnd::Failed(&error), plan)
     }
 
     // TS stores the start trigger's writes and ends the send before Memory and the request: the writes commit as a
     // failed preparation's do, and the record ends Cancelled with no dispatch.
+    #[cfg(test)]
     pub(crate) fn generation_stop_preparation_with_variables(&mut self, owner: &Owner, plan: &PreparedVariablePlan) -> StoreResult<Status> {
         self.generation_end_preparation_with_variables(owner, PreparationEnd::Stopped, plan)
     }
 
+    #[cfg(test)]
     fn generation_end_preparation_with_variables(&mut self, owner: &Owner, end: PreparationEnd, plan: &PreparedVariablePlan) -> StoreResult<Status> {
         if plan.is_empty() { return self.generation_preparation_result(owner, Some(end), None); }
         let gate = segment_gate(&owner.ticket)?;
@@ -2126,6 +2131,7 @@ impl PersistentStore {
         Ok(status(&owner.ticket, &record))
     }
 
+    #[cfg(test)]
     pub(crate) fn generation_ensure_history_ids(&mut self, owner: &Owner) -> Result<Status, GenerationError> {
         self.generation_ensure_history_ids_inner(owner, None)
     }
@@ -2231,21 +2237,24 @@ impl PersistentStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn generation_mark_prepared(&mut self, owner: &Owner) -> StoreResult<Status> {
         self.generation_preparation_result(owner, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn generation_fail_preparation(&mut self, owner: &Owner, error: PreparationError) -> StoreResult<Status> {
         self.generation_preparation_result(owner, Some(PreparationEnd::Failed(&error)), None)
     }
 
     // Persists the ready mark and the owned lifecycle in one record replacement.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn generation_mark_ready_owned(&mut self, owner: &Owner, lifecycle_id: &str) -> StoreResult<Status> {
         if !canonical_uuid(lifecycle_id) { return Err(invalid("invalid-lifecycle")); }
         self.generation_preparation_result(owner, None, Some(lifecycle_id))
     }
 
+    #[cfg(test)]
     fn generation_preparation_result(&mut self, owner: &Owner, end: Option<PreparationEnd>, lifecycle: Option<&str>) -> StoreResult<Status> {
         let gate = segment_gate(&owner.ticket)?;
         let _segment = gate.lock().map_err(|_| invalid("segment-poisoned"))?;
@@ -2337,6 +2346,7 @@ impl PersistentStore {
         Ok(status(ticket, &self.generation_record(ticket)?))
     }
 
+    #[cfg(test)]
     pub(crate) fn generation_start(&mut self, ticket: &Ticket) -> StoreResult<Start> {
         self.generation_convert_journal()?;
         self.generation_reconcile_orphans()?;

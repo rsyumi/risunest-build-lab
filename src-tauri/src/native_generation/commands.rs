@@ -289,18 +289,84 @@ fn update_operation(scope: &str, ticket: &Ticket, claim_id: u64, update: impl Fn
     if notify { changed(); }
 }
 
-// The claiming job owns this guard before returning across an await. If its caller
-// disappears during preparation, no terminal reader waits for a supervisor that never started.
-struct RunClaim { scope: String, ticket: Ticket, id: u64 }
+// The claiming job owns this guard before returning across an await. Until a begin may have started, dropping it
+// returns the ticket to Reserved. Afterwards the owner or its recovery holds the ticket: a dropped claim only
+// publishes, so no reader waits for a supervisor that is gone and no caller can start a second machine.
+struct RunClaim { scope: String, ticket: Ticket, id: u64, durable: bool }
 
 impl Drop for RunClaim {
     fn drop(&mut self) {
+        let durable = self.durable;
         update_operation(&self.scope, &self.ticket, self.id, |operation| {
             if operation.run != Run::Running { return false; }
-            operation.run = Run::Reserved;
+            if durable {
+                operation.run = Run::Finished;
+                operation.diagnostic_ready = true;
+            } else { operation.run = Run::Reserved; }
             true
         });
     }
+}
+
+// ---- Caller handoff ----
+
+// The supervisor prepares while the execute caller is attached and dispatches only after the caller accepts its
+// ready offer. A caller dropped before accepting abandons the operation; one dropped after leaves the owner running.
+enum Handoff { Attached, Offered, Accepted, Abandoned, Released(Option<StoreError>) }
+
+struct Caller { handoff: Arc<watch::Sender<Handoff>>, detached: Arc<AtomicBool>, scope: String, ticket: Ticket }
+
+impl Drop for Caller {
+    fn drop(&mut self) {
+        let abandoned = self.handoff.send_if_modified(|state| {
+            if !matches!(state, Handoff::Attached | Handoff::Offered) { return false; }
+            *state = Handoff::Abandoned;
+            true
+        });
+        if abandoned {
+            // Published before the live signal: a begin registered after this signal still sees the flag.
+            self.detached.store(true, Ordering::SeqCst);
+            // Only a lifecycle its driver still holds hears it; one already dropped is left to its recovery.
+            owner::signal_live(&self.scope, &self.ticket, CancelReason::Lifecycle);
+        }
+    }
+}
+
+impl Caller {
+    // Accepts an offer in the same step that observes it, so no await separates acceptance from disarming.
+    async fn attend(&self) -> StoreResult<()> {
+        let mut updates = self.handoff.subscribe();
+        loop {
+            #[cfg(test)]
+            if matches!(*self.handoff.borrow(), Handoff::Offered) { offer_pause(&self.ticket).await; }
+            let mut outcome = None;
+            self.handoff.send_if_modified(|state| match state {
+                Handoff::Offered => { *state = Handoff::Accepted; outcome = Some(Ok(())); true }
+                Handoff::Released(error) => { outcome = Some(error.take().map_or(Ok(()), Err)); false }
+                _ => false,
+            });
+            if let Some(outcome) = outcome { return outcome; }
+            // The supervisor's own guard releases this wait if it ends without an offer.
+            let _ = updates.changed().await;
+        }
+    }
+}
+
+// Releases a caller that is still waiting when the supervisor ends without an offer, including by panic.
+struct Release(Arc<watch::Sender<Handoff>>);
+
+impl Release {
+    fn release(&self, error: Option<StoreError>) {
+        self.0.send_if_modified(|state| {
+            if !matches!(state, Handoff::Attached) { return false; }
+            *state = Handoff::Released(error);
+            true
+        });
+    }
+}
+
+impl Drop for Release {
+    fn drop(&mut self) { self.release(None); }
 }
 
 // ---- Change notification for the status long poll ----
@@ -334,12 +400,28 @@ async fn blocking<R: Runtime, T: Send + 'static>(app: &AppHandle<R>, work: impl 
     tokio::task::spawn_blocking(move || with_job_store(&app, work)).await.unwrap_or_else(|_| Err(invalid("worker-stopped")))
 }
 
-struct AdmittedStore<R: Runtime> { app: AppHandle<R> }
+// `entered` records whether any segment work ran, which is the evidence that a refused begin started nothing.
+struct AdmittedStore<R: Runtime> {
+    app: AppHandle<R>,
+    entered: Arc<AtomicBool>,
+    #[cfg(test)]
+    ticket: Ticket,
+}
 
 impl<R: Runtime> OwnerStore for AdmittedStore<R> {
     fn segment(&self, work: &mut dyn FnMut(&mut PersistentStore)) -> StoreResult<()> {
-        let result = with_job_store(&self.app, |store| { work(store); Ok(()) });
+        #[cfg(test)]
+        let mut cut = SegmentCut::new(&self.ticket);
+        let result = with_job_store(&self.app, |store| {
+            self.entered.store(true, Ordering::Release);
+            #[cfg(test)]
+            if let Some(wrap) = cut.wrap.take() { return wrap(store, work); }
+            work(store);
+            Ok(())
+        });
         changed();
+        #[cfg(test)]
+        if cut.finish() && result.is_ok() { return Err(invalid("synthetic-lost-acknowledgement")); }
         result
     }
 }
@@ -512,33 +594,21 @@ pub(crate) async fn execute<R: Runtime>(app: AppHandle<R>, ticket: Ticket) -> St
                 operation.run = Run::Running;
                 operation.diagnostic_ready = false;
                 operation.claim_id = claim_id;
-                Ok(Some(RunClaim { scope, ticket: claimed, id: claim_id }))
+                Ok(Some(RunClaim { scope, ticket: claimed, id: claim_id, durable: false }))
             }
             None => Err(invalid("target-unavailable")),
         }
     }).await?;
     if let Some(claim) = claim {
-        let scope = claim.scope.clone();
-        // Armed before preparation, so maintenance that waits for it still cancels the owner.
-        let maintenance = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
         preparation_pause(&ticket, false).await;
-        let prepared = match app.state::<PersistentStoreState>().cancel_on_device_maintenance(&maintenance) {
-            Ok(()) => { let ticket = ticket.clone(); blocking(&app, move |store| service::prepare_ready_ollama(store, &ticket, &host)).await }
-            Err(error) => Err(error),
-        };
-        changed();
-        match prepared {
-            Ok(ReadyPreparation::Ready(ready)) => { tokio::spawn(supervise(app.clone(), scope, ticket.clone(), ready, maintenance, claim)); }
-            Ok(_) => finish(&claim, None),
-            // Nothing started (a full owner registry, closed admission), so the caller can execute again or cancel.
-            Err(error) => {
-                #[cfg(test)]
-                preparation_pause(&ticket, true).await;
-                drop(claim);
-                return Err(error);
-            }
-        }
+        // Installed before the supervisor can begin, which then owns the claim, preparation, maintenance and recovery.
+        let handoff = Arc::new(watch::channel(Handoff::Attached).0);
+        let caller = Caller { handoff: handoff.clone(), detached: Arc::default(), scope: claim.scope.clone(), ticket: ticket.clone() };
+        tokio::spawn(supervise(app.clone(), ticket.clone(), host, claim, handoff, caller.detached.clone()));
+        caller.attend().await?;
+        #[cfg(test)]
+        accepted_pause(&ticket).await;
     }
     read_published(&app, &ticket).await
 }
@@ -699,10 +769,12 @@ fn finish(claim: &RunClaim, diagnostic: Option<LiveDiagnostic>) {
     });
 }
 
-// Admission is closed during maintenance, so the live owner hears the signal now and the decision is persisted once it reopens.
+// Admission is closed during maintenance, so the live owner hears the signal before any store attempt and the
+// decision is persisted once admission reopens.
 async fn cancel_for_maintenance<R: Runtime>(app: &AppHandle<R>, scope: &str, ticket: &Ticket) {
-    let cancelled = { let ticket = ticket.clone(); blocking(app, move |store| service::cancel_generation_for(store, &ticket, CancelReason::Lifecycle)).await };
-    if cancelled.is_err() { owner::signal(scope, ticket, CancelReason::Lifecycle); }
+    owner::signal(scope, ticket, CancelReason::Lifecycle);
+    let ticket = ticket.clone();
+    let _ = blocking(app, move |store| service::cancel_generation_for(store, &ticket, CancelReason::Lifecycle)).await;
     changed();
 }
 
@@ -726,9 +798,181 @@ async fn settle_later<R: Runtime>(app: &AppHandle<R>, ticket: &Ticket, lifecycle
     }
 }
 
-async fn supervise<R: Runtime>(app: AppHandle<R>, scope: String, ticket: Ticket, ready: ReadyOllama, maintenance: Arc<AtomicBool>, claim: RunClaim) {
-    let access: Arc<dyn OwnerStore> = Arc::new(AdmittedStore { app: app.clone() });
-    let mut lifecycle = maintenance.load(Ordering::Acquire);
+// Publication precedes every terminal status a reader can observe for this claim.
+async fn publish(claim: &RunClaim, diagnostic: Option<LiveDiagnostic>) {
+    #[cfg(test)]
+    publication_pause(&claim.ticket).await;
+    update_operation(&claim.scope, &claim.ticket, claim.id, |operation| {
+        operation.diagnostic = diagnostic;
+        operation.diagnostic_ready = true;
+        true
+    });
+}
+
+// Device maintenance or an abandoning caller stops a preparation before its handoff. The live hard control hears it
+// first; a signal that found no lifecycle is repeated, since begin may still be registering one. A lifecycle its
+// driver already dropped is not signalled, so a stop it never heard leaves its recovery alone.
+#[derive(Default)]
+struct Stop { lifecycle: bool, abandoned: bool, heard: bool }
+
+impl Stop {
+    fn observe(&mut self, maintenance: &AtomicBool, handoff: &watch::Sender<Handoff>, scope: &str, ticket: &Ticket) {
+        self.lifecycle |= maintenance.load(Ordering::Acquire);
+        self.abandoned |= matches!(*handoff.borrow(), Handoff::Abandoned);
+        if self.requested() && !self.heard {
+            self.heard = owner::signal_live(scope, ticket, CancelReason::Lifecycle) != owner::Presence::Absent;
+        }
+    }
+
+    fn requested(&self) -> bool { self.lifecycle || self.abandoned }
+}
+
+// A begin that never entered the store, or a record left with no owner or lifecycle once settled, started nothing.
+// `None` is a read that failed, which decides nothing.
+async fn absent<R: Runtime>(app: &AppHandle<R>, scope: &str, ticket: &Ticket, entered: &AtomicBool) -> Option<bool> {
+    if !entered.load(Ordering::Acquire) { return Some(true); }
+    let (scope, requested) = (scope.to_owned(), ticket.clone());
+    let read = blocking(app, move |store| {
+        #[cfg(test)]
+        if absence_read_fails(&requested) { return Err(invalid("synthetic-absence-read")); }
+        service::resolve_owner(store, &requested)?;
+        Ok(store.generation_status(&requested)?.phase == Phase::Reserved && store.generation_preparing(&requested)?.is_none()
+            && store.generation_execution(&requested)?.is_none() && !owner::registered(&scope, &requested))
+    }).await;
+    match read {
+        Ok(absent) => Some(absent),
+        // An expired journal leaves no ticket to return.
+        Err(error) if ticket_gone(&error) => Some(false),
+        Err(_) => None,
+    }
+}
+
+// Decides an absence that a failed read left open, within the settlement bound.
+async fn absent_later<R: Runtime>(app: &AppHandle<R>, scope: &str, ticket: &Ticket, entered: &AtomicBool) -> bool {
+    let mut delay = Duration::from_millis(100);
+    for _ in 0..SETTLE_ATTEMPTS {
+        tokio::time::sleep(delay).await;
+        if let Some(absent) = absent(app, scope, ticket, entered).await { return absent; }
+        delay = (delay * 2).min(Duration::from_secs(5));
+    }
+    false
+}
+
+// Ends a preparation that may have started nothing. Only an established absence (a full owner registry, closed
+// admission) returns the ticket to Reserved, before the caller hears the error, so the caller can execute again or
+// cancel. A failed read keeps the claim until a later read decides, so an untouched ticket is not left finished while
+// its record stays Reserved.
+async fn conclude_unstarted<R: Runtime>(app: &AppHandle<R>, ticket: &Ticket, entered: &AtomicBool, mut claim: RunClaim,
+    release: &Release, error: StoreError, lifecycle: bool) {
+    let absence = absent(app, &claim.scope, ticket, entered).await;
+    if absence == Some(true) {
+        claim.durable = false;
+        drop(claim);
+        release.release(Some(error));
+        return;
+    }
+    release.release(Some(error));
+    publish(&claim, None).await;
+    if absence.is_none() && absent_later(app, &claim.scope, ticket, entered).await {
+        claim.durable = false;
+        return;
+    }
+    settle_later(app, ticket, lifecycle).await;
+    finish(&claim, None);
+}
+
+// Owns the claim from before the first owned begin: preparation, maintenance, the caller handoff, the accepted owner,
+// recovery and publication. A preparation that ends without a ready offer releases the caller to the stored phase.
+async fn supervise<R: Runtime>(app: AppHandle<R>, ticket: Ticket, host: OwnerHost, mut claim: RunClaim,
+    handoff: Arc<watch::Sender<Handoff>>, detached: Arc<AtomicBool>) {
+    // Dropped on every exit, including a panic, so an attached caller is never left waiting.
+    let release = Release(handoff.clone());
+    let scope = claim.scope.clone();
+    // Registered before begin, so maintenance that starts while a segment is admitted still reaches this owner.
+    let maintenance = Arc::new(AtomicBool::new(false));
+    if let Err(error) = app.state::<PersistentStoreState>().cancel_on_device_maintenance(&maintenance) {
+        // Nothing began, so the ticket returns to Reserved and the caller can execute again or cancel.
+        drop(claim);
+        release.release(Some(error));
+        return;
+    }
+    let entered = Arc::new(AtomicBool::new(false));
+    let access: Arc<dyn OwnerStore> = Arc::new(AdmittedStore { app: app.clone(), entered: entered.clone(), #[cfg(test)] ticket: ticket.clone() });
+    // A begin may be in flight from here, so only an established absence returns the ticket to Reserved.
+    claim.durable = true;
+    let mut preparing = tokio::spawn(service::prepare_ready_ollama_async(ticket.clone(), host, access.clone(), detached));
+    let mut updates = handoff.subscribe();
+    let mut stop = Stop::default();
+    let joined = loop {
+        stop.observe(&maintenance, &handoff, &scope, &ticket);
+        tokio::select! {
+            joined = &mut preparing => break joined,
+            _ = updates.changed() => {}
+            _ = tokio::time::sleep(MAINTENANCE_POLL) => {
+                #[cfg(test)]
+                maintenance_checked(&ticket);
+            }
+        }
+    };
+    #[cfg(test)]
+    join_pause(&ticket).await;
+    stop.observe(&maintenance, &handoff, &scope, &ticket);
+    let (source, joined) = match joined {
+        Ok(Ok(ReadyPreparation::Ready(ready))) => {
+            // Offered only to an attached caller; nothing dispatches before it accepts.
+            let offered = handoff.send_if_modified(|state| {
+                if !matches!(state, Handoff::Attached) { return false; }
+                *state = Handoff::Offered;
+                true
+            });
+            let accepted = offered && loop {
+                let decided = match &*updates.borrow_and_update() { Handoff::Accepted => Some(true), Handoff::Abandoned => Some(false), _ => None };
+                if let Some(accepted) = decided { break accepted; }
+                stop.observe(&maintenance, &handoff, &scope, &ticket);
+                tokio::select! {
+                    _ = updates.changed() => {}
+                    _ = tokio::time::sleep(MAINTENANCE_POLL) => {}
+                }
+            };
+            if accepted { return supervise_ready(app, ticket, ready, access, maintenance, stop.lifecycle, claim).await; }
+            // An abandoned offer never dispatches; recovery settles the dropped lifecycle as a cancellation.
+            stop.observe(&maintenance, &handoff, &scope, &ticket);
+            drop(ready);
+            publish(&claim, None).await;
+            settle_later(&app, &ticket, stop.lifecycle).await;
+            finish(&claim, None);
+            return;
+        }
+        Ok(Ok(ReadyPreparation::Existing(status) | ReadyPreparation::Failed { status, .. })) => {
+            if status.phase == Phase::Reserved {
+                // Begin found the caller gone before its lifecycle could hear the signal. A caller still attached is told
+                // so, since a Reserved success would leave it waiting for a phase that never comes.
+                return conclude_unstarted(&app, &ticket, &entered, claim, &release, invalid("preparation-not-started"), stop.lifecycle).await;
+            }
+            // The caller reads the stored phase, so an interrupted preparation is never reported as failed.
+            release.release(None);
+            publish(&claim, None).await;
+            if !status.phase.terminal() || status.pending_commit { settle_later(&app, &ticket, stop.lifecycle).await; }
+            finish(&claim, None);
+            return;
+        }
+        Ok(Err(error)) => (error.source, true),
+        // A panicked driver may leave segment work behind, so its lifecycle stays a generic recovery obligation.
+        Err(_) => (invalid("preparation-stopped"), false),
+    };
+    // A joined driver holds no work, so a stop its live lifecycle heard settles as that cancellation, not as a loss. Only
+    // a live lifecycle is signalled, so a stop first seen once it was gone leaves the loss to recovery, and the stop
+    // the lifecycle heard is already recorded for it.
+    if joined && stop.requested() { owner::retain_joined_preparing_hard(&scope, &ticket); }
+    #[cfg(test)]
+    preparation_pause(&ticket, true).await;
+    conclude_unstarted(&app, &ticket, &entered, claim, &release, source, false).await;
+}
+
+async fn supervise_ready<R: Runtime>(app: AppHandle<R>, ticket: Ticket, ready: ReadyOllama, access: Arc<dyn OwnerStore>,
+    maintenance: Arc<AtomicBool>, lifecycle: bool, claim: RunClaim) {
+    let scope = claim.scope.clone();
+    let mut lifecycle = lifecycle || maintenance.load(Ordering::Acquire);
     if lifecycle { cancel_for_maintenance(&app, &scope, &ticket).await; }
     #[cfg(all(test, target_os = "windows"))]
     let observation = crate::ollama_ui_verification::controller::capture(&app, &ticket);
@@ -748,7 +992,7 @@ async fn supervise<R: Runtime>(app: AppHandle<R>, scope: String, ticket: Ticket,
                     cancel_for_maintenance(&app, &scope, &ticket).await;
                 }
                 #[cfg(test)]
-                MAINTENANCE_CHECKED.fetch_add(1, Ordering::AcqRel);
+                maintenance_checked(&ticket);
             }
         }
     };
@@ -757,13 +1001,7 @@ async fn supervise<R: Runtime>(app: AppHandle<R>, scope: String, ticket: Ticket,
     // The phase decides the outcome; the diagnostic only explains a failure and carries the live SDK text.
     let diagnostic = execution.and_then(|execution| execution.diagnostic).map(|diagnostic| LiveDiagnostic {
         failure: diagnostic.failure, sdk_message: diagnostic.message.map(|units| String::from_utf16_lossy(&units)) });
-    #[cfg(test)]
-    publication_pause(&ticket).await;
-    update_operation(&scope, &ticket, claim.id, |operation| {
-        operation.diagnostic = diagnostic.clone();
-        operation.diagnostic_ready = true;
-        true
-    });
+    publish(&claim, diagnostic.clone()).await;
     if pending || lifecycle {
         settle_later(&app, &ticket, lifecycle).await;
     }
@@ -829,7 +1067,41 @@ fn status_waiting(ticket: &Ticket) {
 }
 
 #[cfg(test)]
-pub(super) static MAINTENANCE_CHECKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn maintenance_check_counts() -> MutexGuard<'static, Vec<(Ticket, usize)>> {
+    static CHECKS: OnceLock<Mutex<Vec<(Ticket, usize)>>> = OnceLock::new();
+    CHECKS.get_or_init(Mutex::default).lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+fn maintenance_checked(ticket: &Ticket) {
+    let mut checks = maintenance_check_counts();
+    match checks.iter_mut().find(|(entry, _)| entry == ticket) {
+        Some((_, count)) => *count += 1,
+        None => checks.push((ticket.clone(), 1)),
+    }
+}
+
+// The maintenance polls the supervisors of `ticket` ran, so a test waits on its own owner's poll.
+#[cfg(test)]
+pub(super) fn maintenance_checks(ticket: &Ticket) -> usize {
+    maintenance_check_counts().iter().find(|(entry, _)| entry == ticket).map_or(0, |(_, count)| *count)
+}
+
+#[cfg(test)]
+fn absence_faults() -> MutexGuard<'static, Vec<Ticket>> {
+    static FAULTS: OnceLock<Mutex<Vec<Ticket>>> = OnceLock::new();
+    FAULTS.get_or_init(Mutex::default).lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+// Fails the next read of whether the begin of `ticket` started anything, as closed admission or a store error would.
+#[cfg(test)]
+pub(super) fn fail_absence_read(ticket: &Ticket) { absence_faults().push(ticket.clone()); }
+
+#[cfg(test)]
+fn absence_read_fails(ticket: &Ticket) -> bool {
+    let mut faults = absence_faults();
+    faults.iter().position(|entry| entry == ticket).map(|index| faults.remove(index)).is_some()
+}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -869,6 +1141,149 @@ async fn publication_pause(ticket: &Ticket) {
     }
 }
 
+// Holds one admitted segment of a ticket, counted from its first segment, before admission or after its work ran.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct SegmentGate {
+    pub(super) reached: tokio::sync::Notify,
+    released: Mutex<Option<bool>>,
+    resumed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl SegmentGate {
+    // `lose` drops the acknowledgement of work that ran, as a lost reply would.
+    pub(super) fn release(&self, lose: bool) {
+        *self.released.lock().unwrap() = Some(lose);
+        self.resumed.notify_all();
+    }
+
+    fn hold(&self) -> bool {
+        self.reached.notify_one();
+        let released = self.released.lock().unwrap();
+        let (released, waited) = self.resumed.wait_timeout_while(released, Duration::from_secs(60), |released| released.is_none()).unwrap();
+        assert!(!waited.timed_out(), "segment gate was not released");
+        released.unwrap()
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SegmentCuts { counts: Vec<(Ticket, usize)>, cuts: Vec<(Ticket, usize, bool, Arc<SegmentGate>)>, wraps: Vec<(Ticket, usize, SegmentWrap)> }
+
+// Runs one admitted segment of a ticket, counted as `hold_segment` counts, in place of its plain work: the wrapper gets
+// the admitted store and the work, and its result is the segment's.
+#[cfg(test)]
+pub(super) type SegmentWrap = Box<dyn FnOnce(&mut PersistentStore, &mut dyn FnMut(&mut PersistentStore)) -> StoreResult<()> + Send>;
+
+#[cfg(test)]
+pub(super) fn wrap_segment(ticket: &Ticket, index: usize, wrap: SegmentWrap) {
+    segment_cuts().wraps.push((ticket.clone(), index, wrap));
+}
+
+#[cfg(test)]
+fn segment_cuts() -> MutexGuard<'static, SegmentCuts> {
+    static CUTS: OnceLock<Mutex<SegmentCuts>> = OnceLock::new();
+    CUTS.get_or_init(Mutex::default).lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+pub(super) fn hold_segment(ticket: &Ticket, index: usize, after: bool) -> Arc<SegmentGate> {
+    let gate = Arc::new(SegmentGate::default());
+    segment_cuts().cuts.push((ticket.clone(), index, after, gate.clone()));
+    gate
+}
+
+#[cfg(test)]
+struct SegmentCut { after: bool, gate: Option<Arc<SegmentGate>>, lose: bool, wrap: Option<SegmentWrap> }
+
+#[cfg(test)]
+impl SegmentCut {
+    fn new(ticket: &Ticket) -> Self {
+        let mut cuts = segment_cuts();
+        let index = match cuts.counts.iter_mut().find(|(entry, _)| entry == ticket) {
+            Some((_, count)) => { *count += 1; *count - 1 }
+            None => { cuts.counts.push((ticket.clone(), 1)); 0 }
+        };
+        let position = cuts.cuts.iter().position(|(entry, at, _, _)| entry == ticket && *at == index);
+        let (after, gate) = position.map_or((false, None), |position| { let (_, _, after, gate) = cuts.cuts.remove(position); (after, Some(gate)) });
+        let wrap = cuts.wraps.iter().position(|(entry, at, _)| entry == ticket && *at == index).map(|position| cuts.wraps.remove(position).2);
+        drop(cuts);
+        let mut cut = Self { after, gate, lose: false, wrap };
+        if !cut.after { cut.lose = cut.gate.as_ref().is_some_and(|gate| gate.hold()); }
+        cut
+    }
+
+    fn finish(&self) -> bool {
+        if self.after { self.gate.as_ref().is_some_and(|gate| gate.hold()) } else { self.lose }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct HandoffGate {
+    pub(super) reached: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+fn handoff_gates() -> &'static Mutex<Vec<(Ticket, bool, Arc<HandoffGate>)>> {
+    static GATES: OnceLock<Mutex<Vec<(Ticket, bool, Arc<HandoffGate>)>>> = OnceLock::new();
+    GATES.get_or_init(Mutex::default)
+}
+
+// Holds the execute caller once, either at an offer it has not yet accepted or right after it accepted one.
+#[cfg(test)]
+pub(super) fn hold_handoff(ticket: &Ticket, accepted: bool) -> Arc<HandoffGate> {
+    let gate = Arc::new(HandoffGate::default());
+    handoff_gates().lock().unwrap().push((ticket.clone(), accepted, gate.clone()));
+    gate
+}
+
+#[cfg(test)]
+async fn handoff_pause(ticket: &Ticket, accepted: bool) {
+    let gate = {
+        let mut gates = handoff_gates().lock().unwrap();
+        gates.iter().position(|(entry, at, _)| entry == ticket && *at == accepted).map(|index| gates.remove(index).2)
+    };
+    if let Some(gate) = gate {
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+fn join_gates() -> &'static Mutex<Vec<(Ticket, Arc<HandoffGate>)>> {
+    static GATES: OnceLock<Mutex<Vec<(Ticket, Arc<HandoffGate>)>>> = OnceLock::new();
+    GATES.get_or_init(Mutex::default)
+}
+
+// Holds the supervisor once, after its preparation joined and before it looks for a stop again.
+#[cfg(test)]
+pub(super) fn hold_join(ticket: &Ticket) -> Arc<HandoffGate> {
+    let gate = Arc::new(HandoffGate::default());
+    join_gates().lock().unwrap().push((ticket.clone(), gate.clone()));
+    gate
+}
+
+#[cfg(test)]
+async fn join_pause(ticket: &Ticket) {
+    let gate = {
+        let mut gates = join_gates().lock().unwrap();
+        gates.iter().position(|(entry, _)| entry == ticket).map(|index| gates.remove(index).1)
+    };
+    if let Some(gate) = gate {
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+async fn offer_pause(ticket: &Ticket) { handoff_pause(ticket, false).await }
+
+#[cfg(test)]
+async fn accepted_pause(ticket: &Ticket) { handoff_pause(ticket, true).await }
+
 #[cfg(test)]
 pub(super) fn forget_host(ticket: &Ticket) {
     registry().operations.retain(|operation| &operation.ticket != ticket);
@@ -877,6 +1292,12 @@ pub(super) fn forget_host(ticket: &Ticket) {
 #[cfg(test)]
 pub(super) fn finished(ticket: &Ticket) -> bool {
     registry().operations.iter().any(|operation| &operation.ticket == ticket && operation.run == Run::Finished)
+}
+
+// Whether the host would let another execute claim this ticket.
+#[cfg(test)]
+pub(super) fn reserved(ticket: &Ticket) -> bool {
+    registry().operations.iter().any(|operation| &operation.ticket == ticket && operation.run == Run::Reserved)
 }
 
 // ---- Tauri commands ----

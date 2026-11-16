@@ -83,6 +83,8 @@ mod trust_boundary;
 #[cfg(test)]
 mod command_future_size;
 #[cfg(test)]
+mod test_app;
+#[cfg(test)]
 mod test_memory;
 #[cfg(test)]
 mod test_process;

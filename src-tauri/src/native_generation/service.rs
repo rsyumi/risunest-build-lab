@@ -1,9 +1,13 @@
-use super::{inputs::{effective_settings, text, truth, OllamaIntent, PreparationError, PreparationSnapshot}, operation::{Owner, Phase, Start, Status, Ticket}, prepare::{prepare_ollama_owned, PreparedOllamaTurn, PreparedSend}, preparation_effects::PreparedVariablePlan};
+use super::{inputs::{effective_settings, text, truth, OllamaIntent, PreparationError, PreparationSnapshot}, operation::{Owner, Phase, Start, Status, Ticket}, prepare::PreparedSend, preparation_effects::PreparedVariablePlan};
 use super::operation::{GenerationLease, NormalizationWitness, NormalizationResolution, NormalizationProjectionResult, OwnerStatus, DispatchState, OutputState, ActiveGeneration};
 use super::{ollama_transport::{Think, ThinkLevel}, owner::{self, Lifecycle, OwnerHost, ReadyOllama, ReadyOllamaConfig}};
 use crate::persistent_store::{generation::{CancelReason, TerminalDecision}, sync_selection::SyncTarget, PersistentStore, StoreError, StoreResult};
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::{Arc, Mutex, OnceLock, TryLockError, Weak}};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+#[cfg(test)]
+use super::prepare::{prepare_ollama_owned, PreparedOllamaTurn};
+#[cfg(test)]
+use std::{collections::BTreeMap, sync::{Mutex, OnceLock, TryLockError, Weak}};
 
 #[derive(Debug)]
 pub(crate) enum GenerationError {
@@ -35,6 +39,7 @@ pub(crate) enum ReadyPreparation {
     Failed { error: PreparationError, status: Status },
 }
 
+#[cfg(test)]
 enum Outcome<T> {
     Ready(T),
     Existing(Status),
@@ -180,11 +185,13 @@ pub(crate) fn project_normalization(store: &PersistentStore, ticket: &Ticket, wi
     store.generation_project_normalization(ticket, witness, original, current)
 }
 
+#[cfg(test)]
 fn failed<T>(store: &mut PersistentStore, owner: &Owner, error: PreparationError) -> StoreResult<Outcome<T>> {
     let status = store.generation_fail_preparation(owner, error.clone())?;
     Ok(if status.phase == Phase::Failed { Outcome::Failed { error, status } } else { Outcome::Existing(status) })
 }
 
+#[cfg(test)]
 fn failed_with_variables<T>(store: &mut PersistentStore, owner: &Owner, error: PreparationError, variables: &PreparedVariablePlan) -> StoreResult<Outcome<T>> {
     let status = store.generation_fail_preparation_with_variables(owner, error.clone(), variables)?;
     Ok(if status.phase == Phase::Failed { Outcome::Failed { error, status } } else { Outcome::Existing(status) })
@@ -192,11 +199,13 @@ fn failed_with_variables<T>(store: &mut PersistentStore, owner: &Owner, error: P
 
 // The start trigger stopped the send: its writes are stored as a failed preparation stores them, and the send ends
 // Cancelled with no request and no error.
+#[cfg(test)]
 fn stopped_with_variables<T>(store: &mut PersistentStore, owner: &Owner, variables: &PreparedVariablePlan) -> StoreResult<Outcome<T>> {
     Ok(Outcome::Existing(store.generation_stop_preparation_with_variables(owner, variables)?))
 }
 
 // This gate owns preparation execution, while the independent store gate admits cancellable segments.
+#[cfg(test)]
 fn preparation_gate(ticket: &Ticket) -> StoreResult<Arc<Mutex<()>>> {
     static GATES: OnceLock<Mutex<BTreeMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
     let mut gates = GATES.get_or_init(|| Mutex::new(BTreeMap::new())).lock()
@@ -220,11 +229,13 @@ pub(crate) fn wire_body(snapshot: &PreparationSnapshot, prepared: &PreparedOllam
 
 // Runs preparation under its gate; `ready` publishes the result while the gate is still held. Its send-effect and
 // history-ID commits wait briefly for device admission a renderer command holds instead of failing the prepare.
+#[cfg(test)]
 fn with_preparation<T>(store: &mut PersistentStore, ticket: &Ticket,
     ready: impl FnOnce(&mut PersistentStore, Owner, PreparedOllamaTurn, PreparationSnapshot, PreparedVariablePlan) -> StoreResult<Outcome<T>>) -> StoreResult<Outcome<T>> {
     store.waiting_for_admission(|store| prepare_under_gate(store, ticket, ready))
 }
 
+#[cfg(test)]
 fn prepare_under_gate<T>(store: &mut PersistentStore, ticket: &Ticket,
     ready: impl FnOnce(&mut PersistentStore, Owner, PreparedOllamaTurn, PreparationSnapshot, PreparedVariablePlan) -> StoreResult<Outcome<T>>) -> StoreResult<Outcome<T>> {
     let gate = preparation_gate(ticket)?;
@@ -484,6 +495,8 @@ fn promote_completion(store: &mut PersistentStore, session: PreparingSession, pa
         Err(error) if admission_rejected(&error) => return rejected_preparing_admission(store, session),
         Err(error) => return Err(error),
     };
+    #[cfg(test)]
+    if promotion_fails(&session.owner.ticket) { return Err(StoreError::Validation { message: "native-generation:synthetic-promotion-failure".into() }); }
     if status.phase != Phase::Running || !status.preparation_ready || !session.lifecycle.observe_execution(store)? {
         if status.phase.terminal() && !status.pending_commit { session.lifecycle.release(); }
         return Ok(ReadyPreparation::Existing(status));
@@ -507,12 +520,13 @@ fn promote_completion(store: &mut PersistentStore, session: PreparingSession, pa
     Ok(ReadyPreparation::Ready(ready))
 }
 
-// Internal staged entry. Command supervision and caller handoff continue to use the compatibility entry.
-pub(crate) async fn prepare_ready_ollama_async(ticket: Ticket, host: OwnerHost, access: Arc<dyn owner::OwnerStore>) -> PreparationServiceResult<ReadyPreparation> {
-    prepare_ready_ollama_async_limited(ticket, host, access, owner::RegistryLimits::PRODUCTION).await
+// The command supervisor's entry. `detached` is set by an execute caller that left before its lifecycle signal could
+// reach a registered lifecycle; begin then starts nothing.
+pub(crate) async fn prepare_ready_ollama_async(ticket: Ticket, host: OwnerHost, access: Arc<dyn owner::OwnerStore>, detached: Arc<AtomicBool>) -> PreparationServiceResult<ReadyPreparation> {
+    prepare_ready_ollama_async_limited(ticket, host, access, detached, owner::RegistryLimits::PRODUCTION).await
 }
 
-pub(super) async fn prepare_ready_ollama_async_limited(ticket: Ticket, host: OwnerHost, access: Arc<dyn owner::OwnerStore>, limits: owner::RegistryLimits) -> PreparationServiceResult<ReadyPreparation> {
+pub(super) async fn prepare_ready_ollama_async_limited(ticket: Ticket, host: OwnerHost, access: Arc<dyn owner::OwnerStore>, detached: Arc<AtomicBool>, limits: owner::RegistryLimits) -> PreparationServiceResult<ReadyPreparation> {
     let begin = owner::joined(owner::segment(&access, move |store| {
         owner::reconcile_limited(store, limits.pass, &mut owner::resolve_owner)?;
         if owner::registered(&owner::scope(store)?, &ticket) { return Ok(PreparingBegin::Existing(owner::resolve_owner(store, &ticket)?)); }
@@ -523,6 +537,8 @@ pub(super) async fn prepare_ready_ollama_async_limited(ticket: Ticket, host: Own
         let operation = super::preparation_owner::admit(live.clone())
             .map_err(|_| StoreError::Validation { message: "native-generation:preparation-owner-admission".into() })?;
         let lifecycle = Lifecycle::register_preparing(slot, &owner, live, operation.cancel().clone())?;
+        // Read after registration: a caller that left earlier set the flag before signalling.
+        if detached.load(Ordering::SeqCst) { lifecycle.release(); return Ok(PreparingBegin::Existing(store.generation_status(&ticket)?)); }
         match store.generation_begin_preparing(&owner, lifecycle.id())? {
             Start::Started { .. } => Ok(PreparingBegin::Started(PreparingSession { owner, lifecycle, operation })),
             Start::Existing(status) => { lifecycle.release(); Ok(PreparingBegin::Existing(status)) }
@@ -579,10 +595,13 @@ async fn prepare_started_ollama(session: PreparingSession, host: OwnerHost, acce
 
 // Configuration comes from the same snapshot as the prompt; later root or preset edits cannot reach this wire.
 // A full lifecycle registry returns `native-generation:lifecycle-limit` and leaves the ticket Reserved.
+// The unowned compatibility entry, kept for its preparation and owner tests; commands prepare through the async entry.
+#[cfg(test)]
 pub(crate) fn prepare_ready_ollama(store: &mut PersistentStore, ticket: &Ticket, host: &OwnerHost) -> StoreResult<ReadyPreparation> {
     prepare_ready_ollama_limited(store, ticket, host, owner::RegistryLimits::PRODUCTION)
 }
 
+#[cfg(test)]
 pub(super) fn prepare_ready_ollama_limited(store: &mut PersistentStore, ticket: &Ticket, host: &OwnerHost, limits: owner::RegistryLimits) -> StoreResult<ReadyPreparation> {
     owner::reconcile_limited(store, limits.pass, &mut owner::resolve_owner)?;
     // A ticket that already has a lifecycle answers through it and takes no new capacity.
@@ -625,6 +644,37 @@ pub(crate) fn prepare_reserved_ollama(store: &mut PersistentStore, ticket: &Tick
         Outcome::Existing(status) => PreparedGeneration::Existing(status),
         Outcome::Failed { error, status } => PreparedGeneration::Failed { error, status },
     })
+}
+
+#[cfg(test)]
+type PromotionFault = (Ticket, tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+#[cfg(test)]
+fn promotion_faults() -> &'static Mutex<Vec<PromotionFault>> {
+    static FAULTS: OnceLock<Mutex<Vec<PromotionFault>>> = OnceLock::new();
+    FAULTS.get_or_init(Mutex::default)
+}
+
+// Fails the promotion of `ticket` once, after its commit and before its lifecycle observes it, when the returned sender
+// fires.
+#[cfg(test)]
+pub(super) fn fail_promotion_after_commit(ticket: &Ticket) -> (tokio::sync::oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached, entered) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    promotion_faults().lock().unwrap().push((ticket.clone(), reached, resume));
+    (entered, release)
+}
+
+#[cfg(test)]
+fn promotion_fails(ticket: &Ticket) -> bool {
+    let fault = {
+        let mut faults = promotion_faults().lock().unwrap();
+        faults.iter().position(|(entry, ..)| entry == ticket).map(|index| faults.remove(index))
+    };
+    let Some((_, reached, resume)) = fault else { return false };
+    let _ = reached.send(());
+    let _ = resume.recv();
+    true
 }
 
 #[cfg(test)]

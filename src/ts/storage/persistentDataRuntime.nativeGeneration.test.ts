@@ -291,6 +291,32 @@ describe('native generation guard in the save path', () => {
         expect(native.cancels).toEqual(['1:plugin'])
     })
 
+    it('adopts the cancellation native settles on an earlier User stop after the held edit stopped the preparation', async () => {
+        const { store, runtime, native, saveFailures, backgroundErrors } = await nativeRuntime()
+        runtime.installNativeGenerationGuard(ticket(), TARGET, [...EFFECT_KEYS, VARIABLES_KEY])
+        editFirstRow()
+        runtime.markPersistentDataDirty(1)
+        let flushed = false
+        const flush = runtime.flushPendingDataLocally('native-user-then-edit').then(() => { flushed = true })
+        await vi.waitFor(() => expect(native.cancels).toEqual(['1:edit']))
+        // The edit stopped the preparation before its prefix; native keeps the User stop it recorded first.
+        const { revision } = await store.commit({ expectedRevision: (await store.readRoot()).revision,
+            unitMutations: [{ type: 'set', key: EFFECT_KEYS[0], value: { ...getDatabase().statics, messages: 73 } }] })
+        native.proofs.set('1', proofAt(revision, 'cancelled', [EFFECT_KEYS[0]]))
+        const settled: NativeGenerationRouteStatus & { readonly cancelDecision: 'user' } = { ...routeStatus('cancelled', 'none', revision), cancelDecision: 'user' }
+        expect(flushed).toBe(false)
+        await expect(runtime.settleNativeGeneration(settled)).resolves.toBe('released')
+        await flush
+        expect(getDatabase().statics.messages).toBe(73)
+        expect(await storedRows(store)).toEqual([['m1', 'edited m1'], ['m2', 'm2 row']])
+        expect(liveRows()).toEqual([['m1', 'edited m1'], ['m2', 'm2 row']])
+        expect(native.cancels).toEqual(['1:edit'])
+        expect(runtime.getNativeGenerationGuards()).toEqual([])
+        expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
+        expect(saveFailures).toEqual([])
+        expect(backgroundErrors).toEqual([])
+    })
+
     it.each([
         { windowed: false, terminal: 'failed' }, { windowed: true, terminal: 'failed' },
         { windowed: false, terminal: 'cancelled' }, { windowed: true, terminal: 'cancelled' },

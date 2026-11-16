@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "generator": "benchmarks/rust-core-oracles/prompt.oracle.test.ts",
-  "fixtureSha256": "6bda639bdea43531c94fab45e253718177a7f434a0844dfb9f3a05c4d0ca33b2",
+  "fixtureSha256": "d699da51ab3ab9afb5e8033040ccfd405a091ad01ecb0f873ebd09f4ab33d733",
   "tsSourceSha256": {
     "src/ts/process/index.svelte.ts": "070a7bb037f1ac2c9149d992713ade9e7f923b0c5f096cd8c453cf3bd250fe0c",
     "src/ts/process/promptHistory.ts": "c750415b271386a17aeddf25542e92d45561b184c4bc55f38ba54d48071f8548",
@@ -2676,7 +2676,7 @@
                 {
                   "id": "persona-b",
                   "name": "Bound",
-                  "personaPrompt": "Ignored bound prompt."
+                  "personaPrompt": "Bound persona prompt."
                 }
               ],
               "mainPrompt": "  Synthetic main.  ",
@@ -2704,7 +2704,7 @@
           },
           {
             "role": "system",
-            "content": "Ignored bound prompt."
+            "content": "Bound persona prompt."
           },
           {
             "role": "system",
@@ -2736,7 +2736,7 @@
           }
         ],
         "generation": {
-          "inputTokens": 72,
+          "inputTokens": 71,
           "outputTokens": 64,
           "maxContext": 4000
         },
@@ -2760,8 +2760,8 @@
             4
           ],
           [
-            "Ignored bound prompt.",
-            5
+            "Bound persona prompt.",
+            4
           ],
           [
             "Synthetic greeting.",
@@ -26452,6 +26452,4280 @@
               ],
               "enabledModules": [
                 "trigger-module"
+              ],
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-read-after-cbs-setvar",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  setChatVar(id, \"luaSaw\", getChatVar(id, \"fromCbs\"))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a"
+              },
+              {
+                "role": "char",
+                "data": "First answer.",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": "{{setvar::fromCbs::cbs-value}} Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-read-earlier-trigger-write",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "v2SetVar",
+                    "operator": "=",
+                    "var": "fromTrigger",
+                    "valueType": "value",
+                    "value": "first",
+                    "indent": 0
+                  }
+                ]
+              },
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  setChatVar(id, \"luaSaw\", getChatVar(id, \"fromTrigger\") .. \">lua\")\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-setchat",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  setChat(id, 1, \"Lua edited answer.\")\n  setChatVar(id, \"readBack\", getChatData(id, 1))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "Lua edited answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 72,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            "Lua edited answer.",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-setchatrole",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  setChatRole(id, 0, \"char\")\n  setChatVar(id, \"readBack\", getChatRole(id, 0))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "assistant",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-cutchat",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  cutChat(id, 1, 3)\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatRole(id, 0))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 65,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-addchat",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  addChat(id, \"user\", \"Lua added question.\")\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatData(id, 3))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "user",
+            "content": "Lua added question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 78,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "Lua added question.",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-insertchat",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  insertChat(id, 1, \"char\", \"Lua inserted answer.\")\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatData(id, 1))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "Lua inserted answer."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 78,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            "Lua inserted answer.",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-removechat",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  removeChat(id, 0)\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatRole(id, 0))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 65,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-setfullchat",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  local chat = getFullChat(id)\n  chat[2].data = \"Lua full edit.\"\n  chat[#chat + 1] = { role = \"char\", data = \"Lua full added.\" }\n  setFullChat(id, chat)\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatData(id, 1) .. \":\" .. getChatData(id, 3))\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "Lua full edit."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "assistant",
+            "content": "Lua full added."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 79,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            "Lua full edit.",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "Lua full added.",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-runtime-error",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  setChatVar(id, \"beforeError\", \"kept\")\n  error(\"synthetic runtime error\")\n  setChatVar(id, \"afterError\", \"skipped\")\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-runtrigger-manual",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "runtrigger",
+                    "value": "luaManual"
+                  }
+                ]
+              },
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  setChatVar(id, \"order\", getChatVar(id, \"order\") .. \">start\")\nend\nfunction luaManual(id)\n  setChatVar(id, \"order\", getChatVar(id, \"order\") .. \">manual\")\nend\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value",
+              "$order": "init"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-low-level-on",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "onStart = async(function(id)\n  local lore = loadLoreBooksMain(id, 0):await()\n  setChatVar(id, \"lowLevel\", tostring(lore))\nend)\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "lowLevelAccess": true,
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-low-level-off",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "onStart = async(function(id)\n  local lore = loadLoreBooksMain(id, 0):await()\n  setChatVar(id, \"lowLevel\", tostring(lore))\nend)\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "lowLevelAccess": false,
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note."
+          }
+        ],
+        "generation": {
+          "inputTokens": 71,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-edit-request-listener",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "listenEdit(\"editRequest\", function(id, value, meta)\n  setChatVar(id, \"requestLength\", tostring(#value))\n  value[#value].content = value[#value].content .. \" [lua request]\"\n  return value\nend)\n"
+                  }
+                ]
+              }
+            ],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "promptPreprocess": false
+            },
+            "removed": [
+              "chainOfThought"
+            ]
+          }
+        },
+        "sent": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthetic main."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic description."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic persona."
+          },
+          {
+            "role": "system",
+            "content": "[Start a new chat]"
+          },
+          {
+            "role": "assistant",
+            "content": "Synthetic greeting."
+          },
+          {
+            "role": "user",
+            "content": "First question."
+          },
+          {
+            "role": "assistant",
+            "content": "First answer."
+          },
+          {
+            "role": "user",
+            "content": "Second question."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic global note."
+          },
+          {
+            "role": "system",
+            "content": "Synthetic author note. [lua request]"
+          }
+        ],
+        "generation": {
+          "inputTokens": 75,
+          "outputTokens": 64,
+          "maxContext": 4000
+        },
+        "lastMemory": "NewChat",
+        "errors": [],
+        "tokens": [
+          [
+            "Synthetic main.",
+            4
+          ],
+          [
+            "Synthetic global note.",
+            5
+          ],
+          [
+            "Synthetic author note.",
+            5
+          ],
+          [
+            "Synthetic description.",
+            4
+          ],
+          [
+            "Synthetic persona.",
+            4
+          ],
+          [
+            "Synthetic greeting.",
+            4
+          ],
+          [
+            " First question. ",
+            4
+          ],
+          [
+            " First answer. ",
+            4
+          ],
+          [
+            " Second question. ",
+            4
+          ],
+          [
+            "[Start a new chat]",
+            6
+          ],
+          [
+            "First question.",
+            3
+          ],
+          [
+            "First answer.",
+            3
+          ],
+          [
+            "Second question.",
+            3
+          ],
+          [
+            "Synthetic author note. [lua request]",
+            9
+          ],
+          [
+            "Synthetic response.",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lua-module-trigger",
+      "result": {
+        "database": {
+          "preset": {
+            "id": "preset-a",
+            "name": "Synthetic preset",
+            "aiModel": "ollama-hosted",
+            "mainPrompt": "  Synthetic main.  ",
+            "jailbreak": "Synthetic jailbreak.",
+            "globalNote": "Synthetic global note.",
+            "maxContext": 4000,
+            "maxResponse": 64,
+            "promptTemplate": null,
+            "promptPreprocess": false,
+            "formatingOrder": [
+              "main",
+              "description",
+              "personaPrompt",
+              "chats",
+              "lastChat",
+              "jailbreak",
+              "lorebook",
+              "globalNote",
+              "authorNote"
+            ],
+            "futurePreset": {
+              "preserve": true
+            },
+            "localNetworkMode": false,
+            "localNetworkTimeoutSec": 600
+          },
+          "character": {
+            "type": "character",
+            "chaId": "character",
+            "name": "Synthetic character",
+            "chatPage": 0,
+            "desc": "Synthetic description.",
+            "firstMessage": "Synthetic greeting.",
+            "alternateGreetings": [
+              "Alternate greeting."
+            ],
+            "bias": [],
+            "globalLore": [],
+            "customscript": [],
+            "triggerscript": [],
+            "newGenData": {},
+            "futureCharacter": {
+              "preserve": true
+            },
+            "sdData": [
+              [
+                "always",
+                "solo, 1girl"
+              ],
+              [
+                "negative",
+                ""
+              ],
+              [
+                "|character's appearance",
+                ""
+              ],
+              [
+                "current situation",
+                ""
+              ],
+              [
+                "$character's pose",
+                ""
+              ],
+              [
+                "$character's emotion",
+                ""
+              ],
+              [
+                "current location",
+                ""
+              ]
+            ],
+            "utilityBot": false,
+            "exampleMessage": "",
+            "creatorNotes": "",
+            "systemPrompt": "",
+            "tags": [],
+            "creator": "",
+            "characterVersion": "",
+            "personality": "",
+            "scenario": "",
+            "firstMsgIndex": -1,
+            "additionalData": {
+              "tag": [],
+              "creator": "",
+              "character_version": ""
+            },
+            "voicevoxConfig": {
+              "SPEED_SCALE": 1,
+              "PITCH_SCALE": 0,
+              "INTONATION_SCALE": 1,
+              "VOLUME_SCALE": 1
+            },
+            "additionalText": "",
+            "depth_prompt": {
+              "depth": 0,
+              "prompt": ""
+            },
+            "hfTTS": {
+              "model": "",
+              "language": "en"
+            },
+            "backgroundHTML": "",
+            "backgroundCSS": "",
+            "creation_date": 1767225600000,
+            "ttsMode": "",
+            "lastInteraction": 1767225600000
+          },
+          "conversation": {
+            "id": "conversation",
+            "name": "Synthetic conversation",
+            "note": "Synthetic author note.",
+            "fmIndex": -1,
+            "localLore": [],
+            "scriptstate": {
+              "preserve": "value"
+            },
+            "futureConversation": {
+              "preserve": true
+            },
+            "isStreaming": false,
+            "message": [
+              {
+                "role": "user",
+                "data": " First question. ",
+                "chatId": "message-a",
+                "futureMessage": {
+                  "preserve": true
+                }
+              },
+              {
+                "role": "char",
+                "data": "<Thoughts>Previous hidden thought.</Thoughts> First answer. ",
+                "chatId": "message-b"
+              },
+              {
+                "role": "user",
+                "data": " Second question. ",
+                "chatId": "message-c"
+              }
+            ]
+          },
+          "rootChanges": {
+            "set": {
+              "mainPrompt": "  Synthetic main.  ",
+              "jailbreakToggle": false,
+              "modules": [
+                {
+                  "id": "lua-module",
+                  "name": "Lua module",
+                  "description": "",
+                  "trigger": [
+                    {
+                      "comment": "",
+                      "type": "start",
+                      "conditions": [],
+                      "effect": [
+                        {
+                          "type": "triggerlua",
+                          "code": "function onStart(id)\n  setChatVar(id, \"moduleLua\", \"yes\")\nend\n"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "enabledModules": [
+                "lua-module"
               ],
               "promptPreprocess": false
             },

@@ -1,16 +1,20 @@
 use super::{
     commands::{self, NormalizationInput, Reservation, RouteDispatch, RouteOutput, RouteStatus},
+    ollama_decode::Cancellation,
     operation::{Phase, Ticket},
+    owner,
+    preparation_owner::tests::{gate_service_step, GateRegistration},
+    service,
 };
 use crate::persistent_store::{
     commands::{with_store, with_store_mut},
     generation::CancelReason,
-    PersistentStore, PersistentStoreState,
+    PersistentStore, PersistentStoreState, StoreResult,
 };
 use loopback::serve;
 use risunest_sync_wire::unit::UnitKey;
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, sync::atomic::Ordering, time::Duration};
+use std::{collections::BTreeSet, time::Duration};
 use tauri::{test::MockRuntime, AppHandle, Manager};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Synthetic) RisuNest-command-test";
@@ -107,7 +111,7 @@ fn fixture() -> Value {
 }
 
 // Fields drop in order: the app and its store close before the directory is removed.
-struct Harness { app: tauri::App<MockRuntime>, _directory: tempfile::TempDir }
+struct Harness { app: crate::test_app::MockApp, _directory: tempfile::TempDir }
 
 fn setup(origin: &str, root: Value, messages: Option<Value>) -> Harness { setup_character(origin, root, messages, json!({})) }
 
@@ -129,7 +133,7 @@ fn setup_character(origin: &str, root: Value, messages: Option<Value>, character
     store.replace_put_presets(&stage.staging_id, &[fixture["preset"].clone()]).unwrap();
     store.replace_add_characters(&stage.staging_id, &[character]).unwrap();
     store.replace_commit(&stage.staging_id, Some(0)).unwrap();
-    let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+    let app = crate::test_app::mock_app();
     app.manage(PersistentStoreState::with_test_store(store));
     commands::host_init(USER_AGENT).unwrap();
     Harness { app, _directory: directory }
@@ -146,6 +150,9 @@ impl Harness {
     fn revision(&self) -> i64 { with_store(self.state(), |store| store.revision()).unwrap() }
     fn messages(&self) -> Vec<Value> {
         with_store(self.state(), |store| store.read_conversation("character", "conversation", None)).unwrap().unwrap().value["message"].as_array().unwrap().clone()
+    }
+    fn conversation(&self) -> Value {
+        with_store(self.state(), |store| store.read_conversation("character", "conversation", None)).unwrap().unwrap().value
     }
     fn lease(&self, revision: i64) -> Value {
         json!({ "token": with_store_mut(self.state(), |store| store.acquire_revision(revision)).unwrap().lease, "revision": revision })
@@ -495,7 +502,7 @@ async fn renderer_document_reset_during_the_provider_wait_keeps_the_owner_and_it
         harness.execute(&ticket).await;
         server.requested(1).await;
         harness.issued(&ticket).await;
-        let checked = commands::MAINTENANCE_CHECKED.load(Ordering::Acquire);
+        let checked = commands::maintenance_checks(&ticket);
         let blocker = overlap.then(|| harness.state().admit_renderer_operation().unwrap());
         let app = harness.handle();
         let reset = tokio::task::spawn_blocking(move || app.state::<PersistentStoreState>().reset_renderer_session().unwrap());
@@ -509,7 +516,7 @@ async fn renderer_document_reset_during_the_provider_wait_keeps_the_owner_and_it
         drop(blocker);
         bounded(reset).await.unwrap();
         if !overlap {
-            bounded(async { while commands::MAINTENANCE_CHECKED.load(Ordering::Acquire) == checked { tokio::task::yield_now().await; } }).await;
+            bounded(async { while commands::maintenance_checks(&ticket) == checked { tokio::task::yield_now().await; } }).await;
             commands::forget_host(&ticket);
             let listed = commands::active(harness.handle()).await.unwrap();
             assert_eq!(listed.iter().map(|status| (&status.ticket, status.character_id.as_str(), status.conversation_id.as_str(), &status.phase)).collect::<Vec<_>>(),
@@ -824,5 +831,476 @@ async fn dropping_the_execute_caller_before_preparation_releases_its_publication
     assert!(bounded(execute).await.unwrap_err().is_cancelled());
     let status = bounded(cancel).await.unwrap().unwrap();
     assert_eq!((status.phase, status.dispatch), (Phase::Cancelled, RouteDispatch::None));
+    assert_eq!(server.requests(), 0);
+}
+
+// The preparation's own start trigger writes this variable in the prefix that completion commits.
+fn prefix_trigger() -> Value {
+    json!({"triggerscript":[{"comment":"","type":"start","conditions":[],"effect":[
+        {"type":"v2SetVar","operator":"=","var":"ownedPrefix","valueType":"value","value":"kept","indent":0}]}]})
+}
+
+fn interaction_keys() -> Vec<String> { effect_keys()[..2].to_vec() }
+
+fn prefixed(harness: &Harness) -> bool { harness.conversation()["scriptstate"].get("$ownedPrefix").is_some() }
+
+fn spawn_execute(harness: &Harness, ticket: &Ticket) -> tokio::task::JoinHandle<StoreResult<RouteStatus>> {
+    let (app, ticket) = (harness.handle(), ticket.clone());
+    tokio::spawn(async move { commands::execute(app, ticket).await })
+}
+
+// Drops the execute caller where it waits; its drop has run once the task reports the cancellation.
+async fn abandon(execute: tokio::task::JoinHandle<StoreResult<RouteStatus>>) {
+    execute.abort();
+    assert!(bounded(execute).await.unwrap_err().is_cancelled());
+}
+
+fn preparation_control(harness: &Harness, ticket: &Ticket) -> Cancellation {
+    let scope = with_store(harness.state(), |store| owner::scope(store)).unwrap();
+    owner::preparation_control(&scope, ticket).expect("a registered preparing lifecycle").1
+}
+
+// Holds the preparation worker's first step, after normalization; the caller of `execute` is still attached.
+async fn hold_worker(harness: &Harness, ticket: &Ticket) -> (tokio::task::JoinHandle<StoreResult<RouteStatus>>, Cancellation, GateRegistration, std::sync::mpsc::Sender<()>) {
+    let segment = commands::hold_segment(ticket, 1, false);
+    let execute = spawn_execute(harness, ticket);
+    bounded(segment.reached.notified()).await;
+    let control = preparation_control(harness, ticket);
+    let (registration, entered, release) = gate_service_step(&control, 0, false);
+    segment.release(false);
+    bounded(entered).await.unwrap();
+    (execute, control, registration, release)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dup_execute_during_preparation_starts_no_second_owner_and_keeps_the_first_publication() {
+    let server = serve("500 Internal Server Error", r#"{"error":"Synthetic duplicate failure"}"#, false).await;
+    let harness = setup(&server.origin, json!({}), None);
+    let ticket = harness.reserve().await;
+    let segment = commands::hold_segment(&ticket, 1, false);
+    let first = spawn_execute(&harness, &ticket);
+    bounded(segment.reached.notified()).await;
+    let second = harness.execute(&ticket).await;
+    assert_eq!((second.phase, second.dispatch), (Phase::Running, RouteDispatch::None));
+    segment.release(false);
+    assert_eq!(bounded(first).await.unwrap().unwrap().ticket, ticket);
+    let status = harness.settled(&ticket).await;
+    assert_eq!(status.phase, Phase::Failed);
+    assert_eq!(status.failure.unwrap().sdk_message.as_deref(), Some("Synthetic duplicate failure"));
+    assert!(status.diagnostics_available);
+    assert_eq!(server.requests(), 1);
+}
+
+// A failed read of whether the abandoned begin started anything decides nothing; a later read still returns the ticket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_execute_before_begin_starts_nothing_and_leaves_the_ticket_executable() {
+    for unread in [false, true] {
+        let server = serve("200 OK", &reply(json!("After the abandoned begin.")), false).await;
+        let harness = setup(&server.origin, json!({}), None);
+        let ticket = harness.reserve().await;
+        let segment = commands::hold_segment(&ticket, 0, false);
+        let execute = spawn_execute(&harness, &ticket);
+        bounded(segment.reached.notified()).await;
+        abandon(execute).await;
+        if unread { commands::fail_absence_read(&ticket); }
+        segment.release(false);
+        // Bounded here, so a ticket kept claimed fails this assertion rather than the progress guard.
+        let ended = tokio::time::timeout(Duration::from_secs(30), async {
+            while !commands::reserved(&ticket) && !commands::finished(&ticket) { tokio::task::yield_now().await; }
+        }).await;
+        assert!(ended.is_ok() && commands::reserved(&ticket), "unread={unread}");
+        let status = harness.status(&ticket).await;
+        assert_eq!((status.phase, status.dispatch, status.cancel_decision), (Phase::Reserved, RouteDispatch::None, None), "unread={unread}");
+        assert!(with_store(harness.state(), |store| store.generation_preparing(&ticket)).unwrap().is_none());
+        harness.execute(&ticket).await;
+        assert_eq!(harness.settled(&ticket).await.phase, Phase::Completed, "unread={unread}");
+        assert_eq!(server.requests(), 1, "unread={unread}");
+    }
+}
+
+// Abandonment hard-stops preparation from the caller's drop: before the prefix nothing of it commits, after the prefix
+// it is kept but never promoted, and nothing dispatches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_execute_during_preparation_hard_stops_it_without_dispatch() {
+    for cut in ["normalization", "worker", "prefix"] {
+        let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+        let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+        let ticket = harness.reserve().await;
+        let (execute, control, segment, step) = if cut == "worker" {
+            let (execute, control, registration, release) = hold_worker(&harness, &ticket).await;
+            (execute, control, None, Some((registration, release)))
+        } else {
+            let segment = commands::hold_segment(&ticket, if cut == "prefix" { 2 } else { 1 }, true);
+            let execute = spawn_execute(&harness, &ticket);
+            bounded(segment.reached.notified()).await;
+            (execute, preparation_control(&harness, &ticket), Some(segment), None)
+        };
+        abandon(execute).await;
+        assert!(control.is_cancelled(), "{cut}");
+        if let Some(segment) = segment { segment.release(false); }
+        if let Some((_registration, release)) = step { release.send(()).unwrap(); }
+        let status = harness.settled(&ticket).await;
+        assert_eq!((status.phase.clone(), status.cancel_decision, status.dispatch, status.preparation_ready),
+            (Phase::Cancelled, Some(CancelReason::Lifecycle), RouteDispatch::None, false), "{cut}");
+        assert_eq!(prefixed(&harness), cut == "prefix", "{cut}");
+        let proof = commands::proof(harness.handle(), ticket.clone(), None).await.unwrap();
+        assert_eq!((proof.at, proof.affected_unit_keys.clone()), ("cancelled", if cut == "prefix" { effect_keys() } else { interaction_keys() }), "{cut}");
+        assert_effect_receipts(&proof);
+        assert_eq!(server.requests(), 0, "{cut}");
+    }
+}
+
+// A read while an abandoned preparation's worker still runs settles nothing: the worker's driver still holds the
+// lifecycle, and the stop ends the preparation once the worker returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_while_an_abandoned_preparation_worker_runs_leaves_it_running() {
+    let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+    let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+    let ticket = harness.reserve().await;
+    let publication = commands::hold_publication(&ticket);
+    let (execute, control, _registration, release) = hold_worker(&harness, &ticket).await;
+    abandon(execute).await;
+    assert!(control.is_cancelled());
+    let app = harness.handle();
+    let requested = ticket.clone();
+    let mut read = tokio::spawn(async move { commands::status(app, requested, None).await });
+    // A read that settled the record would wait for the supervisor's publication.
+    tokio::select! {
+        biased;
+        result = &mut read => assert!(matches!(&result, Ok(Ok(status)) if status.phase == Phase::Running && status.dispatch == RouteDispatch::None),
+            "{result:?}"),
+        _ = bounded(publication.observed.notified()) => panic!("a read settled the preparation its worker still runs"),
+    }
+    publication.release.notify_one();
+    release.send(()).unwrap();
+    let status = harness.settled(&ticket).await;
+    assert_eq!((status.phase, status.cancel_decision, status.dispatch), (Phase::Cancelled, Some(CancelReason::Lifecycle), RouteDispatch::None));
+    assert!(!prefixed(&harness));
+    assert_eq!(server.requests(), 0);
+}
+
+// A caller that leaves while the preparation's first step waits for the only blocking thread stops that step before it
+// starts, and the preparation ends as the caller's cancellation.
+#[test]
+fn abandoning_execute_while_the_preparation_step_is_queued_never_starts_it() {
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(1).enable_all().build().unwrap();
+    runtime.block_on(async {
+        let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+        let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+        let ticket = harness.reserve().await;
+        let segment = commands::hold_segment(&ticket, 1, false);
+        let execute = spawn_execute(&harness, &ticket);
+        bounded(segment.reached.notified()).await;
+        let control = preparation_control(&harness, &ticket);
+        let (_admission, admitted, admit) = super::preparation_owner::tests::gate_service_admission(&control, 0);
+        let (_queued, queued) = super::preparation_owner::tests::observe_service_queued(&control);
+        // Released in advance, so a step that ever starts only records that it did.
+        let (_step, mut started, start) = gate_service_step(&control, 0, false);
+        start.send(()).unwrap();
+        segment.release(false);
+        bounded(admitted).await.unwrap();
+        // The only blocking thread is taken before the step is spawned, so the step waits in the queue.
+        let (occupied, blocked) = tokio::sync::oneshot::channel();
+        let (unblock, wait) = std::sync::mpsc::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            occupied.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(30)).unwrap();
+        });
+        bounded(blocked).await.unwrap();
+        admit.send(()).unwrap();
+        bounded(queued).await.unwrap();
+        abandon(execute).await;
+        // A command read would wait behind the blocker too, so the record is read directly.
+        assert_eq!(with_store(harness.state(), |store| store.generation_status(&ticket)).unwrap().phase, Phase::Running);
+        unblock.send(()).unwrap();
+        bounded(blocker).await.unwrap();
+        let status = harness.settled(&ticket).await;
+        assert!(started.try_recv().is_err(), "the queued step started after its caller left");
+        assert_eq!((status.phase, status.cancel_decision, status.dispatch), (Phase::Cancelled, Some(CancelReason::Lifecycle), RouteDispatch::None));
+        assert!(!prefixed(&harness));
+        assert_eq!(server.requests(), 0);
+    });
+}
+
+fn generation_journal(store: &PersistentStore) -> Value {
+    serde_json::from_str(&store.device_store().unwrap().connection().query_row(
+        "SELECT value FROM device_settings WHERE key='native-generation-journal-v1'", [], |row| row.get::<_, String>(0)).unwrap()).unwrap()
+}
+
+fn variables_attempt(journal: &Value) -> Option<&Value> {
+    journal["journal"]["records"].as_object().unwrap().values().map(|record| &record["attempt"])
+        .find(|attempt| attempt["kind"] == json!({"Effect": {"effect": "Variables"}}))
+}
+
+// The prefix's variables commit is interrupted inside its held commit and its intent quarantined, so its receipt stays
+// unknown to every later read.
+fn interrupt_variables_offer(store: &mut PersistentStore, work: &mut dyn FnMut(&mut PersistentStore)) -> StoreResult<()> {
+    use crate::persistent_store::lww::BEFORE_HELD_COMMIT;
+    struct Disarm;
+    impl Drop for Disarm { fn drop(&mut self) { BEFORE_HELD_COMMIT.with(|hook| hook.borrow_mut().take()); } }
+    fn arm(observer: std::rc::Rc<PersistentStore>) {
+        BEFORE_HELD_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+            if variables_attempt(&generation_journal(&observer)).is_some() { panic!("synthetic interrupted variables offer"); }
+            arm(observer);
+        })));
+    }
+    let _disarm = Disarm;
+    arm(std::rc::Rc::new(store.open_native_job_store().unwrap()));
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(store))).is_err(), "the variables offer was not interrupted");
+    let request = variables_attempt(&generation_journal(store)).expect("a pending variables attempt")["request_id"].as_str().unwrap().to_owned();
+    store.device_store().unwrap().connection().execute(
+        "INSERT INTO lww_intent_failures(request_id,failures,error,quarantined) VALUES(?1,3,'synthetic',1)", [request]).unwrap();
+    Err(crate::persistent_store::StoreError::Validation { message: "synthetic-interrupted-offer".into() })
+}
+
+fn switch_binding(store: &mut PersistentStore) {
+    use crate::persistent_store::{lww, sync_selection::{BindingSelectionChange, SyncTarget}};
+    let selection = store.external_selection().unwrap();
+    store.lww_switch_target(&lww::Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: uuid::Uuid::new_v4().to_string() },
+        &BindingSelectionChange { expected_epoch: selection.epoch, new_epoch: uuid::Uuid::new_v4().to_string(), target: SyncTarget::None,
+            library_id: None, target_id: None, inspection_id: None, initial_publication: false }).unwrap();
+}
+
+// An unknown receipt of the prefix's variables commit keeps the claim and the owner: the caller hears the error, status
+// reports the pending commit, a second execute starts nothing, and nothing decides the receipt until a binding switch
+// leaves the record Stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_prefix_receipt_keeps_the_claim_and_owner_until_a_binding_switch() {
+    let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+    let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+    let ticket = harness.reserve().await;
+    commands::wrap_segment(&ticket, 2, Box::new(interrupt_variables_offer));
+    let first = bounded(commands::execute(harness.handle(), ticket.clone())).await;
+    assert!(first.is_err(), "{first:?}");
+    assert!(!commands::reserved(&ticket));
+    let scope = with_store(harness.state(), |store| owner::scope(store)).unwrap();
+    assert!(owner::registered(&scope, &ticket));
+    let unresolved = || with_store(harness.state(), |store| Ok((store.revision()?, generation_journal(store),
+        store.read_conversation("character", "conversation", None)?.unwrap().value))).unwrap();
+    let before = unresolved();
+    assert!(variables_attempt(&before.1).is_some());
+    let read = commands::status(harness.handle(), ticket.clone(), None).await;
+    assert!(matches!(&read, Ok(status) if status.phase == Phase::Running && status.pending_commit && status.dispatch == RouteDispatch::None), "{read:?}");
+    let again = bounded(commands::execute(harness.handle(), ticket.clone())).await;
+    assert!(matches!(&again, Ok(status) if status.phase == Phase::Running && status.pending_commit), "{again:?}");
+    assert!(!commands::reserved(&ticket));
+    assert!(owner::registered(&scope, &ticket));
+    assert_eq!(unresolved(), before);
+    assert!(!prefixed(&harness));
+    with_store_mut(harness.state(), |store| { switch_binding(store); Ok(()) }).unwrap();
+    let status = harness.settled(&ticket).await;
+    assert_eq!((status.phase, status.dispatch), (Phase::Stale, RouteDispatch::None));
+    assert!(!prefixed(&harness));
+    assert_eq!(server.requests(), 0);
+}
+
+// Acceptance and abandonment linearize at the offer: a caller lost after accepting leaves the owner running, one lost
+// before accepting dispatches nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ready_offer_dispatches_only_after_the_caller_accepts_it() {
+    for accepted in [false, true] {
+        let server = serve("200 OK", &reply(json!("Accepted reply.")), true).await;
+        let harness = setup(&server.origin, json!({}), None);
+        let ticket = harness.reserve().await;
+        let gate = commands::hold_handoff(&ticket, accepted);
+        let execute = spawn_execute(&harness, &ticket);
+        bounded(gate.reached.notified()).await;
+        // An accepted owner dispatches while its caller is still held, so the drop below meets a live request.
+        if accepted { server.requested(1).await; }
+        abandon(execute).await;
+        server.release();
+        let status = harness.settled(&ticket).await;
+        let expected = if accepted { (Phase::Completed, None, RouteDispatch::Issued, 1) } else { (Phase::Cancelled, Some(CancelReason::Lifecycle), RouteDispatch::None, 0) };
+        assert_eq!((status.phase.clone(), status.cancel_decision, status.dispatch, server.requests()), expected, "accepted={accepted}");
+        assert!(status.preparation_ready);
+        let proof = commands::proof(harness.handle(), ticket, None).await.unwrap();
+        assert_eq!(proof.affected_unit_keys, if accepted { affected_keys() } else { effect_keys() });
+        assert_effect_receipts(&proof);
+    }
+}
+
+// The first durable reason stays User through a later hard stop, which still ends the preparation before its prefix;
+// User alone keeps the prefix the preparation committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_user_cancel_during_preparation_is_soft_and_a_later_hard_reason_still_stops_it() {
+    for hard in [None, Some(CancelReason::Edit), Some(CancelReason::Plugin), Some(CancelReason::Authority), Some(CancelReason::Lifecycle)] {
+        let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+        let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+        let ticket = harness.reserve().await;
+        let (execute, control, _registration, release) = hold_worker(&harness, &ticket).await;
+        let soft = commands::cancel(harness.handle(), ticket.clone(), CancelReason::User).await.unwrap();
+        assert_eq!((soft.phase, soft.cancel_decision), (Phase::Running, Some(CancelReason::User)), "{hard:?}");
+        assert!(!control.is_cancelled(), "{hard:?}");
+        if let Some(reason) = hard {
+            let stopped = commands::cancel(harness.handle(), ticket.clone(), reason).await.unwrap();
+            assert_eq!(stopped.cancel_decision, Some(CancelReason::User), "{hard:?}");
+            assert!(control.is_cancelled(), "{hard:?}");
+        }
+        release.send(()).unwrap();
+        let status = bounded(execute).await.unwrap().unwrap();
+        assert_eq!((status.phase.clone(), status.cancel_decision, status.dispatch), (Phase::Cancelled, Some(CancelReason::User), RouteDispatch::None), "{hard:?}");
+        assert_eq!(prefixed(&harness), hard.is_none(), "{hard:?}");
+        let proof = commands::proof(harness.handle(), ticket, None).await.unwrap();
+        assert_eq!((proof.at, proof.affected_unit_keys.clone()), ("cancelled", if hard.is_none() { effect_keys() } else { interaction_keys() }), "{hard:?}");
+        assert_effect_receipts(&proof);
+        assert_eq!(server.requests(), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_maintenance_during_preparation_is_a_lifecycle_cancellation_once_admission_reopens() {
+    let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+    let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+    let ticket = harness.reserve().await;
+    let (execute, control, _registration, release) = hold_worker(&harness, &ticket).await;
+    let app = harness.handle();
+    let maintenance = bounded(tokio::task::spawn_blocking(move || app.state::<PersistentStoreState>().acquire_raw_capture().unwrap())).await.unwrap();
+    // The live control hears maintenance while admission is closed to every store attempt.
+    bounded(control.cancelled()).await;
+    release.send(()).unwrap();
+    assert!(bounded(execute).await.unwrap().is_err());
+    assert!(!commands::reserved(&ticket));
+    drop(maintenance);
+    let status = harness.settled(&ticket).await;
+    assert_eq!((status.phase.clone(), status.cancel_decision, status.dispatch, status.preparation_ready),
+        (Phase::Cancelled, Some(CancelReason::Lifecycle), RouteDispatch::None, false));
+    assert!(!prefixed(&harness));
+    assert_eq!(server.requests(), 0);
+}
+
+// A stop first seen once a driver that lost its prefix acknowledgement joined, by maintenance or by the caller leaving,
+// leaves the loss to recovery, which settles it Interrupted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_first_seen_after_a_lost_preparation_joined_leaves_it_interrupted() {
+    for late in ["maintenance", "abandon"] {
+        let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+        let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+        let ticket = harness.reserve().await;
+        let lost = commands::hold_segment(&ticket, 2, true);
+        let joined = commands::hold_join(&ticket);
+        let mut execute = Some(spawn_execute(&harness, &ticket));
+        bounded(lost.reached.notified()).await;
+        lost.release(true);
+        bounded(joined.reached.notified()).await;
+        let maintenance = if late == "maintenance" {
+            let app = harness.handle();
+            Some(bounded(tokio::task::spawn_blocking(move || app.state::<PersistentStoreState>().acquire_raw_capture().unwrap())).await.unwrap())
+        } else {
+            abandon(execute.take().unwrap()).await;
+            None
+        };
+        joined.release.notify_one();
+        if let Some(execute) = execute { assert!(bounded(execute).await.unwrap().is_err(), "{late}"); }
+        drop(maintenance);
+        let status = harness.settled(&ticket).await;
+        assert_eq!((status.phase.clone(), status.dispatch, status.preparation_ready), (Phase::Interrupted, RouteDispatch::None, false), "{late}");
+        assert!(prefixed(&harness), "{late}");
+        assert_eq!(server.requests(), 0, "{late}");
+    }
+}
+
+// A stop the preparation heard while its promotion committed, whose driver then failed before its lifecycle observed
+// the promotion, settles as that cancellation, and the record stays readable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_heard_across_a_failed_promotion_settles_cancelled_and_stays_readable() {
+    let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+    let harness = setup(&server.origin, json!({}), None);
+    let ticket = harness.reserve().await;
+    let gate = commands::hold_preparation(&ticket);
+    let publication = commands::hold_publication(&ticket);
+    let (promoted, fail) = service::fail_promotion_after_commit(&ticket);
+    let execute = spawn_execute(&harness, &ticket);
+    bounded(gate.reached.notified()).await;
+    gate.release.notify_one();
+    bounded(promoted).await.unwrap();
+    abandon(execute).await;
+    fail.send(()).unwrap();
+    // The supervisor kept the heard stop for recovery, and nothing has read the record since.
+    bounded(gate.failed.notified()).await;
+    let app = harness.handle();
+    let requested = ticket.clone();
+    let mut read = tokio::spawn(async move { commands::status(app, requested, None).await });
+    // This first read settles the record terminal and then waits for the supervisor's publication.
+    tokio::select! {
+        biased;
+        result = &mut read => panic!("the read did not settle the record: {result:?}"),
+        _ = bounded(publication.observed.notified()) => {}
+    }
+    gate.release_failure.notify_one();
+    publication.release.notify_one();
+    let read = bounded(read).await.unwrap();
+    assert!(matches!(&read, Ok(status) if status.phase == Phase::Cancelled), "{read:?}");
+    let status = harness.settled(&ticket).await;
+    assert_eq!((status.phase, status.cancel_decision, status.dispatch, status.preparation_ready),
+        (Phase::Cancelled, Some(CancelReason::Lifecycle), RouteDispatch::None, true));
+    assert_eq!(server.requests(), 0);
+}
+
+// A lost acknowledgement of begin, the prefix or the promotion keeps the durable owner: the caller sees the error, the
+// ticket is never offered to another execute, and recovery settles it once without a dispatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_preparation_acknowledgements_keep_the_owner_for_recovery() {
+    for (segment, phase) in [(0, Phase::Interrupted), (2, Phase::Interrupted), (3, Phase::Cancelled)] {
+        let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+        let harness = setup_character(&server.origin, json!({}), None, prefix_trigger());
+        let ticket = harness.reserve().await;
+        let gate = commands::hold_segment(&ticket, segment, true);
+        let execute = spawn_execute(&harness, &ticket);
+        bounded(gate.reached.notified()).await;
+        gate.release(true);
+        assert!(bounded(execute).await.unwrap().is_err(), "{segment}");
+        assert!(!commands::reserved(&ticket), "{segment}");
+        let status = harness.settled(&ticket).await;
+        assert_eq!((status.phase.clone(), status.dispatch, status.preparation_ready), (phase.clone(), RouteDispatch::None, segment == 3), "{segment}");
+        assert_eq!(prefixed(&harness), segment != 0, "{segment}");
+        let proof = commands::proof(harness.handle(), ticket.clone(), None).await.unwrap();
+        if segment != 0 { assert_effect_receipts(&proof); }
+        assert_eq!(harness.execute(&ticket).await.phase, phase, "{segment}");
+        assert_eq!(commands::proof(harness.handle(), ticket, None).await.unwrap().receipts, proof.receipts, "{segment}");
+        assert_eq!(server.requests(), 0, "{segment}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_terminal_preparation_is_readable_only_after_its_publication() {
+    let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+    let harness = setup(&server.origin, json!({}), Some(json!([
+        {"role":"user", "data":"<|endoftext|>", "chatId":"synthetic-special-token"}
+    ])));
+    let ticket = harness.reserve().await;
+    let gate = commands::hold_publication(&ticket);
+    let mut execute = spawn_execute(&harness, &ticket);
+    bounded(gate.reached.notified()).await;
+    assert_eq!(with_store(harness.state(), |store| store.generation_status(&ticket)).unwrap().phase, Phase::Failed);
+    tokio::select! {
+        biased;
+        result = &mut execute => panic!("terminal preparation escaped before its publication: {result:?}"),
+        _ = bounded(gate.observed.notified()) => {}
+    }
+    gate.release.notify_one();
+    let status = bounded(execute).await.unwrap().unwrap();
+    assert_eq!((status.phase, status.dispatch, status.failure.map(|failure| failure.category)), (Phase::Failed, RouteDispatch::None, Some("tokenizer".into())));
+    assert_eq!(server.requests(), 0);
+}
+
+// The preparing owner hands back a failure also for a record it settled Interrupted; the reply is the stored phase.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preparation_lost_with_its_worker_is_reported_interrupted_not_failed() {
+    let server = serve("200 OK", &reply(json!("Never requested.")), false).await;
+    let harness = setup(&server.origin, json!({}), None);
+    let ticket = harness.reserve().await;
+    let segment = commands::hold_segment(&ticket, 1, false);
+    let execute = spawn_execute(&harness, &ticket);
+    bounded(segment.reached.notified()).await;
+    let control = preparation_control(&harness, &ticket);
+    let (_registration, entered, release) = gate_service_step(&control, 0, true);
+    segment.release(false);
+    bounded(entered).await.unwrap();
+    // The worker's step loses its join, as a crashed worker would.
+    drop(release);
+    let status = bounded(execute).await.unwrap().unwrap();
+    assert_eq!((status.phase.clone(), status.preparation_error.clone(), status.dispatch, status.diagnostics_available),
+        (Phase::Interrupted, None, RouteDispatch::None, false));
+    assert_eq!(status.failure.map(|failure| failure.category), Some("interrupted".into()));
     assert_eq!(server.requests(), 0);
 }

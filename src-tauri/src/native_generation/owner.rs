@@ -177,6 +177,16 @@ pub(super) fn registered(scope: &str, ticket: &Ticket) -> bool {
     registry().entries.iter().any(|entry| entry.scope == scope && &entry.owner.ticket == ticket)
 }
 
+// The command saw this dropped preparing lifecycle's driver join after a hard stop the lifecycle heard while live, so
+// recovery settles that stop instead of a loss. A live or already settled entry keeps its own state.
+pub(super) fn retain_joined_preparing_hard(scope: &str, ticket: &Ticket) {
+    if let Some(entry) = registry().entries.iter_mut().find(|entry| entry.scope == scope && &entry.owner.ticket == ticket) {
+        if entry.live.strong_count() == 0 && entry.requested_hard.is_some() && matches!(entry.phase, LifecyclePhase::Preparing { .. }) {
+            entry.pending.get_or_insert(Pending::PreparingHard);
+        }
+    }
+}
+
 // Capacity for one lifecycle; dropping it unused returns the capacity.
 pub(super) struct Slot { scope: Option<String> }
 
@@ -213,6 +223,7 @@ pub(crate) struct Lifecycle { scope: String, ticket: Ticket, id: String, live: O
 
 impl Lifecycle {
     // Registered before ReadyOwned is persisted, so a lost acknowledgement still leaves a recovery entry.
+    #[cfg(test)]
     pub(super) fn register(slot: Slot, owner: &Owner) -> StoreResult<Self> {
         Self::register_with(slot, owner, Arc::new(()), LifecyclePhase::Ready)
     }
@@ -287,9 +298,16 @@ impl Drop for Lifecycle {
 pub(crate) enum Presence { Live, Abandoned, Absent }
 
 // Signals the live transport first; the store decision and settlement follow.
-pub(crate) fn signal(scope: &str, ticket: &Ticket, reason: CancelReason) -> Presence {
+pub(crate) fn signal(scope: &str, ticket: &Ticket, reason: CancelReason) -> Presence { signal_from(scope, ticket, reason, false) }
+
+// Signals only a lifecycle its driver still holds. A dropped one is left to its recovery, which a stop it never heard
+// does not decide.
+pub(crate) fn signal_live(scope: &str, ticket: &Ticket, reason: CancelReason) -> Presence { signal_from(scope, ticket, reason, true) }
+
+fn signal_from(scope: &str, ticket: &Ticket, reason: CancelReason, live_only: bool) -> Presence {
     let mut registry = registry();
     let Some(entry) = registry.entries.iter_mut().find(|entry| entry.scope == scope && &entry.owner.ticket == ticket) else { return Presence::Absent };
+    if live_only && entry.live.strong_count() == 0 { return Presence::Abandoned; }
     entry.reason.get_or_insert(reason);
     let origin = if reason == CancelReason::Lifecycle { CancelOrigin::Owner } else { CancelOrigin::Caller };
     match &mut entry.phase {
@@ -818,7 +836,8 @@ async fn drive(ready: ReadyOllama, access: Arc<dyn OwnerStore>, limits: OwnerLim
 
 fn settle_abandoned(store: &mut PersistentStore, owner: &Owner, reason: Option<CancelReason>, pending: Option<Pending>) -> StoreResult<Status> {
     let decision = match pending {
-        Some(Pending::PreparingHard) => return Err(invalid("preparing-pending-phase")),
+        // A hard stop the preparing lifecycle heard before its promotion was observed settles as that cancellation.
+        Some(Pending::PreparingHard) => TerminalDecision::Cancelled { reason: reason.unwrap_or(CancelReason::Lifecycle) },
         Some(Pending::Decision(decision)) => decision,
         Some(Pending::Offer { sequence, output_hash, committed, uncommitted }) => match store.generation_resolve_output(owner, sequence, &output_hash)? {
             OutputResolution::Committed(_) => committed,

@@ -77,7 +77,7 @@ pub(crate) struct StoredHistory {
 
 #[derive(Debug)]
 pub(crate) enum Start {
-    Started { owner: Owner, history: StoredHistory, status: Status },
+    Started { #[cfg_attr(not(test), allow(dead_code))] owner: Owner, history: StoredHistory, status: Status },
     Existing(Status),
 }
 

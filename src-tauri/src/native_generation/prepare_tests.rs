@@ -968,10 +968,10 @@ fn every_reserved_send_prepares() {
                 | PreparedGeneration::Failed { error: PreparationError::ContextLimit | PreparationError::Tokenizer(_), .. }), "{label}: {prepared:?}");
         }
     }
-    // The 9 trigger rows the route declines are refused with their `decline`, and the one that stops the send ends it; at
+    // The 27 trigger rows the route declines are refused with their `decline`, and the one that stops the send ends it; at
     // least as many inputs as the cases the route admits, plus two, reserve.
     let admitted = fixture["cases"].as_array().unwrap().iter().filter(|case| route_decline(case).is_none()).count();
-    assert_eq!((refused, stopped), (9, 1));
+    assert_eq!((refused, stopped), (27, 1));
     assert!(reserved >= admitted + 2, "{reserved}");
 }
 
@@ -1144,7 +1144,7 @@ fn every_ollama_case_prepares_what_the_recorded_send_sent() {
             result["generation"], "{}", case["id"]);
         assert_eq!(json!(prepared.last_memory), result["lastMemory"], "{}", case["id"]);
     }
-    assert_eq!(refused, 9);
+    assert_eq!(refused, 24);
 }
 
 // The conversation's `scriptstate` and `note` once the send stores `plan`, as its Variables effect writes them.
@@ -1222,7 +1222,7 @@ fn start_trigger_rows_run_natively_or_decline_before_host_requests() {
             }
         }
     }
-    assert_eq!((native, declined), (19, 9));
+    assert_eq!((native, declined), (19, 27));
 }
 
 // The start trigger reads the selected preset's template defaults and module selection, maps case with the tables the

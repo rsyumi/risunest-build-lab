@@ -851,7 +851,7 @@ fn archive_reconciliation_commands_keep_witnesses_and_replay_before_unrelated_in
     let (_directory, mut store, _cas) = archive_store();
     let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
     let request = reconcile_request(&mut store, "archive-reconcile-command");
-    let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+    let app = crate::test_app::mock_app();
     app.manage(commands::PersistentStoreState::with_test_store(store));
     assert_eq!(commands::pds_archive_reconcile_histories(app.state(), lease.clone(), request.character_id.clone(),
         vec!["middle-chat".into()]).unwrap(), request.histories);

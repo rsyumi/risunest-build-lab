@@ -341,16 +341,32 @@ impl Harness {
         self.intent.target.binding_authority = self.store.lww_binding_authority().unwrap();
         service::reserve_ollama(&mut self.store, &self.intent).unwrap()
     }
-    fn ready(&mut self) -> ReadyOllama { self.ready_in("conversation", RegistryLimits::PRODUCTION) }
-    fn ready_in(&mut self, conversation_id: &str, limits: RegistryLimits) -> ReadyOllama {
+    async fn ready(&mut self) -> ReadyOllama { self.ready_in("conversation", RegistryLimits::PRODUCTION).await }
+    async fn ready_in(&mut self, conversation_id: &str, limits: RegistryLimits) -> ReadyOllama {
         let ticket = self.reserve_in(conversation_id);
-        match service::prepare_ready_ollama_limited(&mut self.store, &ticket, &self.host, limits).unwrap() {
+        self.ready_for(&ticket, limits).await
+    }
+    async fn ready_for(&self, ticket: &Ticket, limits: RegistryLimits) -> ReadyOllama {
+        match self.prepare_limited(ticket, limits).await.unwrap() {
+            ReadyPreparation::Ready(ready) => { assert!(ready.status().phase == Phase::Running && ready.status().preparation_ready); ready }
+            other => panic!("not ready: {other:?}"),
+        }
+    }
+    // The command's owned preparation, through the same access as the owner.
+    async fn prepare(&self, ticket: &Ticket) -> service::PreparationServiceResult<ReadyPreparation> { self.prepare_limited(ticket, RegistryLimits::PRODUCTION).await }
+    async fn prepare_limited(&self, ticket: &Ticket, limits: RegistryLimits) -> service::PreparationServiceResult<ReadyPreparation> {
+        service::prepare_ready_ollama_async_limited(ticket.clone(), self.host.clone(), self.access.clone(), Arc::default(), limits).await
+    }
+    // The unowned compatibility entry, for the Ready records whose send effects the owner still writes.
+    fn ready_unowned(&mut self) -> ReadyOllama {
+        let ticket = self.reserve();
+        match service::prepare_ready_ollama(&mut self.store, &ticket, &self.host).unwrap() {
             ReadyPreparation::Ready(ready) => { assert!(ready.status().phase == Phase::Running && ready.status().preparation_ready); ready }
             other => panic!("not ready: {other:?}"),
         }
     }
     fn preparing(&self, ticket: &Ticket) -> tokio::task::JoinHandle<service::PreparationServiceResult<ReadyPreparation>> {
-        tokio::spawn(service::prepare_ready_ollama_async(ticket.clone(), self.host.clone(), self.access.clone()))
+        tokio::spawn(service::prepare_ready_ollama_async(ticket.clone(), self.host.clone(), self.access.clone(), Arc::default()))
     }
     fn faults(&self, faults: Vec<Option<Fault>>) { *self.access.faults.lock().unwrap() = faults.into(); }
     // Output tapes name dispatch then output; Variables and the fenced context read precede those segments.
@@ -433,7 +449,7 @@ async fn succ_buffered_literals_store_the_trimmed_row_under_its_exact_receipt() 
     for case in cases {
         let server = serve(vec![reply(case.content.get(), case.thinking.as_ref().map(|value| value.get()))]).await;
         let mut harness = setup(&server.origin, json!({}), None);
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         #[cfg(not(target_os = "windows"))]
         let execution = finish(harness.execute(ready)).await;
@@ -477,7 +493,7 @@ async fn succ_buffered_literals_store_the_trimmed_row_under_its_exact_receipt() 
 async fn wire_request_matches_the_typescript_oracle_and_ignores_settings_changed_after_ready() {
     let server = serve(vec![reply(r#""Synthetic response.""#, None)]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     assert_eq!(ready.config().model_label(), "synthetic-model");
     let ticket = ready.ticket().clone();
     let changed = [("ollamaURL", json!("http://127.0.0.1:9")), ("ollamaModel", json!("changed-model")), ("ollamaThinkingMode", json!("on")), ("useStreaming", json!(true))];
@@ -501,7 +517,7 @@ async fn perr_failures_keep_only_the_policy_a_fallback_row() {
         let server = serve(vec![response]).await;
         let mut harness = setup(&server.origin, json!({}), None);
         let since = now_millis();
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let execution = finish(harness.execute(ready)).await;
         assert_eq!(phase(&execution), Phase::Failed, "{id}");
@@ -545,7 +561,7 @@ async fn unsupported_output_fails_before_any_checkpoint() {
     for (content, stage) in [(r#""{{setvar::mood::bright}}bright""#, "output"), (r#"["Hello {{", "char}}."]"#, "fallback")] {
         let server = serve(vec![reply(content, None)]).await;
         let mut harness = setup(&server.origin, json!({}), None);
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let execution = finish(harness.execute(ready)).await;
         assert_eq!(phase(&execution), Phase::Failed, "{stage}");
@@ -557,12 +573,13 @@ async fn unsupported_output_fails_before_any_checkpoint() {
 
 #[tokio::test]
 async fn canb_cancel_or_preflight_failure_before_the_request_leaves_sends_nothing() {
-    for cancellation in ["before", "held", "signal-only"] {
+    // The owned preparation commits the memory marker in its prefix; only an unowned Ready still writes it at the claim.
+    for unowned in [false, true] { for cancellation in ["before", "held", "signal-only"] {
         let held_claim = cancellation == "held";
         let server = serve(vec![reply(r#""unused""#, None)]).await;
         let mut harness = setup(&server.origin, json!({}), None);
         let since = now_millis();
-        let ready = harness.ready();
+        let ready = if unowned { harness.ready_unowned() } else { harness.ready().await };
         let ticket = ready.ticket().clone();
         let execution = if held_claim {
             // The cancel is recorded before the dispatch claim is admitted.
@@ -587,16 +604,16 @@ async fn canb_cancel_or_preflight_failure_before_the_request_leaves_sends_nothin
         assert_eq!((evidence.dispatch, evidence.cancel_decision), (DispatchState::None, (cancellation != "signal-only").then_some(CancelReason::User)));
         assert!(execution.dispatch_id.is_none());
         assert_eq!((server.requests().len(), harness.messages().len()), (0, 3));
-        if cancellation == "signal-only" { assert_send_effects(&harness, since); }
+        if cancellation == "signal-only" || !unowned { assert_send_effects(&harness, since); }
         else {
             assert_eq!(harness.store.read_root(None).unwrap().value["statics"], json!({"messages":1,"imports":0}));
             assert!(harness.store.read_character("character", None).unwrap().unwrap().value["lastInteraction"].as_u64().unwrap() >= since);
             assert!(harness.conversation().get("lastMemory").is_none());
         }
-    }
+    } }
     let server = serve(vec![reply(r#""unused""#, None)]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let production = OwnerLimits::production();
     let invalid = OwnerLimits { transport: super::ollama_transport::TransportLimits { max_request_bytes: 0, ..production.transport }, ..production };
@@ -611,7 +628,7 @@ async fn canb_cancel_or_preflight_failure_before_the_request_leaves_sends_nothin
         let server = serve(vec![reply(r#""unused""#, None)]).await;
         let host = format!("{scheme}{}", server.origin.trim_start_matches("http://"));
         let mut harness = setup(&host, json!({}), None);
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let execution = finish(harness.execute(ready)).await;
         assert_eq!(phase(&execution), Phase::Failed, "{detail}");
@@ -637,7 +654,7 @@ async fn cana_cancel_after_the_request_linearizes_at_output_segment_admission() 
         let server = serve(vec![response]).await;
         let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("before", "after")]}}));
         let since = now_millis();
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let (entered, reached) = oneshot::channel();
         let (release, released) = mpsc::channel();
@@ -678,7 +695,7 @@ async fn lost_output_reply_after_the_library_commit_resolves_once_without_retry(
         let deferred = faults.len() == 3;
         let server = serve(vec![reply(r#""Committed once.""#, None)]).await;
         let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("once", "ONCE")]}}));
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         harness.output_faults(faults);
         let execution = finish(harness.execute(ready)).await;
@@ -704,15 +721,15 @@ async fn dup_duplicate_execute_dropped_ready_and_unpolled_execute_issue_at_most_
     let release = Arc::new(Notify::new());
     let server = serve(vec![gated(&release, reply(r#""Only once.""#, None))]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let task = harness.execute(ready);
     server.seen().await;
-    assert!(matches!(service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap(),
+    assert!(matches!(harness.prepare(&ticket).await.unwrap(),
         ReadyPreparation::Existing(status) if status.phase == Phase::Running));
     release.notify_one();
     assert_eq!(phase(&finish(task).await), Phase::Completed);
-    assert!(matches!(service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap(),
+    assert!(matches!(harness.prepare(&ticket).await.unwrap(),
         ReadyPreparation::Existing(status) if status.phase == Phase::Completed));
     assert_eq!(server.requests().len(), 1);
 
@@ -720,7 +737,7 @@ async fn dup_duplicate_execute_dropped_ready_and_unpolled_execute_issue_at_most_
     let messages = text_fixture()["effectMessages"].clone();
     let mut harness = setup(&server.origin, json!({}), Some(messages));
     for unpolled in [false, true] {
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let normalized = harness.messages();
         assert!(normalized.iter().all(|row| !row["chatId"].is_null()), "ID effects precede Ready");
@@ -752,7 +769,7 @@ async fn dup_restart_after_issued_interrupts_without_another_request() {
     }
     let server = serve(vec![Reply::HoldHeaders]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let task = harness.execute(ready);
     server.seen().await;
@@ -777,7 +794,7 @@ async fn edit_foreign_target_message_change_ends_stale_and_unrelated_variable_ed
         let release = Arc::new(Notify::new());
         let server = serve(vec![gated(&release, reply(r#""Reply after edits.""#, None))]).await;
         let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("after", "AFTER")]}}));
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let task = harness.execute(ready);
         server.seen().await;
@@ -811,7 +828,7 @@ async fn binding_change_during_the_operation_ends_stale() {
     let release = Arc::new(Notify::new());
     let server = serve(vec![gated(&release, reply(r#""Reply after binding change.""#, None))]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let task = harness.execute(ready);
     server.seen().await;
@@ -848,7 +865,7 @@ async fn sync_binding_and_effective_streaming_are_refused_before_dispatch() {
     harness.commit(streaming(false));
     let ticket = harness.reserve();
     harness.commit(streaming(true));
-    assert!(matches!(service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap(),
+    assert!(matches!(harness.prepare(&ticket).await.unwrap(),
         ReadyPreparation::Failed { error: PreparationError::Unsupported(field), status } if field == "useStreaming" && status.phase == Phase::Failed));
     assert_eq!(server.requests().len(), 0);
 }
@@ -870,7 +887,7 @@ fn edit_first_message(store: &mut PersistentStore, data: &str) {
 async fn a_target_edit_racing_the_output_commit_ends_stale_without_a_failure_decision() {
     let server = serve(vec![reply(r#""Raced reply.""#, None)]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let mut racer = harness.store.open_native_job_store().unwrap();
     harness.output_faults(vec![None, Some(Fault::Race(Box::new(move || edit_first_message(&mut racer, "Edited in the race."))))]);
@@ -887,7 +904,7 @@ async fn an_owner_lost_after_dispatch_is_interrupted_unless_a_caller_cancelled()
     for cancelled in [false, true] {
         let server = serve(vec![Reply::HoldHeaders]).await;
         let mut harness = setup(&server.origin, json!({}), None);
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let task = harness.execute(ready);
         server.seen().await;
@@ -907,7 +924,7 @@ async fn an_owner_lost_after_dispatch_is_interrupted_unless_a_caller_cancelled()
     // Before any dispatch, a dropped capability cancelled by its caller keeps that reason.
     let server = serve(Vec::new()).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     drop(ready);
     assert_eq!(service::cancel_generation(&mut harness.store, &ticket).unwrap().phase, Phase::Cancelled);
@@ -945,16 +962,16 @@ async fn a_full_registry_settles_abandoned_owners_first_and_otherwise_refuses_wi
     let mut harness = setup_many(&server.origin, &["conversation-2", "conversation-3"]);
     // No bounded pass, so only the full pass at the cap can make room.
     let limits = RegistryLimits { capacity: 2, pass: 0 };
-    let first = harness.ready_in("conversation", limits);
-    let second = harness.ready_in("conversation-2", limits);
+    let first = harness.ready_in("conversation", limits).await;
+    let second = harness.ready_in("conversation-2", limits).await;
     let ticket = harness.reserve_in("conversation-3");
     let before = journal(&harness.store);
-    assert!(is_code(&service::prepare_ready_ollama_limited(&mut harness.store, &ticket, &harness.host, limits), "lifecycle-limit"));
+    assert!(is_code(&harness.prepare_limited(&ticket, limits).await.map_err(|error| error.source), "lifecycle-limit"));
     assert_eq!(journal(&harness.store), before);
     assert_eq!(harness.store.generation_status(&ticket).unwrap().phase, Phase::Reserved);
     let abandoned = first.ticket().clone();
     drop(first);
-    let third = match service::prepare_ready_ollama_limited(&mut harness.store, &ticket, &harness.host, limits).unwrap() {
+    let third = match harness.prepare_limited(&ticket, limits).await.unwrap() {
         ReadyPreparation::Ready(ready) => ready,
         other => panic!("not ready: {other:?}"),
     };
@@ -970,7 +987,7 @@ async fn reconcile_moves_entries_that_keep_failing_behind_the_others() {
     let server = serve(Vec::new()).await;
     let mut harness = setup_many(&server.origin, &["conversation-2", "conversation-3"]);
     let mut readies = Vec::new();
-    for conversation in ["conversation", "conversation-2", "conversation-3"] { readies.push(harness.ready_in(conversation, RegistryLimits::PRODUCTION)); }
+    for conversation in ["conversation", "conversation-2", "conversation-3"] { readies.push(harness.ready_in(conversation, RegistryLimits::PRODUCTION).await); }
     let tickets: Vec<Ticket> = readies.iter().map(|ready| ready.ticket().clone()).collect();
     drop(readies);
     // The two oldest entries keep failing, as an unresolved offer would.
@@ -989,7 +1006,7 @@ async fn reconcile_moves_entries_that_keep_failing_behind_the_others() {
 async fn an_abandoned_entry_on_a_stale_target_resolves_its_offer_and_ends_stale() {
     let server = serve(vec![reply(r#""Committed before the switch.""#, None)]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     harness.output_faults(vec![None, Some(Fault::LoseReply), Some(Fault::Unavailable)]);
     assert!(finish(harness.execute(ready)).await.result.is_err());
@@ -1013,9 +1030,9 @@ async fn an_abandoned_entry_on_a_stale_target_resolves_its_offer_and_ends_stale(
 async fn active_generations_list_reserved_and_running_records_without_writing() {
     let server = serve(vec![reply(r#""Done.""#, None)]).await;
     let mut harness = setup_many(&server.origin, &["conversation-2", "conversation-3"]);
-    let done = harness.ready();
+    let done = harness.ready().await;
     assert_eq!(phase(&finish(harness.execute(done)).await), Phase::Completed);
-    let running = harness.ready_in("conversation-2", RegistryLimits::PRODUCTION);
+    let running = harness.ready_in("conversation-2", RegistryLimits::PRODUCTION).await;
     let reserved = harness.reserve_in("conversation-3");
     let before = journal(&harness.store);
     let active = service::active_generations(&harness.store).unwrap();
@@ -1039,7 +1056,7 @@ async fn lost_memory_effect_reply_resolves_once_and_sends_nothing() {
     let server = serve(vec![reply(r#""unused""#, None)]).await;
     let mut harness = setup(&server.origin, json!({}), None);
     let since = now_millis();
-    let mut ready = harness.ready();
+    let mut ready = harness.ready_unowned();
     // Legacy ready turns have no metadata plan, so Memory still owns their marker write.
     ready.set_prepared_variables(Default::default());
     let ticket = ready.ticket().clone();
@@ -1074,10 +1091,12 @@ fn admission_wait(deadline: std::time::Duration) -> lww::AdmissionWait {
 
 #[tokio::test]
 async fn the_dispatch_claim_waits_within_its_bound_for_device_admission_a_renderer_command_holds() {
+    // Only an unowned Ready leaves Variables or Memory to these segments; the owned preparation's own commits wait in
+    // `async_preparing_commits_wait_within_their_bound_for_device_admission_a_renderer_command_holds`.
     for legacy_memory in [false, true] { for bounded in [false, true] {
         let server = serve(vec![reply(r#""Done.""#, None)]).await;
         let mut harness = setup(&server.origin, json!({}), None);
-        let mut ready = harness.ready();
+        let mut ready = harness.ready_unowned();
         if legacy_memory { ready.set_prepared_variables(Default::default()); }
         let (ticket, revision) = (ready.ticket().clone(), harness.store.revision().unwrap());
         let deadline = std::time::Duration::from_millis(if bounded { 150 } else { 10_000 });
@@ -1134,7 +1153,7 @@ async fn prompt_info_inside_chat_is_refused_before_any_send_effect() {
     let ticket = harness.reserve();
     harness.commit(setting(true));
     let revision = harness.store.revision().unwrap();
-    assert!(matches!(service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap(),
+    assert!(matches!(harness.prepare(&ticket).await.unwrap(),
         ReadyPreparation::Failed { error: PreparationError::Unsupported(field), status } if field == "promptInfoInsideChat" && status.phase == Phase::Failed));
     assert_eq!(harness.store.revision().unwrap(), revision);
     assert!(harness.store.read_root(None).unwrap().value.get("statics").is_none());
@@ -1146,14 +1165,14 @@ async fn a_retargeted_pending_entry_ends_stale_and_frees_its_target_at_the_cap()
     let server = serve(vec![reply(r#""Committed before the switch.""#, None), reply(r#""Sent after the switch.""#, None)]).await;
     let mut harness = setup(&server.origin, json!({}), None);
     let limits = RegistryLimits { capacity: 1, pass: 0 };
-    let ready = harness.ready_in("conversation", limits);
+    let ready = harness.ready_in("conversation", limits).await;
     let ticket = ready.ticket().clone();
     harness.output_faults(vec![None, Some(Fault::LoseReply), Some(Fault::Unavailable)]);
     assert!(finish(harness.execute(ready)).await.result.is_err());
     assert!(harness.store.generation_status(&ticket).unwrap().pending_commit);
     switch_binding(&mut harness.store);
     // The full pass at the cap resolves the entry: its receipt settles, the record ends Stale, and the target is free.
-    let next = harness.ready_in("conversation", limits);
+    let next = harness.ready_in("conversation", limits).await;
     let status = harness.store.generation_status(&ticket).unwrap();
     assert_eq!((status.phase, status.pending_commit), (Phase::Stale, false));
     assert!(!owner::registered(&owner::scope(&harness.store).unwrap(), &ticket));
@@ -1171,7 +1190,7 @@ async fn a_retargeted_pending_entry_ends_stale_and_frees_its_target_at_the_cap()
 async fn an_unrelated_commit_racing_the_output_commit_retries_and_completes() {
     let server = serve(vec![reply(r#""Raced reply.""#, None)]).await;
     let mut harness = setup(&server.origin, json!({}), None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let mut racer = harness.store.open_native_job_store().unwrap();
     harness.output_faults(vec![None, Some(Fault::Race(Box::new(move || {
@@ -1235,7 +1254,7 @@ async fn send_effects_and_output_metadata_match_the_typescript_oracle() {
         let stored = harness.messages().len();
         let from = now_millis();
         let ticket = harness.reserve();
-        match service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap() {
+        match harness.prepare(&ticket).await.unwrap() {
             ReadyPreparation::Ready(ready) => {
                 if outcome == "abort-before-request" { assert!(matches!(owner::signal(&owner::scope(&harness.store).unwrap(), &ticket, CancelReason::User), owner::Presence::Live)); }
                 let task = harness.execute(ready);
@@ -1298,7 +1317,7 @@ async fn send_effects_and_output_metadata_match_the_typescript_oracle() {
         let host = recorded["cases"].as_array().unwrap().iter().find(|entry| entry["id"] == id).unwrap()["result"].get("host").cloned();
         harness.intent.host = host.map(|host| serde_json::from_value(host).unwrap());
         let original = harness.messages();
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         assert_eq!(phase(&finish(harness.execute(ready)).await), Phase::Completed, "{id}");
         let (conversation, observation) = (harness.conversation(), &expected["triggerObservation"]);
         assert_eq!(conversation["scriptstate"], observation["storedScriptstate"], "{id}");
@@ -1346,7 +1365,7 @@ async fn start_trigger_message_edits_store_the_rows_typescript_stored() {
         let mut harness = setup_database(root);
         harness.intent.host = recorded_host(case);
         let original = harness.messages();
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         assert_eq!(phase(&finish(harness.execute(ready)).await), Phase::Completed, "{id}");
         let messages = harness.messages();
@@ -1389,7 +1408,7 @@ async fn a_stopping_start_trigger_stores_its_writes_and_ends_cancelled_without_a
         let mut harness = setup_database(root);
         let (before, rows) = (harness.conversation(), harness.messages().len());
         let ticket = harness.reserve();
-        let ReadyPreparation::Existing(status) = service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap() else { panic!("{id}") };
+        let ReadyPreparation::Existing(status) = harness.prepare(&ticket).await.unwrap() else { panic!("{id}") };
         assert_eq!((status.phase, status.preparation_error, status.pending_commit), (Phase::Cancelled, None, false), "{id}");
         let evidence = harness.evidence(&ticket);
         assert_eq!((evidence.dispatch, evidence.output, evidence.cancel_decision, evidence.failure), (DispatchState::None, OutputState::None, None, None), "{id}");
@@ -1409,7 +1428,7 @@ async fn abandoned_quarantined_offer_reports_stale_without_losing_pending_eviden
     for uncertain in [false, true] {
         let server = serve(vec![reply(r#""Synthetic uncertain output.""#, None)]).await;
         let mut harness = setup(&server.origin, json!({}), None);
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         harness.output_faults(vec![None, Some(Fault::InterruptedOffer), Some(Fault::Unavailable)]);
         assert!(finish(harness.execute(ready)).await.result.is_err());
@@ -1472,7 +1491,7 @@ async fn editoutput_scripts_store_the_real_typescript_fixture_text_and_receipt()
     for case in &cases {
         let server = serve(vec![reply(&case["content"].to_string(), None)]).await;
         let mut harness = output_harness(&server.origin, case);
-        let mut ready = harness.ready();
+        let mut ready = harness.ready().await;
         // The response phase starts after the distinct prompt draw. A reset to the preparation tape produces A X.
         if case["id"] == "output-random" {
             assert_eq!(case["random"], json!([0.125, 0.875, 0.375]));
@@ -1517,7 +1536,7 @@ async fn editoutput_refusals_are_before_dispatch_or_terminal_after_response_asse
     let server = serve(vec![reply(r#""{setvar::mood::bright}}bright""#, None)]).await;
     let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("^", "{")]}}));
     let before = harness.conversation()["scriptstate"].clone();
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let execution = finish(harness.execute(ready)).await;
     assert_eq!(phase(&execution), Phase::Failed);
@@ -1535,7 +1554,7 @@ async fn editoutput_limits_bound_the_transformed_bytes_and_nontext_keeps_policy_
     for (replacement, completed) in [("éé", true), ("ééé", false)] {
         let server = serve(vec![reply(r#""x""#, None)]).await;
         let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("x", replacement)]}}));
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let mut limits = OwnerLimits::production();
         limits.transport.max_output_bytes = 5;
@@ -1553,7 +1572,7 @@ async fn editoutput_limits_bound_the_transformed_bytes_and_nontext_keeps_policy_
     }
     let server = serve(vec![reply(r#"[" alpha ",null,7,["nested","tail"]]"#, None)]).await;
     let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("alpha", "SCRIPT RAN")]}}));
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let execution = finish(harness.execute(ready)).await;
     assert_eq!(phase(&execution), Phase::Failed);
@@ -1606,7 +1625,7 @@ async fn editoutput_owner_matches_fresh_typescript_response_oracle() {
             assert_eq!(harness.conversation(), before);
             assert!(server.requests().is_empty());
         } else {
-            let mut ready = harness.ready();
+            let mut ready = harness.ready().await;
             let draws: Vec<_> = observed["random"]["responseDraws"].as_array().unwrap().iter().map(|draw| draw.as_f64().unwrap()).collect();
             ready.pin_response_entropy(super::cbs::Entropy::pinned(now_millis() as f64, &draws));
             let ticket = ready.ticket().clone();
@@ -1649,7 +1668,7 @@ async fn editoutput_draws_are_fresh_and_unicode_named_captures_keep_their_values
     // The preparation records no draws. Replaying that empty tape for the response must fail this real owner send.
     let server = serve(vec![reply(r#""{{random}} {{random}}""#, None)]).await;
     let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("$", " {{random}} ")]}}));
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let execution = finish(harness.execute(ready)).await;
     assert_eq!(phase(&execution), Phase::Completed, "{:?}", execution.diagnostic);
@@ -1666,7 +1685,7 @@ async fn editoutput_draws_are_fresh_and_unicode_named_captures_keep_their_values
         {"type":"editoutput","in":"(?<word>é)","out":"[$<word>]","flag":"gu","ableFlag":true},
         {"type":"editoutput","in":"\\p{Ll}","out":"U","flag":"gu","ableFlag":true}
     ]}}));
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let execution = finish(harness.execute(ready)).await;
     assert_eq!(phase(&execution), Phase::Completed);
@@ -1681,7 +1700,7 @@ async fn editoutput_reads_response_time_variables_and_rechecks_new_unsafe_values
         let server = serve(vec![gated(&release, reply(r#""seed""#, None))]).await;
         let mut harness = output_harness(&server.origin, &json!({"conversation":{"scriptstate":{"$mood":"old","preserve":"value"}},
             "character":{"customscript":[output_rule("seed", "{{getvar::mood}}")]}}));
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let task = harness.execute(ready);
         server.seen().await;
@@ -1710,7 +1729,7 @@ async fn editoutput_revalidates_new_unsafe_unmatched_rules_before_append() {
     let server = serve(vec![gated(&release, reply(r#""seed""#, None))]).await;
     let mut harness = output_harness(&server.origin, &json!({"preset":{"regex":[output_rule("absent", "safe")]},
         "conversation":{"scriptstate":{"$mood":"old"}}}));
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let task = harness.execute(ready);
     server.seen().await;
@@ -1739,7 +1758,7 @@ async fn editoutput_rejects_a_module_activated_by_the_captured_preset_during_htt
                 {"id":"unselected","name":"Unselected"}],"enabledModules":if selected {json!(["late-module"])}else{json!([])}},
             "preset":{"moduleIntergration":""},"character":{"loreSettings":{"tokenBudget":1000,"scanDepth":10,"recursiveScanning":false},
                 "customscript":[output_rule("seed", "character result")]}}));
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let task = harness.execute(ready);
         server.seen().await;
@@ -1775,7 +1794,7 @@ async fn editoutput_does_not_retarget_a_preset_switched_during_http() {
     other["id"] = json!("preset-b");
     other["regex"] = json!([output_rule("seed", "other")]);
     harness.commit(WorkingSetCommit { replace_presets: Some(vec![original, other]), ..Default::default() });
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let task = harness.execute(ready);
     server.seen().await;
@@ -1799,7 +1818,7 @@ async fn editoutput_keeps_equivalent_gui_selection_and_reads_same_preset_edits()
         let mutation = before.map_or_else(|| RootMutation::Delete { key: "botPresetsId".into() },
             |value| RootMutation::Set { key: "botPresetsId".into(), value });
         harness.commit(WorkingSetCommit { root_mutations: Some(vec![mutation]), ..Default::default() });
-        let ready = harness.ready();
+        let ready = harness.ready().await;
         let ticket = ready.ticket().clone();
         let task = harness.execute(ready);
         server.seen().await;
@@ -1826,7 +1845,7 @@ async fn editoutput_retains_a_captured_override_independent_of_gui_selection() {
     captured["regex"] = json!([output_rule("seed", "captured")]);
     harness.commit(WorkingSetCommit { replace_presets: Some(vec![original.clone(), captured.clone()]), ..Default::default() });
     harness.intent.effective_preset_id = "preset-b".into();
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let task = harness.execute(ready);
     server.seen().await;
@@ -1850,7 +1869,7 @@ async fn editoutput_detects_numeric_gui_selection_changed_by_catalog_reorder() {
     other["id"] = json!("preset-b");
     other["regex"] = json!([output_rule("seed", "other")]);
     harness.commit(WorkingSetCommit { replace_presets: Some(vec![original.clone(), other.clone()]), ..Default::default() });
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     let task = harness.execute(ready);
     server.seen().await;
@@ -1868,7 +1887,7 @@ async fn editoutput_detects_numeric_gui_selection_changed_by_catalog_reorder() {
 async fn editoutput_context_read_failure_is_terminal_without_an_output_offer() {
     let server = serve(vec![reply(r#""seed""#, None)]).await;
     let mut harness = output_harness(&server.origin, &json!({"character":{"customscript":[output_rule("seed", "result")]}}));
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let ticket = ready.ticket().clone();
     // Dispatch succeeds, then the new response-time read fails before any transformation or output admission.
     harness.faults(vec![None, None, Some(Fault::Unavailable)]);
@@ -1890,7 +1909,7 @@ fn ready_with_variables(harness: &mut Harness) -> ReadyOllama {
         value: json!({"tokenBudget":1000,"scanDepth":10,"recursiveScanning":false}),
     }]), ..Default::default() });
     harness.intent.host = Some(output_host(false));
-    harness.ready()
+    harness.ready_unowned()
 }
 
 #[tokio::test]
@@ -1959,9 +1978,8 @@ async fn prepared_session_metadata_survives_preflight_failure_and_cancel_keeps_a
         if mode == "before-variables" { assert_eq!(harness.conversation().get("lastMemory"), memory.as_ref()); }
         else { assert_eq!(harness.conversation()["lastMemory"], "NewChat"); }
         assert_eq!((harness.evidence(&ticket).dispatch, server.requests().len(), harness.messages().len()), (DispatchState::None, 0, 3));
-        service::BEFORE_PREPARATION.with(|hook| *hook.borrow_mut() = Some(Box::new(|| panic!("must not reevaluate cancelled or failed lore"))));
-        assert!(matches!(service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap(), ReadyPreparation::Existing(status) if status.phase != Phase::Running));
-        service::BEFORE_PREPARATION.with(|hook| hook.borrow_mut().take());
+        // A later preparation answers with the settled record instead of evaluating its lore again.
+        assert!(matches!(harness.prepare(&ticket).await.unwrap(), ReadyPreparation::Existing(status) if status.phase != Phase::Running));
         assert!(server.requests().is_empty());
     }
 }
@@ -1972,7 +1990,7 @@ async fn a_later_memory_edit_is_not_replayed_by_the_compatibility_segment() {
     let server = serve(vec![reply(r#""seed""#, None)]).await;
     let patch = if matching { json!({"conversation":{"lastMemory":"NewChat"}}) } else { json!({}) };
     let mut harness = setup(&server.origin, patch, None);
-    let ready = harness.ready();
+    let ready = harness.ready().await;
     let (entered, reached) = oneshot::channel();
     let (release, released) = mpsc::channel();
     harness.faults(vec![None, Some(Fault::Hold { entered, release: released })]);
@@ -2008,9 +2026,7 @@ async fn lost_variable_reply_resolves_exact_receipt_without_memory_http_or_repla
         key: UnitKey::new(&["conversation", "character", "conversation", "scriptstate"]).unwrap(), value: json!({"$__internal_ka_flag":"foreign"}),
     }]), ..Default::default() });
     assert_eq!(service::resolve_owner(&mut harness.store, &ticket).unwrap().phase, Phase::Failed);
-    service::BEFORE_PREPARATION.with(|hook| *hook.borrow_mut() = Some(Box::new(|| panic!("must not reevaluate prepared lore"))));
-    assert!(matches!(service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap(), ReadyPreparation::Existing(status) if status.phase == Phase::Failed));
-    service::BEFORE_PREPARATION.with(|hook| hook.borrow_mut().take());
+    assert!(matches!(harness.prepare(&ticket).await.unwrap(), ReadyPreparation::Existing(status) if status.phase == Phase::Failed));
     assert_eq!(harness.conversation()["scriptstate"]["$__internal_ka_flag"], "foreign");
     assert_eq!(harness.store.generation_effects_evidence(&ticket).unwrap().unwrap(), evidence);
     assert_eq!((harness.evidence(&ticket).dispatch, server.requests().len(), harness.messages().len()), (DispatchState::None, 0, 3));
@@ -2036,10 +2052,8 @@ async fn prepared_lore_variables_reject_foreign_written_keys_and_merge_unrelated
         let revision = harness.store.revision().unwrap();
         release.send(()).unwrap();
         let execution = finish(task).await;
-        service::BEFORE_PREPARATION.with(|hook| *hook.borrow_mut() = Some(Box::new(|| panic!("must not reevaluate settled lore"))));
-        assert!(matches!(service::prepare_ready_ollama(&mut harness.store, &ticket, &harness.host).unwrap(), ReadyPreparation::Existing(status)
+        assert!(matches!(harness.prepare(&ticket).await.unwrap(), ReadyPreparation::Existing(status)
             if status.phase == if same_key { Phase::Stale } else { Phase::Completed }));
-        service::BEFORE_PREPARATION.with(|hook| hook.borrow_mut().take());
         let evidence = harness.store.generation_effects_evidence(&ticket).unwrap().unwrap();
         if same_key {
             assert_eq!(phase(&execution), Phase::Stale);
@@ -2087,10 +2101,11 @@ async fn selected_module_lore_variables_settle_in_order_before_memory_and_http()
         "preset":{"moduleIntergration":""},"character":{"globalLore":[],"loreSettings":{"tokenBudget":1000,"scanDepth":10,"recursiveScanning":false}},
         "conversation":{"localLore":[]}
     }));
-    let ready = harness.ready();
-    let (ticket, revision) = (ready.ticket().clone(), harness.store.revision().unwrap());
+    let ticket = harness.reserve();
+    let revision = harness.store.revision().unwrap();
     assert!(harness.conversation()["scriptstate"].get("$__internal_ka_module-B").is_none());
     assert!(harness.conversation()["scriptstate"].get("$__internal_ka_module-A").is_none());
+    let ready = harness.ready_for(&ticket, RegistryLimits::PRODUCTION).await;
     let task = harness.execute(ready);
     server.seen().await;
     assert_eq!(harness.conversation()["scriptstate"]["$__internal_ka_module-B"], "true");
@@ -2100,8 +2115,9 @@ async fn selected_module_lore_variables_settle_in_order_before_memory_and_http()
     let wire = request["messages"].as_array().unwrap().iter().map(|message| message["content"].as_str().unwrap()).collect::<Vec<_>>().join("\n");
     assert!(wire.contains("ORDER-A sees=true."), "{wire}");
     let effects = harness.store.generation_effects_evidence(&ticket).unwrap().unwrap();
-    assert_eq!(effects.receipts[1].revision, revision + 1);
-    assert_eq!(effects.receipts.len(), 2);
+    // The interaction, then the prefix holding both module variables and the memory marker, all before the request.
+    assert_eq!(effects.receipts.iter().map(|receipt| receipt.revision).collect::<Vec<_>>(), [revision + 1, revision + 2]);
+    assert_eq!(harness.store.revision().unwrap(), revision + 2);
     release.notify_one();
     let execution = finish(task).await;
     assert_eq!(phase(&execution), Phase::Completed, "{:?}", execution.diagnostic);
@@ -2120,10 +2136,10 @@ async fn selected_module_output_reads_fresh_variables_and_defaults_without_repla
     let release = Arc::new(Notify::new());
     let server = serve(vec![gated(&release, reply(&case["content"].to_string(), None))]).await;
     let mut harness = output_harness(&server.origin, &case);
-    let mut ready = harness.ready();
-    ready.pin_response_entropy(super::cbs::Entropy::pinned(now_millis() as f64, &[0.875]));
-    let ticket = ready.ticket().clone();
+    let ticket = harness.reserve();
     assert!(harness.conversation()["scriptstate"].get("$__internal_ka_module-fresh").is_none());
+    let mut ready = harness.ready_for(&ticket, RegistryLimits::PRODUCTION).await;
+    ready.pin_response_entropy(super::cbs::Entropy::pinned(now_millis() as f64, &[0.875]));
     let task = harness.execute(ready);
     server.seen().await;
     assert_eq!(harness.conversation()["scriptstate"]["$__internal_ka_module-fresh"], "true");
@@ -2904,5 +2920,51 @@ async fn async_preparing_retention_follows_variables_and_memory_blocking_data_on
                 if segment == 1 && after { Phase::Interrupted } else { Phase::Cancelled });
             assert!(server.requests().is_empty());
         } }
+    }
+}
+
+// The owned preparation's library commits wait within their bound for device admission a renderer command holds: a
+// bounded wait ends the turn interrupted with nothing committed, and a hold released in time lets it prepare.
+#[tokio::test]
+async fn async_preparing_commits_wait_within_their_bound_for_device_admission_a_renderer_command_holds() {
+    for bounded in [false, true] {
+        let server = serve(Vec::new()).await;
+        let mut harness = setup(&server.origin, json!({}), None);
+        let since = now_millis();
+        let ticket = harness.reserve();
+        let revision = harness.store.revision().unwrap();
+        let deadline = std::time::Duration::from_millis(if bounded { 150 } else { 10_000 });
+        harness.access.store.lock().unwrap().set_admission_wait(admission_wait(deadline));
+        let (entered, reached) = oneshot::channel();
+        // The capture segment's interaction commit is the first one that needs device admission.
+        harness.faults(vec![None, Some(Fault::Before(Box::new(move |_| {
+            lww::BEFORE_COMMIT_ADMISSION.with(|hook| *hook.borrow_mut() = Some(Box::new(move |_commit| { entered.send(()).ok(); })));
+        })))]);
+        let (release, holder) = hold_admission(harness.directory.path());
+        let started = std::time::Instant::now();
+        let task = harness.preparing(&ticket);
+        tokio::time::timeout(std::time::Duration::from_secs(60), reached).await.expect("the commit did not reach admission").unwrap();
+        if bounded {
+            // Ends while the renderer still holds admission, after waiting out its bound.
+            let result = prepared(task).await;
+            let waited = started.elapsed();
+            let observed = harness.store.revision().unwrap();
+            release.send(()).unwrap();
+            holder.join().unwrap();
+            assert!(matches!(result.map_err(|error| error.source), Err(StoreError::CommitBusy)));
+            assert!(waited >= deadline, "{waited:?}");
+            assert_eq!(observed, revision);
+            let status = service::resolve_owner(&mut harness.store, &ticket).unwrap();
+            assert_eq!((status.phase, status.pending_commit, status.preparation_ready), (Phase::Interrupted, false, false));
+            assert!(harness.store.read_root(None).unwrap().value["statics"].is_null());
+            assert_eq!(harness.store.revision().unwrap(), revision);
+        } else {
+            release.send(()).unwrap();
+            holder.join().unwrap();
+            let ReadyPreparation::Ready(ready) = prepared(task).await.unwrap() else { panic!("a wait released within its bound prepares") };
+            assert!(ready.status().preparation_ready);
+            assert_send_effects(&harness, since);
+        }
+        assert_eq!(server.requests().len(), 0);
     }
 }

@@ -51,7 +51,7 @@
     {"id":"final-trim","preset":{"mainPrompt":"","globalNote":"","maxContext":110,"maxResponse":0,"formatingOrder":["main","chats","chats","chats","chats","lastChat"]},"character":{"desc":"","firstMessage":""},"conversation":{"note":""},"messages":[{"role":"user","data":"one two three four five six seven eight nine ten","chatId":"final-a"},{"role":"char","data":"one two three four five six seven eight nine ten","chatId":"final-b"},{"role":"user","data":"one two three four five six seven eight nine ten","chatId":"final-c"}]},
     {"id":"alternate-unicode","conversation":{"fmIndex":0},"messages":[{"role":"user","data":"\ufeff 합성 🦊 \u0085 \ue9b8escaped\ue9b9 \ufeff","chatId":"unicode"}]},
     {"id":"inactive-settings","root":{"additionalParams":[["temperature","0.2"]],"applyAdditionalParamsToAll":false,"hypaV3":true,"plugins":[{"enabled":false,"version":"3.0","name":"disabled"}],"modules":[{"id":"unused","regex":[{"type":"editprocess","in":"a","out":"b"}]}]},"preset":{"regex":[{"type":"editdisplay","in":"a","out":"b"}],"customFlags":["irrelevant"],"enableCustomFlags":false},"character":{"supaMemory":false}},
-    {"id":"empty-selected-persona","root":{"personas":[{"id":"persona-a","name":"Selected","personaPrompt":""},{"id":"persona-b","name":"Bound","personaPrompt":"Ignored bound prompt."}]},"conversation":{"bindedPersona":"persona-b"}},
+    {"id":"empty-selected-persona","root":{"personas":[{"id":"persona-a","name":"Selected","personaPrompt":""},{"id":"persona-b","name":"Bound","personaPrompt":"Bound persona prompt."}]},"conversation":{"bindedPersona":"persona-b"}},
     {"id":"missing-preset-defaults","preset":{"mainPrompt":null,"maxContext":null,"maxResponse":null,"promptSettings":null},"character":{"systemPrompt":"Literal override of default main."}},
     {"id":"default-jailbreak","root":{"jailbreakToggle":true},"preset":{"jailbreak":null}},
     {"id":"protected-inactive-fallback","root":{"doNotChangeFallbackModels":true,"protectedPresetValues":{"fallbackModels":{"model":[],"memory":[],"emotion":[],"translate":[],"otherAx":[]},"fallbackWhenBlankResponse":false}},"preset":{"fallbackModels":{"model":["inactive-preset-fallback"],"memory":[],"emotion":[],"translate":[],"otherAx":[]}}},
@@ -2516,6 +2516,405 @@
       },
       "responseContent": "{{getvar::moduleRan}}",
       "expectedOutput": "yes"
+    },
+    {
+      "id": "lua-read-after-cbs-setvar",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "messages": [
+        {
+          "role": "user",
+          "data": " First question. ",
+          "chatId": "message-a"
+        },
+        {
+          "role": "char",
+          "data": "First answer.",
+          "chatId": "message-b"
+        },
+        {
+          "role": "user",
+          "data": "{{setvar::fromCbs::cbs-value}} Second question. ",
+          "chatId": "message-c"
+        }
+      ],
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  setChatVar(id, \"luaSaw\", getChatVar(id, \"fromCbs\"))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::luaSaw}}",
+      "expectedOutput": "cbs-value"
+    },
+    {
+      "id": "lua-read-earlier-trigger-write",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "v2SetVar",
+                "operator": "=",
+                "var": "fromTrigger",
+                "valueType": "value",
+                "value": "first",
+                "indent": 0
+              }
+            ]
+          },
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  setChatVar(id, \"luaSaw\", getChatVar(id, \"fromTrigger\") .. \">lua\")\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::luaSaw}}",
+      "expectedOutput": "first>lua"
+    },
+    {
+      "id": "lua-setchat",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  setChat(id, 1, \"Lua edited answer.\")\n  setChatVar(id, \"readBack\", getChatData(id, 1))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::readBack}}",
+      "expectedOutput": "Lua edited answer."
+    },
+    {
+      "id": "lua-setchatrole",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  setChatRole(id, 0, \"char\")\n  setChatVar(id, \"readBack\", getChatRole(id, 0))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::readBack}}",
+      "expectedOutput": "char"
+    },
+    {
+      "id": "lua-cutchat",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  cutChat(id, 1, 3)\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatRole(id, 0))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::readBack}}",
+      "expectedOutput": "2:char"
+    },
+    {
+      "id": "lua-addchat",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  addChat(id, \"user\", \"Lua added question.\")\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatData(id, 3))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::readBack}}",
+      "expectedOutput": "4:Lua added question."
+    },
+    {
+      "id": "lua-insertchat",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  insertChat(id, 1, \"char\", \"Lua inserted answer.\")\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatData(id, 1))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::readBack}}",
+      "expectedOutput": "4:Lua inserted answer."
+    },
+    {
+      "id": "lua-removechat",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  removeChat(id, 0)\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatRole(id, 0))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::readBack}}",
+      "expectedOutput": "2:char"
+    },
+    {
+      "id": "lua-setfullchat",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "triggerEditsMessages": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  local chat = getFullChat(id)\n  chat[2].data = \"Lua full edit.\"\n  chat[#chat + 1] = { role = \"char\", data = \"Lua full added.\" }\n  setFullChat(id, chat)\n  setChatVar(id, \"readBack\", getChatLength(id) .. \":\" .. getChatData(id, 1) .. \":\" .. getChatData(id, 3))\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::readBack}}",
+      "expectedOutput": "4:Lua full edit.:Lua full added."
+    },
+    {
+      "id": "lua-runtime-error",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  setChatVar(id, \"beforeError\", \"kept\")\n  error(\"synthetic runtime error\")\n  setChatVar(id, \"afterError\", \"skipped\")\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::beforeError}}|{{getvar::afterError}}",
+      "expectedOutput": "kept|null"
+    },
+    {
+      "id": "lua-runtrigger-manual",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "conversation": {
+        "scriptstate": {
+          "preserve": "value",
+          "$order": "init"
+        }
+      },
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "runtrigger",
+                "value": "luaManual"
+              }
+            ]
+          },
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  setChatVar(id, \"order\", getChatVar(id, \"order\") .. \">start\")\nend\nfunction luaManual(id)\n  setChatVar(id, \"order\", getChatVar(id, \"order\") .. \">manual\")\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::order}}",
+      "expectedOutput": "init>manual>start"
+    },
+    {
+      "id": "lua-low-level-on",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "character": {
+        "lowLevelAccess": true,
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "onStart = async(function(id)\n  local lore = loadLoreBooksMain(id, 0):await()\n  setChatVar(id, \"lowLevel\", tostring(lore))\nend)\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::lowLevel}}",
+      "expectedOutput": "[]"
+    },
+    {
+      "id": "lua-low-level-off",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "character": {
+        "lowLevelAccess": false,
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "onStart = async(function(id)\n  local lore = loadLoreBooksMain(id, 0):await()\n  setChatVar(id, \"lowLevel\", tostring(lore))\nend)\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::lowLevel}}",
+      "expectedOutput": "nil"
+    },
+    {
+      "id": "lua-edit-request-listener",
+      "decline": "triggers",
+      "observeTriggers": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "listenEdit(\"editRequest\", function(id, value, meta)\n  setChatVar(id, \"requestLength\", tostring(#value))\n  value[#value].content = value[#value].content .. \" [lua request]\"\n  return value\nend)\n"
+              }
+            ]
+          }
+        ]
+      },
+      "responseContent": "{{getvar::requestLength}}",
+      "expectedOutput": "10"
+    },
+    {
+      "id": "lua-module-trigger",
+      "decline": "modules",
+      "observeTriggers": true,
+      "root": {
+        "modules": [
+          {
+            "id": "lua-module",
+            "name": "Lua module",
+            "description": "",
+            "trigger": [
+              {
+                "comment": "",
+                "type": "start",
+                "conditions": [],
+                "effect": [
+                  {
+                    "type": "triggerlua",
+                    "code": "function onStart(id)\n  setChatVar(id, \"moduleLua\", \"yes\")\nend\n"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "enabledModules": [
+          "lua-module"
+        ]
+      },
+      "responseContent": "{{getvar::moduleLua}}",
+      "expectedOutput": "yes"
     }
   ],
   "effectMessages": [
@@ -2866,6 +3265,116 @@
               {
                 "type": "v2EndIndent",
                 "indent": 1
+              }
+            ]
+          }
+        ]
+      },
+      "expectedIdAssignments": [
+        0,
+        1,
+        4,
+        6
+      ]
+    },
+    {
+      "id": "lua-return-false",
+      "decline": "triggers",
+      "outcome": "stop",
+      "observeTriggers": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  if getChatVar(id, \"luaStopped\") ~= \"true\" then\n    setChatVar(id, \"luaStopped\", \"true\")\n    return false\n  end\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "expectedIdAssignments": [
+        0,
+        1,
+        4,
+        6
+      ]
+    },
+    {
+      "id": "lua-stopchat",
+      "decline": "triggers",
+      "outcome": "stop",
+      "observeTriggers": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "function onStart(id)\n  if getChatVar(id, \"chatStopped\") ~= \"true\" then\n    setChatVar(id, \"chatStopped\", \"true\")\n    stopChat(id)\n    setChatVar(id, \"afterStopChat\", \"still-runs\")\n  end\nend\n"
+              }
+            ]
+          }
+        ]
+      },
+      "expectedIdAssignments": [
+        0,
+        1,
+        4,
+        6
+      ]
+    },
+    {
+      "id": "lua-init-error",
+      "decline": "triggers",
+      "outcome": "trigger-error",
+      "observeTriggers": true,
+      "character": {
+        "triggerscript": [
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "v2SetVar",
+                "operator": "=",
+                "var": "beforeInit",
+                "valueType": "value",
+                "value": "kept",
+                "indent": 0
+              },
+              {
+                "type": "v2SetAuthorNote",
+                "value": "Note kept after init error.",
+                "valueType": "value",
+                "indent": 0
+              },
+              {
+                "type": "v2ModifyChat",
+                "index": "7",
+                "indexType": "value",
+                "value": "Edited before init error.",
+                "valueType": "value",
+                "indent": 0
+              }
+            ]
+          },
+          {
+            "comment": "",
+            "type": "start",
+            "conditions": [],
+            "effect": [
+              {
+                "type": "triggerlua",
+                "code": "error(\"synthetic init error\")\nfunction onStart(id)\n  setChatVar(id, \"neverRuns\", \"yes\")\nend\n"
               }
             ]
           }

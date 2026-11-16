@@ -691,7 +691,7 @@ pub(crate) fn admission_host_requests(snapshot: &PreparationSnapshot) -> (Result
     (probe_result(machine), requests)
 }
 
-pub(super) struct OwnedStart { pub(super) names: Names, pub(super) budget: Budget, pub(super) progress: CoreYield }
+pub(super) struct OwnedStart { pub(super) names: Names, #[cfg_attr(not(test), allow(dead_code))] pub(super) budget: Budget, pub(super) progress: CoreYield }
 
 fn start_owned_with(snapshot: &PreparationSnapshot, evaluation: impl FnOnce() -> Result<(Budget, Evaluation), PreparationError>)
     -> Result<OwnedStart, PreparationError> {
@@ -712,6 +712,7 @@ pub(super) fn start_owned(snapshot: &PreparationSnapshot, budget: &Budget) -> Re
     })
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_ollama_owned(snapshot: &PreparationSnapshot) -> PreparationAttempt {
     match start_owned_with(snapshot, || evaluation(snapshot)) {
         Ok(OwnedStart { names, budget, progress }) => refuse_to_completion(progress, &budget).finish(snapshot, names),
