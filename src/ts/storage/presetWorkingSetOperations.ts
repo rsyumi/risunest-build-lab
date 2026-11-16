@@ -55,8 +55,7 @@ export interface PresetWorkingSetControllerDependencies {
 export interface PresetWorkingSetController {
     saveCurrentPreset(expectedNames?: PresetListExpectation): Promise<void>
     changeToPreset(id?: number, saveCurrent?: boolean, expectedNames?: PresetListExpectation): Promise<void>
-    addPreset(preset: botPreset, activate?: boolean, signal?: AbortSignal): Promise<number>
-    appendPreparedPreset(preset: botPreset, signal?: AbortSignal): Promise<number>
+    addPreset(preset: botPreset, activate?: boolean): Promise<number>
     copyPreset(id: number, expectedNames?: PresetListExpectation): Promise<number>
     removePreset(id: number, expectedNames?: PresetListExpectation): Promise<void>
     movePreset(fromIndex: number, toIndex: number, expectedNames?: PresetListExpectation): Promise<void>
@@ -158,31 +157,15 @@ export function createPresetWorkingSetController(
             })
             dependencies.clearEffectivePresetOverride?.()
         },
-        async addPreset(preset, activate = false, signal) {
-            signal?.throwIfAborted()
+        async addPreset(preset, activate = false) {
             let addedIndex = -1
             await dependencies.mutatePersistentPresets('add-preset', (state) => {
-                signal?.throwIfAborted()
                 saveActive(state)
                 addedIndex = state.presets.length
                 state.presets.push({ ...clonePreset(preset), id: v4() })
                 if (activate) select(state, addedIndex)
             })
             if (activate) dependencies.clearEffectivePresetOverride?.()
-            return addedIndex
-        },
-        async appendPreparedPreset(preset, signal) {
-            if (!preset || typeof preset.id !== 'string' || !preset.id.trim()) throw new Error('Prepared preset identity is invalid')
-            signal?.throwIfAborted()
-            const prepared = clonePreset(preset)
-            let addedIndex = -1
-            await dependencies.mutatePersistentPresets('append-prepared-preset', (state) => {
-                signal?.throwIfAborted()
-                if (state.presets.some(existing => existing.id === prepared.id)) throw new Error('Prepared preset identity already exists')
-                saveActive(state)
-                addedIndex = state.presets.length
-                state.presets.push(prepared)
-            })
             return addedIndex
         },
         async copyPreset(id, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {

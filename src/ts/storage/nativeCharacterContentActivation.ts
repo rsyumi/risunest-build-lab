@@ -160,14 +160,6 @@ export async function prepareAdditionalAssetOwnerHead(
     }
 }
 
-// The character the native mapping produced, or undefined where the TS mapping runs instead: on every decline, so an
-// invalid card fails with the TS mapping's own error.
-function nativeMappedCharacter(
-    mapping: PreparedNativeContent['nativeMapping'],
-): character | undefined {
-    return mapping?.outcome === 'mapped' && 'character' in mapping ? mapping.character as unknown as character : undefined
-}
-
 const productionDependencies: NativeCharacterContentActivationDependencies = {
     decodePng: decodePreparedNativePngCharacterCard,
     map: mapPreparedNativeCharacterCard,
@@ -221,7 +213,6 @@ export async function mapPreparedNativeContent(
     }
     const cardAssets =
         content.assets as import('./nativeFileJobs').PreparedCardContentAssetDescriptor[]
-    const receiptAssetCount = cardAssets.length
     throwIfAborted(signal)
     const card =
         content.format === 'png-card'
@@ -232,11 +223,7 @@ export async function mapPreparedNativeContent(
             : requireCharacterCardMetadata(content.metadata)
     throwIfAborted(signal)
     if (!card) return null
-    // The native mapping read the receipt's assets, so a card whose PNG inline payloads were staged since is mapped in TS.
-    const nativeCharacter = cardAssets.length === receiptAssetCount
-        ? nativeMappedCharacter(content.nativeMapping)
-        : undefined
-    const character = nativeCharacter ?? await dependencies.map({
+    const character = await dependencies.map({
         card,
         assets: cardAssets.map(({ token, logicalId }) => ({
             token,

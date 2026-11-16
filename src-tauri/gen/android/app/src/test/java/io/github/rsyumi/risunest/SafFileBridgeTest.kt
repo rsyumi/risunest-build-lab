@@ -347,26 +347,24 @@ class SafFileBridgeTest {
 
   @Test
   fun `content spool persists its import destination for replay`() = runBlocking {
-    for (destination in listOf(SafContentImportDestination.MODULE, SafContentImportDestination.PRESET)) {
-      val root = temporaryDirectory()
-      val token = "31313131-3131-4131-8131-313131313131"
-      val store = SafSpoolStore(
-        root = root,
-        atomicPublisher = testAtomicPublisher,
-        tokenFactory = { UUID.fromString(token) },
-      )
+    val root = temporaryDirectory()
+    val token = "31313131-3131-4131-8131-313131313131"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      tokenFactory = { UUID.fromString(token) },
+    )
 
-      val batch = spoolOpenedFilesOnIo(
-        store,
-        listOf(TestSafSource("book.lorebook", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) }),
-        importDestination = destination,
-      )
+    val batch = spoolOpenedFilesOnIo(
+      store,
+      listOf(TestSafSource("book.lorebook", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) }),
+      importDestination = SafContentImportDestination.MODULE,
+    )
 
-      assertEquals(destination, batch.ready.single().importDestination)
-      assertEquals(destination, store.listReady().single().importDestination)
-      assertTrue(root.resolve("$token/source.json").readText().contains("\"importDestination\":\"${destination.wireName}\""))
-      assertTrue(androidSpoolBatchScript("request", batch).contains("\"importDestination\":\"${destination.wireName}\""))
-    }
+    assertEquals(SafContentImportDestination.MODULE, batch.ready.single().importDestination)
+    assertEquals(SafContentImportDestination.MODULE, store.listReady().single().importDestination)
+    assertTrue(root.resolve("$token/source.json").readText().contains("\"importDestination\":\"module\""))
+    assertTrue(androidSpoolBatchScript("request", batch).contains("\"importDestination\":\"module\""))
   }
 
   @Test
@@ -1398,7 +1396,7 @@ class SafFileBridgeTest {
     val store = SafDestinationStateStore(appData.resolve("destination.json"), testAtomicPublisher)
     val names = listOf("risunest-rescue-$id.risunest-rescue.zip", "risu-charx-$id.charx",
       "risu-charx-$id.jpeg", "risu-character-card-$id.json", "risu-character-card-$id.png",
-      "risu-module-$id.risum", "risu-dataset-$id.json", "preset-$id.json", "preset-$id.risup")
+      "risu-module-$id.risum", "risu-dataset-$id.json")
     for (name in names) {
       val source = handoffs.resolve(name).apply { writeBytes(byteArrayOf(1)) }
       val owned = requireNotNull(resolveManagedExportSource(appData, source.path))
@@ -1584,20 +1582,6 @@ class SafFileBridgeTest {
     val moduleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     val png = handoffs.resolve("risu-character-card-$pngId.png").apply { writeBytes(byteArrayOf(1)) }
     val module = handoffs.resolve("risu-module-$moduleId.risum").apply { writeBytes(byteArrayOf(2)) }
-    for (suffix in listOf("json", "risup")) {
-      val presetId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-      val preset = handoffs.resolve("preset-$presetId.$suffix").apply { writeBytes(byteArrayOf(3)) }
-      assertEquals(preset.canonicalFile, resolveManagedExportSource(appData, preset.path))
-      assertEquals(presetId, managedExportId(preset))
-      assertEquals(SafDestinationSourceKind.RISU_SAVE, managedExportSourceKind(preset))
-      assertTrue(managedExportHasNoPublicationPrerequisites(preset))
-      assertEquals(preset.canonicalFile, resolveManagedExportById(appData, presetId))
-      assertTrue(preset.delete())
-    }
-    for (name in listOf("preset-$moduleId.risupreset", "preset-${moduleId.uppercase()}.json", "preset-$moduleId.json.txt")) {
-      val rejected = handoffs.resolve(name).apply { writeBytes(byteArrayOf(4)) }
-      assertNull(resolveManagedExportSource(appData, rejected.path))
-    }
 
     assertEquals(png.canonicalFile, resolveManagedExportSource(appData, png.path))
     assertEquals(module.canonicalFile, resolveManagedExportSource(appData, module.path))
@@ -1670,7 +1654,6 @@ class SafFileBridgeTest {
     assertEquals("Leased.json", safeSafDestinationName("Leased.json"))
     assertEquals("character.png", safeSafDestinationName("character.png"))
     assertEquals("module.risum", safeSafDestinationName("module.risum"))
-    assertEquals("preset.risup", safeSafDestinationName("preset.risup"))
     assertEquals(
       "risunest-2026-08-29T00-00-00-000Z.risunest",
       safeSafDestinationName("risunest-2026-08-29T00-00-00-000Z.risunest"),

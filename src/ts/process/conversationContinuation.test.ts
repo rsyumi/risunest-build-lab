@@ -20,7 +20,7 @@ vi.mock('./modules', async (importOriginal) => ({
     ...(await importOriginal<typeof import('./modules')>()),
     getModuleTriggers: () => [],
 }))
-vi.mock('../tokenizer', async () => (await import('./tests/scriptingsTestHarness')).tokenizerModule({ tokenize: vi.fn(async () => 0) }))
+vi.mock('../tokenizer', () => ({ tokenize: vi.fn(async () => 0) }))
 vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
 vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))

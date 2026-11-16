@@ -1,19 +1,12 @@
-pub(crate) mod conversation_rebase;
-pub(crate) mod receive_evidence;
-pub(crate) mod receive_batches;
 pub(crate) mod archive;
-pub(crate) mod archive_reconcile;
 mod archive_asset_names;
 pub(crate) mod author_note;
 mod asset_alias_orphans;
 pub(crate) mod gallery;
-pub(crate) mod generation;
-pub(crate) mod script_access;
 pub(crate) mod asset_object_catalog;
 pub(crate) mod asset_residency;
 pub(crate) mod commands;
 pub(crate) mod commit;
-pub(crate) mod conflict_copy;
 pub(crate) mod compaction;
 pub(crate) mod content_capture;
 pub(crate) mod held_binary;
@@ -148,7 +141,6 @@ pub(crate) enum StoreError {
         actual: i64,
     },
     SnapshotReleased,
-    SnapshotPinned { lease: String, reason: String },
     RawBodyUnavailable,
     CommitBusy,
     /// A capture or another snapshot operation keeps asset GC from reading the asset
@@ -182,7 +174,6 @@ impl std::fmt::Display for StoreError {
             Self::SnapshotReleased => {
                 formatter.write_str("persistent revision snapshot has been released")
             }
-            Self::SnapshotPinned { lease, reason } => write!(formatter, "persistent revision snapshot {lease} is pinned by {reason}"),
             Self::RawBodyUnavailable => formatter.write_str("raw commit body unavailable"),
             Self::CommitBusy => formatter.write_str("previous commit is still finishing"),
             Self::AssetInventoryBusy => formatter.write_str("asset inventory is held by another library operation"),
@@ -198,7 +189,6 @@ impl crate::native_log::CommandFailure for StoreError {
         match self {
             Self::RevisionConflict { .. } => "revision-conflict",
             Self::SnapshotReleased => "snapshot-released",
-            Self::SnapshotPinned { .. } => "snapshot-pinned",
             Self::RawBodyUnavailable => "raw-body-unavailable",
             Self::CommitBusy => "commit-busy",
             Self::AssetInventoryBusy => "library-operation-busy",
@@ -215,7 +205,7 @@ impl crate::native_log::CommandFailure for StoreError {
     }
     fn expected(&self) -> bool {
         match self {
-            Self::RevisionConflict { .. } | Self::CommitBusy | Self::AssetInventoryBusy | Self::SnapshotReleased | Self::SnapshotPinned { .. } => true,
+            Self::RevisionConflict { .. } | Self::CommitBusy | Self::AssetInventoryBusy | Self::SnapshotReleased => true,
             Self::Validation { message } => {
                 message == crate::data_health::CANCELLED
                     || message == archive::ARCHIVE_CANCELLED_MESSAGE
@@ -999,7 +989,6 @@ pub(crate) struct PersistentStore {
     gc_instance: String,
     gallery: gallery::GallerySession,
     revision_leases: HashMap<String, snapshot::RevisionReadLease>,
-    copy_continuations: conflict_copy::continuation::ContinuationState,
     active_readers: Arc<snapshot::ActiveReaderRegistry>,
     connection: Connection,
     repository_root: PathBuf,
@@ -1011,9 +1000,6 @@ pub(crate) struct PersistentStore {
     message_object_roots: MessageObjectRootsCache,
     status_library_roots: Arc<StatusLibraryRoots>,
     checked_representative_images: Arc<std::sync::Mutex<asset_residency::CheckedRepresentativeImages>>,
-    // The bound `waiting_for_admission` applies, and the one in force while it runs.
-    admission_wait: lww::AdmissionWait,
-    waiting_admission: Option<lww::AdmissionWait>,
 }
 
 /// Disk-backed roots each sweep target last read, kept while neither
@@ -1777,7 +1763,6 @@ impl PersistentStore {
             gc_instance: uuid::Uuid::new_v4().to_string(),
             gallery: gallery::GallerySession::default(),
             revision_leases: HashMap::new(),
-            copy_continuations: conflict_copy::continuation::ContinuationState::default(),
             active_readers,
             connection,
             repository_root: app_data_dir.to_owned(),
@@ -1787,10 +1772,7 @@ impl PersistentStore {
             message_object_roots: MessageObjectRootsCache::default(),
             status_library_roots: Arc::default(),
             checked_representative_images: Arc::default(),
-            admission_wait: lww::AdmissionWait::DEFAULT,
-            waiting_admission: None,
         };
-        if store.device_store.is_ok() { store.initialize_receive_history()?; }
         // A pending intent may still need its staging generation, so the sweep waits until
         // every intent recovery still runs has settled.
         if store.device_store.is_ok() && store.lww_recover_intents_at_open()? {
@@ -1813,7 +1795,6 @@ impl PersistentStore {
             gc_instance: uuid::Uuid::new_v4().to_string(),
             gallery: gallery::GallerySession::default(),
             revision_leases: HashMap::new(),
-            copy_continuations: conflict_copy::continuation::ContinuationState::default(),
             active_readers: Arc::clone(&self.active_readers),
             connection,
             repository_root: self.repository_root.clone(),
@@ -1823,8 +1804,6 @@ impl PersistentStore {
             message_object_roots: MessageObjectRootsCache::default(),
             status_library_roots: Arc::clone(&self.status_library_roots),
             checked_representative_images: Arc::clone(&self.checked_representative_images),
-            admission_wait: self.admission_wait,
-            waiting_admission: None,
         })
     }
 
@@ -2219,27 +2198,9 @@ impl PersistentStore {
         commit: &WorkingSetCommit,
         hold: impl FnOnce(&Self) -> StoreResult<G>,
     ) -> StoreResult<RevisionResult> {
-        self.commit_holding_inner(commit, None, hold)
-    }
-
-    pub(crate) fn commit_holding_checked<G>(
-        &mut self,
-        commit: &WorkingSetCommit,
-        before_reserve: impl Fn() -> StoreResult<()>,
-        hold: impl FnOnce(&Self) -> StoreResult<G>,
-    ) -> StoreResult<RevisionResult> {
-        self.commit_holding_inner(commit, Some(&before_reserve), hold)
-    }
-
-    fn commit_holding_inner<G>(
-        &mut self,
-        commit: &WorkingSetCommit,
-        before_reserve: Option<&dyn Fn() -> StoreResult<()>>,
-        hold: impl FnOnce(&Self) -> StoreResult<G>,
-    ) -> StoreResult<RevisionResult> {
         let document = crate::generation_diagnostics::commit_document();
         let mut committed_revision = None;
-        let result = self.lww_commit_holding(commit, &[], &mut committed_revision, before_reserve, hold);
+        let result = self.lww_commit_holding(commit, &[], &mut committed_revision, hold);
         crate::generation_diagnostics::commit_finished(document, commit.expected_revision, &result, committed_revision);
         result
     }
@@ -2556,15 +2517,7 @@ impl PersistentStore {
         Ok(LeaseResult { lease })
     }
 
-    fn ensure_revision_lease_unpinned(&self, lease: &str) -> StoreResult<()> {
-        if self.copy_continuations.pins(lease) {
-            return Err(StoreError::SnapshotPinned { lease: lease.into(), reason: "copy-continuation".into() });
-        }
-        Ok(())
-    }
-
     pub(crate) fn release_revision(&mut self, lease: &str) -> StoreResult<()> {
-        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2577,8 +2530,6 @@ impl PersistentStore {
     }
 
     pub(crate) fn release_all_revision_leases(&mut self) -> StoreResult<()> {
-        // Renderer teardown ends ownership of ephemeral recovery state, including unknown outcomes.
-        self.copy_continuations.clear();
         let mut first_error = None;
         for (_, reader) in self.revision_leases.drain() {
             if let Err(error) = snapshot::close_revision(reader) {
@@ -2660,7 +2611,6 @@ impl PersistentStore {
         &mut self,
         lease: &str,
     ) -> StoreResult<PreparedRisuSaveExport> {
-        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2705,7 +2655,6 @@ impl PersistentStore {
         lease: &str,
         expected_revision: i64,
     ) -> StoreResult<PreparedOfficialPublication> {
-        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2747,7 +2696,6 @@ impl PersistentStore {
             CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob,
         };
 
-        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2849,7 +2797,6 @@ impl PersistentStore {
         token: &str,
         account: &Value,
     ) -> StoreResult<kei::PreparedKeiUpload> {
-        self.ensure_revision_lease_unpinned(lease)?;
         let reader = self
             .revision_leases
             .remove(lease)
@@ -2881,7 +2828,6 @@ impl PersistentStore {
         token: &str,
         account: &Value,
     ) -> StoreResult<kei::PreparedKeiUpload> {
-        self.ensure_revision_lease_unpinned(lease)?;
         let reader = self
             .revision_leases
             .remove(lease)

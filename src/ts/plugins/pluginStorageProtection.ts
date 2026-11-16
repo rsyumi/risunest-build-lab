@@ -21,29 +21,9 @@ export function observePluginRemoteChanges(listener: (keys: readonly string[]) =
     return () => { remoteListeners.delete(listener) }
 }
 let requestReload: () => void = () => {}
-let reloadScopes = 0
-let reloadPending = false
 const identity = (owner: string, key: string) => JSON.stringify([owner, key])
 
-export function requestPluginStorageReload(): void {
-    if (reloadScopes > 0) reloadPending = true
-    else requestReload()
-}
-
-/** Defers reload scheduling while per-step remote fences remain immediate. */
-export function beginPluginStorageReloadScope(): () => void {
-    reloadScopes += 1
-    let released = false
-    return () => {
-        if (released) return
-        released = true
-        reloadScopes -= 1
-        if (reloadScopes === 0 && reloadPending) {
-            reloadPending = false
-            requestPluginStorageReload()
-        }
-    }
-}
+export function requestPluginStorageReload(): void { requestReload() }
 
 export function setPluginStorageReloadHandler(handler: () => void): void {
     requestReload = handler
@@ -62,7 +42,7 @@ export function advancePluginStorageRemoteChanges(unitKeys: readonly string[]): 
         }
     }
     for (const listener of remoteListeners) if (listener(unitKeys)) reload = true
-    if (reload) requestPluginStorageReload()
+    if (reload) requestReload()
 }
 
 /** A failed deferred drain can have committed keys from earlier staged receives. */
@@ -100,7 +80,7 @@ export class PluginStorageObservation {
                 stale ||= sequence !== this.sequence(key)
             }
             knownKeys.clear()
-            if (stale && instances.has(this)) requestPluginStorageReload()
+            if (stale && instances.has(this)) requestReload()
         }
     }
 

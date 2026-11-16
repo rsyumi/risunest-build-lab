@@ -1955,16 +1955,6 @@ export const languageKorean = {
             notice: '디스플레이 수정을 끄고 채팅을 열었습니다.',
             turnBackOn: '다시 켜기',
         },
-        receiveConflict: {
-            title: '저장하지 못한 대화 변경 사항',
-            unsaved: '현재 대화의 변경 사항이 저장되지 않았습니다. 앱을 종료하기 전에 처리 방법을 선택해주세요.',
-            archived: '보관된 캐릭터입니다. 열려 있는 대화의 변경 사항이 저장되지 않았습니다. 앱을 종료하기 전에 처리 방법을 선택해주세요.',
-            copyHelp: '저장하지 못한 대화를 새 캐릭터와 대화로 저장합니다.',
-            saveCopy: '새 캐릭터로 저장',
-            discard: '변경 사항 버리기',
-            discardConfirm: '저장하지 못한 대화 변경 사항을 버리고 현재 데이터를 불러오시겠습니까?',
-            failed: '작업을 완료하지 못했습니다. 다시 시도할 작업을 선택해주세요.',
-        },
         localSaveFailure: {
             failed: '변경 사항을 저장하지 못했습니다. 앱을 종료하기 전에 저장을 다시 시도해주세요.',
             invalid: '{0} 데이터를 저장하지 못했습니다. 해당 데이터를 확인한 후 저장을 다시 시도해주세요.',
@@ -2002,8 +1992,8 @@ export const languageKorean = {
             confirmApplicationHelp: '작업이 진행 중이거나 일부 데이터만 적용되었을 수 있어 편집을 잠시 멈췄습니다. 다시 확인하면 같은 작업을 확인하거나 이어서 처리합니다.',
             confirmApplication: '같은 작업 다시 확인',
             confirmApplicationFailed: '아직 결과를 확인하지 못했습니다. 연결과 저장 공간을 확인한 뒤 다시 시도해주세요.',
-            refreshTitle: '편집이 일시 중단되었습니다',
-            refreshHelp: '편집이 일시 중단되었습니다. 계속하려면 저장된 데이터를 다시 불러오세요.',
+            refreshTitle: '저장은 완료되었지만 화면을 새로 고쳐야 합니다',
+            refreshHelp: '변경 사항은 저장되어 있습니다. 저장된 데이터를 화면에 다시 불러올 때까지 편집이 잠시 중단됩니다.',
             refresh: '화면 새로 고침',
             refreshFailed: '저장된 데이터를 화면에 표시하지 못했습니다. 새로 고침을 다시 시도하거나 앱을 재시작해주세요.',
         },
@@ -2473,9 +2463,6 @@ export const languageKorean = {
             pluginOutputCurrentChatOnly: '플러그인에 현재 채팅 기록만 전달',
             pluginOutputCurrentChatOnlyHelp:
                 '응답이 생성될 때 플러그인에 이 캐릭터의 다른 채팅 기록을 빼고 현재 채팅만 전달해 메모리 사용량을 줄이며, 다른 채팅 기록을 읽는 플러그인이 제대로 동작하지 않을 수 있습니다.',
-            nativeOllamaGeneration: 'Ollama 응답을 앱에서 생성',
-            nativeOllamaGenerationHelp:
-                'Ollama 응답을 앱에서 생성하며, 지원하지 않는 설정이 있는 경우 메시지 전송이 실패합니다.',
         },
         ui: {
             title: 'UI',

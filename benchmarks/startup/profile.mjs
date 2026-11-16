@@ -1,19 +1,17 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, readdir, rename } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildBenchmarkConfig } from '../phase3/tauri-cdp.mjs'
-import { connect, delay, waitForInteractive } from './cdp.mjs'
-import { sanitizeMetrics, assertObservationIdentity, assertCompleteObservation, OBSERVATION_MANIFEST } from './metrics.mjs'
-import { readObservationInputs, verifyObservationManifest } from './observe.mjs'
-import { observeWal, observeWindowsMemory, prepareWindowsMemory } from './host-metrics.mjs'
+import { connect, delay, instrumentation, waitForInteractive } from './cdp.mjs'
+import { sanitizeMetrics } from './metrics.mjs'
+import { observeWal, readWindowsMemory } from './host-metrics.mjs'
 import { runOnPrivateDesktop } from './background.mjs'
-import { addSyntheticAssets, assertSyntheticProfile, seedExpression, countSyntheticAssetEntries } from './fixture.mjs'
-import { resolveCargoTarget, syntheticProfile, copyBenchmarkBinary } from './runtime.mjs'
+import { addSyntheticAssets, assertSyntheticProfile, seedExpression } from './fixture.mjs'
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const options = Object.fromEntries(
@@ -22,17 +20,13 @@ const options = Object.fromEntries(
         return [key, value]
     }),
 )
-if (options.suite || options.mode && options.mode !== 'no-plugins' || options.mutation === 'true') {
-    throw new Error('Obsolete API 2.1 comparison removed; this runner measures the no-plugins baseline')
-}
-if (options.fresh) throw new Error('Profile reset is unsupported; start a new isolated run')
-const runs = Number(options.runs ?? 5)
-const assets = Number(options.assets ?? 0)
-const characters = Number(options.characters ?? 2)
-const bytes = Number(options.bytes ?? 1_048_576)
+const runs = Number(options.runs ?? (options.suite ? 20 : 5))
+const assets = Number(options.assets ?? 11345)
+const characters = Number(options.characters ?? (options.suite ? 500 : 11))
+const bytes = Number(options.bytes ?? (options.suite ? 104_857_600 : 98_000_000))
 const legacyAssets = Number(options.legacyAssets ?? 0)
 const referencedAssets = Number(options.referencedAssets ?? 0)
-const images = options.images === 'true'
+const images = !!options.suite || options.images === 'true'
 for (const value of [runs, assets, characters, bytes, legacyAssets, referencedAssets]) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid numeric option')
 }
@@ -52,78 +46,22 @@ async function run(command, args, env, output = 'ignore') {
 }
 
 const stopped = new WeakSet()
-const owned = new WeakSet()
 async function stop(child, client) {
-    if (!child) return
-    if (!owned.has(child)) throw new Error('Refusing to stop an unowned app')
-    if (stopped.has(child)) return
-    const hasExited = () => child.exitCode !== null || child.signalCode !== null
-    if (hasExited()) {
-        client?.close()
-        stopped.add(child)
-        return { closeSettlement: 'already-exited', forced: false }
+    if (!child || stopped.has(child) || child.exitCode !== null) return
+    if (client) {
+        const exited = once(child, 'exit')
+        // A normal close lets WebView persist controls before the next process.
+        void client
+            .evaluate("window.__TAURI_INTERNALS__.invoke('plugin:window|close', {label: 'main'})")
+            .catch(() => {})
+        await Promise.race([exited, delay(5000)])
     }
-    const controller = new AbortController()
-    const exited = once(child, 'exit', { signal: controller.signal })
-    void exited.catch(() => {})
-    let graceTimer, timer, failure, closePending = false, ownCloseFlush = false, closeSettlement = 'not-requested', forced = false
-    try {
-        if (client) {
-            // The event Tauri emits to the main window on a native close request, so the product's
-            // close drain saves, checkpoints and ends in destroy before the next process.
-            closePending = true
-            client.call('Runtime.evaluate', {
-                expression: "window.__TAURI_INTERNALS__.invoke('plugin:event|emit_to', {target: {kind: 'AnyLabel', label: 'main'}, event: 'tauri://close-requested', payload: null})",
-                awaitPromise: true,
-                returnByValue: true,
-            }).then(result => {
-                closePending = false
-                closeSettlement = 'response'
-                if (!result || result.exceptionDetails) failure ??= new Error('Synthetic page evaluation failed')
-            }, error => {
-                closePending = false
-                if (ownCloseFlush && hasExited() && error instanceof Error && error.message === 'CDP closed') {
-                    closeSettlement = 'own-post-exit-close'
-                } else {
-                    closeSettlement = 'failed'
-                    failure ??= error
-                }
-            })
-            await Promise.race([exited, new Promise(resolve => {
-                graceTimer = setTimeout(resolve, 5000)
-            })])
-            clearTimeout(graceTimer)
-        }
-        if (!hasExited()) {
-            if (process.platform !== 'win32') throw new Error('Owned app fallback requires Windows')
-            // The spawned child's Windows handle identifies its original creation.
-            forced = true
-            child.kill('SIGKILL')
-        }
-        if (!hasExited()) await Promise.race([
-            exited,
-            new Promise((_, reject) => {
-                timer = setTimeout(() => reject(new Error('Owned app exit timed out')), 15_000)
-            }),
-        ])
-        if (!hasExited()) throw new Error('Owned app exit was not confirmed')
-    } catch (error) {
-        failure ??= error
-    } finally {
-        clearTimeout(graceTimer)
-        clearTimeout(timer)
-        controller.abort()
-        // Observe an existing direct-RPC rejection before identifying our own close.
-        await Promise.resolve()
-        ownCloseFlush = hasExited() && closePending
-        try { client?.close() } catch (error) { failure ??= error }
-        await Promise.resolve()
-        ownCloseFlush = false
-        if (closePending) failure ??= new Error('Owned app close RPC did not settle')
-    }
-    if (failure !== undefined) throw failure
+    client?.close()
+    if (child.exitCode === null)
+        await run('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], process.env)
+    if (child.exitCode === null && child.signalCode === null)
+        await once(child, 'exit', { signal: AbortSignal.timeout(15_000) })
     stopped.add(child)
-    return { closeSettlement, forced }
 }
 
 async function main() {
@@ -166,17 +104,20 @@ async function main() {
     }
     // An absolute WebView directory prevents cwd-dependent reuse.
     config.app.windows[0].dataDirectory = path.join(temporary, 'webview')
-    config.plugins = { ...config.plugins, risunest: { ...config.plugins?.risunest, agent: true } }
-    if (!options.config || options.rebuild === 'true') await writeFile(configPath, JSON.stringify(config))
-    const cargoTarget = resolveCargoTarget(repository, process.env.CARGO_TARGET_DIR)
-    const profile = syntheticProfile(config.identifier, process.env.LOCALAPPDATA)
+    if (!options.config || options.rebuild === 'true')
+        await writeFile(configPath, JSON.stringify(config))
     const env = {
         ...process.env,
-        CARGO_TARGET_DIR: cargoTarget,
+        APPDATA: path.join(temporary, 'roaming'),
+        LOCALAPPDATA: path.join(temporary, 'local'),
+        CARGO_TARGET_DIR: path.join(repository, 'src-tauri/target'),
         VITE_RISU_LEGAL_CONFIGURED: 'TRUE',
         STARTUP_BENCHMARK_VARIANT: options.variant ?? 'optimized',
     }
-    const observationInputs = await readObservationInputs(repository, 'windows')
+    await Promise.all([
+        mkdir(env.APPDATA, { recursive: true }),
+        mkdir(env.LOCALAPPDATA, { recursive: true }),
+    ])
     if (!options.config || options.rebuild === 'true') {
         await run(
             process.execPath,
@@ -194,26 +135,6 @@ async function main() {
             'inherit',
         )
     }
-    const binaryInfoFile = path.join(temporary, 'binary-info.local.json')
-    let artifact
-    if (options.config && options.rebuild !== 'true') {
-        artifact = JSON.parse(await readFile(binaryInfoFile, 'utf8'))
-        if (artifact.sourceRevision !== revision || !config.identifier.includes('.r' + revision.slice(0, 12) + '.')) {
-            throw new Error('Reused benchmark binary source revision differs from checkout')
-        }
-        if (!/^[0-9a-f]{64}$/.test(artifact.sha256)) throw new Error('Invalid private benchmark hash')
-        const expected = path.join(temporary, 'binary', original.mainBinaryName + '-' + artifact.sha256 + '.exe')
-        if (artifact.binary !== expected || createHash('sha256').update(await readFile(expected)).digest('hex') !== artifact.sha256) {
-            throw new Error('Private benchmark binary identity mismatch')
-        }
-    } else {
-        const observation = verifyObservationManifest(JSON.parse(await readFile(
-            path.join(repository, '.tmp/startup-benchmark-dist', OBSERVATION_MANIFEST), 'utf8',
-        )), observationInputs)
-        artifact = { ...await copyBenchmarkBinary(cargoTarget, original.mainBinaryName, temporary), sourceRevision: revision, observation }
-        await writeFile(binaryInfoFile, JSON.stringify(artifact))
-    }
-    artifact.observation = verifyObservationManifest(artifact.observation, observationInputs)
     if (
         process.platform === 'win32' &&
         process.env.STARTUP_BENCHMARK_DISPLAY !== 'private-desktop' &&
@@ -230,21 +151,41 @@ async function main() {
         )
         return
     }
+    if (options.fresh === 'true') {
+        const savedRoot = JSON.parse(
+            await readFile(path.join(temporary, 'profile-root.local.json'), 'utf8'),
+        )
+        if (savedRoot.identifier !== config.identifier) throw new Error('Unsafe fixture reset')
+        const oldRoot = savedRoot.root
+        assertSyntheticProfile(oldRoot, config.identifier)
+        const archive = path.join(temporary, `retained-synthetic-${Date.now()}`)
+        // Preserve the previous fixture. Never remove or move a path outside this isolated run.
+        try {
+            await rename(oldRoot, archive)
+        } catch (error) {
+            if (error.code !== 'ENOENT') throw error
+        }
+    }
     let child, client, launchEpoch
     const samples = []
     let fixture
     let seededStatistics,
         profileRoot,
         recentSnapshotReady = false
-    const binarySha256 = artifact.sha256
+    const binarySha256 = createHash('sha256')
+        .update(
+            await readFile(
+                path.join(repository, 'src-tauri/target/release', original.mainBinaryName + '.exe'),
+            ),
+        )
+        .digest('hex')
     let scenario = {
         assets,
-        mode: 'no-plugins',
+        mode: options.mode ?? 'compatibility',
         recentSnapshot: options.snapshot !== 'missing',
-        interaction: options.interact === 'true',
+        interaction: !!options.suite || options.interact === 'true',
     }
     const output = path.resolve(options.output ?? 'benchmarks/startup/result.local.json')
-    await mkdir(path.dirname(output), { recursive: true })
     const persist = () =>
         writeFile(
             output,
@@ -256,8 +197,6 @@ async function main() {
                             ? 'verified-reused-binary'
                             : (options.variant ?? 'optimized'),
                     binarySha256,
-                    binarySourceRevision: artifact.sourceRevision,
-                    ipcObservation: artifact.observation,
                     display: process.env.STARTUP_BENCHMARK_DISPLAY ?? 'foreground',
                     fixture: {
                         ...fixture,
@@ -272,65 +211,35 @@ async function main() {
                         ),
                     },
                     samples,
-                    profileIsolation: { named: true, nativeRootVerified: true },
-                    measurementScope: 'full-product startup and synthetic selection/input/scroll; no generation or sync workload',
                     limitations: [
-                        'WebView network admission starts at CDP attachment and permits packaged resources only; native network calls are outside CDP coverage.',
-                        'No plugins are configured; this does not measure API v3 plugin execution or compatibility.',
-                        'Process memory reports sampled live descendants and cannot establish complete GPU or detached/shared-process footprint.',
                         'OS caches were not cleared',
-                        'Selected SDK invocation duration includes native queueing and transport retries; direct globals, plugin RPC and asynchronous channel/event deliveries are excluded.',
-                        'Invocation bytes are unavailable; no serialized estimate or total wire-volume claim is made.',
+                        'IPC duration includes transport and queueing, not an isolated native mutex timer',
                     ],
                 },
                 null,
                 2,
             ),
         )
-    const launch = async (sampleMemory = false) => {
-        const preparedMemory = sampleMemory ? await prepareWindowsMemory() : null
+    const launch = async () => {
         const started = performance.now()
         launchEpoch = performance.timeOrigin + started
-        let memoryStarted = Promise.resolve(null)
-        try {
-            child = spawn(
-                artifact.binary,
-                ['--profile=' + profile.name],
-                { cwd: temporary, env, windowsHide: true, stdio: 'ignore' },
-            )
-            owned.add(child)
-            memoryStarted = preparedMemory
-                ? preparedMemory.bind(child.pid, { launchAtMs: started, anchor: 'launch' })
-                : Promise.resolve(null)
-            memoryStarted.catch(() => {})
-            client = await Promise.race([
-            connect(cdpPort, config.identifier, 120_000, profile),
+        child = spawn(
+            path.join(repository, 'src-tauri/target/release', original.mainBinaryName + '.exe'),
+            [],
+            { cwd: temporary, env, windowsHide: true, stdio: 'ignore' },
+        )
+        client = await Promise.race([
+            connect(cdpPort, config.identifier),
             once(child, 'exit').then(() => {
                 throw new Error('Isolated app exited before connection')
             }),
         ])
-            await waitForInteractive(client)
-            const readyMs = performance.now() - started
-            assertObservationIdentity(await client.evaluate(`({
-                ipcObservation: window.__startupMetrics?.ipcObservation,
-                observerFailure: window.__startupMetrics?.observerFailure,
-            })`), artifact.observation)
-            return { readyMs, finishMemory: await memoryStarted }
-        } catch (error) {
-            const finishMemory = await memoryStarted.catch(() => null)
-            const observation = finishMemory ? await finishMemory() : null
-            if (preparedMemory) await preparedMemory.dispose().catch(() => {})
-            const failure = error instanceof Error ? error : new Error('Synthetic application readiness failed')
-            if (observation) failure.memoryObservation = {
-                ...observation, coverageComplete: false, sampledPeak: null,
-                measurementFailure: { code: 'application-readiness-failed', phase: 'launch' },
-            }
-            throw failure
-        }
+        await waitForInteractive(client)
+        return performance.now() - started
     }
     const prepareNext = async () => {
         if (legacyAssets > 0) {
-            assertSyntheticProfile(profileRoot, config.identifier, profile)
+            assertSyntheticProfile(profileRoot, config.identifier)
             const directory = path.join(profileRoot, 'assets')
             await mkdir(directory, { recursive: true })
             for (let i = 0; i < legacyAssets; i++)
@@ -360,16 +269,11 @@ async function main() {
     }
     const measure = async (kind, warmup = false) => {
         const finishWal =
-            options.hostMetrics === 'true' ? await observeWal(profileRoot, config.identifier, profile) : null
-        let finishMemory, memory, observationRecorded = false
+            options.hostMetrics === 'true' ? await observeWal(profileRoot, config.identifier) : null
         try {
             let launchToReadyMs = null
-            if (kind === 'restart') {
-                const launched = await launch(options.hostMetrics === 'true')
-                launchToReadyMs = launched.readyMs
-                finishMemory = launched.finishMemory
-            } else {
-                if (options.hostMetrics === 'true') finishMemory = await observeWindowsMemory(child.pid)
+            if (kind === 'restart') launchToReadyMs = await launch()
+            else {
                 const origin = await client.evaluate('performance.timeOrigin')
                 await client.call('Page.reload')
                 const navigationDeadline = Date.now() + 120_000
@@ -395,8 +299,6 @@ async function main() {
             } while (Date.now() < deadline)
             const sample = sanitizeMetrics(
                 await client.evaluate(`(async () => ({
-            ipcObservation: window.__startupMetrics?.ipcObservation,
-            observerFailure: window.__startupMetrics?.observerFailure,
             interactiveMs: performance.getEntriesByName('boot:interactive')[0]?.startTime ?? null,
             firstPaintMs: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
             marks: performance.getEntriesByType('mark').filter(e => /^boot:[a-z-]+$/.test(e.name)).map(e => ({stage: e.name, ms: e.startTime})),
@@ -419,7 +321,7 @@ async function main() {
             stabilizationTimeout: ${!settled},
         }))()`),
             )
-            const assetDirectoryEntriesAfter = await countSyntheticAssetEntries(profileRoot, config.identifier, profile)
+            const legacyAssetsAfter = (await readdir(path.join(profileRoot, 'assets'))).length
             const paintEpoch =
                 kind === 'restart'
                     ? await client.evaluate(`(() => {
@@ -431,32 +333,24 @@ async function main() {
                 Number.isFinite(paintEpoch) && Number.isFinite(launchEpoch)
                     ? paintEpoch - launchEpoch
                     : null
-            const stopMemory = finishMemory
-            finishMemory = null
-            memory = stopMemory ? await stopMemory() : null
             samples.push({
                 ...scenario,
                 kind,
                 warmup,
                 launchToReadyMs,
                 launchToFirstPaintMs,
-                assetDirectoryEntriesAfter,
+                legacyAssetsAfter,
                 ...sample,
                 ...(finishWal
                     ? {
                           host: {
                               wal: await finishWal(),
-                              memory,
+                              memory: await readWindowsMemory(child.pid),
                           },
                       }
                     : {}),
             })
-            observationRecorded = true
             await persist()
-            if (memory && !memory.coverageComplete) throw new Error('Owned process memory coverage incomplete')
-            assertCompleteObservation(sample, artifact.observation)
-            const opens = sample.calls.filter(call => call.command === 'pds_open')
-            if (!opens.length || opens.some(call => !call.success)) throw new Error('Missing successful native startup open')
             if (
                 warmup &&
                 scenario.interaction &&
@@ -474,36 +368,17 @@ async function main() {
                     settled: !sample.stabilizationTimeout,
                 }),
             )
-        } catch (error) {
-            if (finishMemory) {
-                const finish = finishMemory
-                finishMemory = null
-                memory = await finish()
-            }
-            memory ??= error?.memoryObservation
-            if (memory && !observationRecorded) {
-                memory = {
-                    ...memory, coverageComplete: false, sampledPeak: null,
-                    measurementFailure: memory.measurementFailure ?? { code: 'measurement-failed', phase: 'measurement' },
-                }
-                samples.push({ ...scenario, kind, warmup, status: 'failed', failurePhase: 'measurement', host: { memory } })
-                observationRecorded = true
-                await persist()
-            }
-            throw error
         } finally {
             if (finishWal) await finishWal()
         }
     }
-    // One line per stop records how the owned app ended, without page data.
-    const stopApp = async after => {
-        console.log(JSON.stringify({ phase: 'app-stopped', after, ...await stop(child, client) }))
-    }
     try {
         console.log(JSON.stringify({ phase: 'initial-launch' }))
         await launch()
-        const root = profile.data
-        assertSyntheticProfile(root, config.identifier, profile)
+        const root = await client.evaluate(
+            `window.__TAURI_INTERNALS__.invoke('plugin:path|resolve_directory', {directory: 14})`,
+        )
+        assertSyntheticProfile(root, config.identifier)
         profileRoot = root
         await writeFile(
             path.join(temporary, 'profile-root.local.json'),
@@ -514,9 +389,8 @@ async function main() {
             seedExpression({
                 characters,
                 bytes,
-                zeroPlugins: true,
-                pluginBytes: 0,
-                images: options.images === 'true',
+                compatibility: options.mode !== 'scalable',
+                images: !!options.suite || options.images === 'true',
                 investigation: options.shape === 'investigation',
                 mutation: options.mutation === 'true',
                 referencedAssets,
@@ -528,18 +402,44 @@ async function main() {
         if (!seeded.success) throw new Error('Synthetic seed failed')
         seededStatistics = seeded
         await client.evaluate(
-            `localStorage.setItem('startupInteract', ${JSON.stringify(options.interact === 'true' ? 'true' : 'false')})`,
+            `localStorage.setItem('startupInteract', ${JSON.stringify(options.suite || options.interact === 'true' ? 'true' : 'false')})`,
         )
-        await stopApp('seed')
+        await stop(child, client)
         fixture = await addSyntheticAssets(
             root,
             config.identifier,
             assets,
-            options.images === 'true',
-            profile,
+            !!options.suite || options.images === 'true',
         )
         console.log(JSON.stringify({ phase: 'assets-ready', objects: fixture.objects }))
-        const scenarios = [scenario]
+        const scenarios = options.suite
+            ? [
+                  {
+                      assets: 11345,
+                      mode: 'compatibility',
+                      recentSnapshot: true,
+                      interaction: true,
+                  },
+                  {
+                      assets: 11345,
+                      mode: 'scalable',
+                      recentSnapshot: true,
+                      interaction: true,
+                  },
+                  {
+                      assets: 100000,
+                      mode: 'compatibility',
+                      recentSnapshot: true,
+                      interaction: true,
+                  },
+                  {
+                      assets: 100000,
+                      mode: 'scalable',
+                      recentSnapshot: true,
+                      interaction: true,
+                  },
+              ]
+            : [scenario]
         for (const next of scenarios) {
             scenario = next
             recentSnapshotReady = false
@@ -550,8 +450,7 @@ async function main() {
                     root,
                     config.identifier,
                     scenario.assets,
-                    options.images === 'true',
-                    profile,
+                    !!options.suite || options.images === 'true',
                 )
             }
             console.log(
@@ -562,25 +461,42 @@ async function main() {
                 }),
             )
             await launch()
-            // Let the setup launch's pending save finish before the measured restart.
+            // A previous sample can leave the interaction flag enabled. Finish
+            // that setup launch's first save before committing a mode switch.
             await delay(10_000)
+            const modeResult = await client.evaluate(`(async () => {
+                try {
+                const invoke = window.__TAURI_INTERNALS__.invoke;
+                const current = await invoke('pds_read_root');
+                current.value.plugins[0].enabled = ${scenario.mode !== 'scalable'};
+                await invoke('pds_commit', {commit: {expectedRevision: current.revision, root: current.value}, assetAliases: []});
+                return {success: true};
+                } catch (error) { return {success: false, conflict: error?.code === 'revision-conflict'}; }
+            })()`)
+            console.log(JSON.stringify({ phase: 'mode-result', ...modeResult }))
+            if (!modeResult.success) throw new Error('Synthetic mode switch failed')
             await prepareNext()
-            await stopApp('setup')
+            await stop(child, client)
             // Exclude normalization and the seed WAL checkpoint from measured samples.
             await measure('restart', true)
             await client.evaluate(
                 `localStorage.setItem('startupInteract', ${JSON.stringify(options.suite || options.interact === 'true' ? 'true' : 'false')})`,
             )
+            if (options.config && !(await client.evaluate('!!window.__startupRecord'))) {
+                await client.call('Page.addScriptToEvaluateOnNewDocument', {
+                    source: instrumentation,
+                })
+            }
             for (let i = 0; i < (options.kind === 'restart' ? 0 : runs); i++) {
                 await prepareNext()
                 await measure('reload')
             }
             await prepareNext()
-            await stopApp('warmup')
+            await stop(child, client)
             for (let i = 0; i < (options.kind === 'reload' ? 0 : runs); i++) {
                 await measure('restart')
                 await prepareNext()
-                await stopApp('restart')
+                await stop(child, client)
             }
         }
         await persist()

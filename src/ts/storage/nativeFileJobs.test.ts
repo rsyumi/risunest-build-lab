@@ -194,8 +194,6 @@ import {
     runNativeCharacterCharxExport,
     runNativeCharacterCardExport,
     runNativeRisuModuleExport,
-    runNativePresetExport,
-    prepareNativePresetImport,
     runNativeDatasetExport,
     runNativeGalleryExport,
     runNativeOfficialPublicationAttempt,
@@ -5370,50 +5368,4 @@ it('neither reopens nor releases an Android destination its caller reserved', as
     }
     expect(picker.bridge.reserveExport).toHaveBeenCalledOnce()
     expect(picker.bridge.releaseExport).not.toHaveBeenCalled()
-})
-
-it('validates exact owned preset source chunks and retries cleanup without CAS', async () => {
-    let forgets = 0
-    const commands: string[] = []
-    const receipt = await prepareNativePresetImport({ type: 'desktopPath', path: 'synthetic.preset' }, 'synthetic.preset', {}, {
-        isTauri: () => true, wait: async () => {},
-        invoke: async command => {
-            commands.push(command)
-            if (command === 'native_file_job_start') return { jobId: 'preset' }
-            if (command === 'native_file_job_status') return { ...status('succeeded'), kind: 'prepare-preset-import' }
-            if (command === 'native_file_job_prepared_preset') return { displayName: 'synthetic.preset', sourceBytes: 3, nativeMapping: { outcome: 'declined', reason: 'limit', name: 'presetBytes' } }
-            if (command === 'native_file_job_preset_source') return [1, 2]
-            if (command === 'native_file_job_forget') { if (++forgets === 1) throw new Error('cleanup failed'); return true }
-            throw new Error(command)
-        },
-    })
-    await expect(receipt.readSource()).rejects.toThrow('source length')
-    await expect(receipt.release()).rejects.toThrow('cleanup failed')
-    await receipt.release()
-    await expect(receipt.readSource()).rejects.toThrow('released')
-    expect(forgets).toBe(2)
-    expect(commands.some(command => command.includes('cas'))).toBe(false)
-})
-
-it.each(['json', 'risup'] as const)('publishes managed preset %s bytes and retains cleanup failure for recovery', async format => {
-    const handoff = `preset-123e4567-e89b-42d3-a456-426614174004.${format}`
-    let published = false
-    let forgotten = false
-    const result = await runNativePresetExport({ presetIndex: 2, presetId: 'exact-preset', format, expectedRevision: 17, destination: { type: 'iosFiles', suggestedName: `Synthetic.${format}` } }, {}, {
-        isTauri: () => true, wait: async () => {}, copyToAndroidSaf: async () => { throw new Error('iOS fixture') },
-        copyToIOSFiles: async () => { published = true; return { bytes: 4 } },
-        invoke: async (command, args) => {
-            if (command === 'native_file_job_start') {
-                expect(args).toEqual({ request: { kind: 'export-preset', presetIndex: 2, presetId: 'exact-preset', format, expectedRevision: 17 } })
-                return { jobId: 'preset-export' }
-            }
-            if (command === 'native_file_job_status') return { ...status('succeeded', { revision: 17, sourceBytes: 4, sourceFingerprintKind: 'whole-file-sha256', sourceSha256: 'a'.repeat(64), characterCount: 0, presetCount: 1, warningCodes: [], handoffPath: handoff }), kind: 'export-preset' }
-            if (command === 'native_preset_handoff_cleanup') { expect(published).toBe(true); throw new Error('cleanup failed') }
-            if (command === 'native_file_job_forget') { forgotten = true; return true }
-            throw new Error(command)
-        },
-    })
-    expect(result.warningCodes).toContain('cleanup-failed')
-    expect(forgotten).toBe(false)
-    expect(result.handoffPath).toBeUndefined()
 })

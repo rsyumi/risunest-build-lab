@@ -72,7 +72,6 @@ export async function hanuraiMemory(chats:OpenAIChat[],arg:{
     tokens -= db.hanuraiTokens
 
     let resultTexts:string[] = []
-    await tokenizer.prefetch(vectorResult.map((vector) => vector[0].substring(16)))
     for(const vector of vectorResult){
         const chat = chats.find((chat) => chat.content === vector[0].substring(16))
         if(chat){

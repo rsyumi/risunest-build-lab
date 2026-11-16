@@ -4,7 +4,6 @@
     import { activeRerollConversations } from 'src/ts/durableReroll'
     import { innerWidth } from 'svelte/reactivity/window'
     import { doingChat } from 'src/ts/process/index.svelte'
-    import { captureNativeGenerationMessageEdit } from 'src/ts/process/generationState'
     import { ArrowLeft, ArrowLeftRightIcon, ArrowRight, BookmarkIcon, BotIcon, CopyIcon, PowerOff, GitBranch, HamburgerIcon, LanguagesIcon, MenuIcon, PencilIcon, RefreshCcwIcon, SplitIcon, TrashIcon, UserIcon, Volume2Icon, Scissors } from "@lucide/svelte"
     import { aiLawApplies, changeChatTo, foldChatToMessage, getFileSrc, createChatCopyName } from "src/ts/globalApi.svelte"
     import { ColorSchemeTypeStore } from "src/ts/gui/colorscheme"
@@ -565,16 +564,9 @@
     }
 
     async function edit(){
+        if (mutationBlocked()) return false
         const retainedIntent = editIntent
         const retainedTarget = editTarget
-        const retainedEvidence = editEvidence
-        const retainedDraft = editDraft
-        const target = retainedIntent?.selection ?? (retainedTarget ? {
-            characterId: retainedTarget.character.chaId, conversationId: retainedTarget.conversation.id,
-        } : null)
-        const nativeEdit = target?.conversationId && !$activeRerollConversations.includes(target.conversationId)
-            ? captureNativeGenerationMessageEdit({ characterId: target.characterId, conversationId: target.conversationId }) : null
-        if (!nativeEdit && mutationBlocked()) return false
         const acquired = await acquireEditMessage(
             retainedIntent,
             retainedTarget,
@@ -582,15 +574,9 @@
         )
         if (!acquired) return reportRowActionRefused()
         try {
-            if (!editMode || editIntent !== retainedIntent || editTarget !== retainedTarget || editDraft !== retainedDraft) return reportRowActionRefused()
-            if (retainedTarget && !isEqual(resolveChatMessageTarget(retainedTarget, chatMessageContext)?.message, retainedEvidence)) return reportRowActionRefused()
-            if (nativeEdit) {
-                const current = acquired.target
-                if ((current.kind !== 'session' && current.kind !== 'windowed') || !current.conversation.id
-                    || $activeRerollConversations.includes(current.conversation.id)
-                    || !nativeEdit.isCurrent({ characterId: current.character.chaId, conversationId: current.conversation.id })) return reportRowActionRefused()
-            } else if (mutationBlocked()) return false
-            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, retainedDraft)
+            if (mutationBlocked()) return false
+            if (retainedTarget && !isEqual(resolveChatMessageTarget(retainedTarget, chatMessageContext)?.message, editEvidence)) return reportRowActionRefused()
+            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, editDraft)
             if (result.saved) {
                 editIntent = null
                 editTarget = null

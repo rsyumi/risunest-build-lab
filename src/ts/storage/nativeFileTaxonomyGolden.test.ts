@@ -23,7 +23,6 @@ const HANDOFF_KIND_TO_JOB_KINDS: Record<
     'character-charx': ['export-character-charx'],
     'character-card': ['export-character-card'],
     'risu-module': ['export-risu-module'],
-    preset: ['export-preset'],
     'dataset-export': ['export-dataset'],
     // The renderer also writes download handoffs; gallery jobs recover theirs.
     download: ['export-gallery-file', 'export-gallery-zip'],

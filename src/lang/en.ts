@@ -2133,16 +2133,6 @@ export const languageEnglish = {
             notice: 'Opened this chat with Modify Display turned off.',
             turnBackOn: 'Turn back on',
         },
-        receiveConflict: {
-            title: 'Unsaved chat changes',
-            unsaved: 'Changes to this chat have not been saved. Choose how to handle them before closing the app.',
-            archived: 'This character is archived. Changes to the open chat have not been saved. Choose how to handle them before closing the app.',
-            copyHelp: 'Save the unsaved chat as a new character and chat.',
-            saveCopy: 'Save as new character',
-            discard: 'Discard unsaved changes',
-            discardConfirm: 'Discard these unsaved chat changes and load the current data?',
-            failed: 'The action could not finish. Choose an action to try again.',
-        },
         localSaveFailure: {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
@@ -2180,8 +2170,8 @@ export const languageEnglish = {
             confirmApplicationHelp: 'The operation may still be running or may have applied only part of the data, so editing is paused. Checking again checks or resumes the same operation.',
             confirmApplication: 'Check the same operation again',
             confirmApplicationFailed: 'The result is still unconfirmed. Check your connection and available storage, then retry.',
-            refreshTitle: 'Editing is paused',
-            refreshHelp: 'Editing is paused. Reload the stored data to continue.',
+            refreshTitle: 'Saved changes need a screen refresh',
+            refreshHelp: 'Your changes are saved. Editing is paused until the saved data can be read back into the screen.',
             refresh: 'Refresh screen',
             refreshFailed: 'The saved data could not be displayed. You can retry refreshing or restart the app.',
         },
@@ -2652,9 +2642,6 @@ export const languageEnglish = {
             pluginOutputCurrentChatOnly: 'Send only the current chat to plugins',
             pluginOutputCurrentChatOnlyHelp:
                 "When a response is generated, plugins receive only the current chat without this character's other chats, which reduces memory use. Plugins that read other chats may not work correctly.",
-            nativeOllamaGeneration: 'Generate Ollama replies in the app',
-            nativeOllamaGenerationHelp:
-                'Ollama replies are generated in the app. When a setting is not supported, sending a message fails.',
         },
         ui: {
             title: 'UI',

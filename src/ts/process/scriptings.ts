@@ -21,7 +21,7 @@ import { requestChatData, type StreamResponseChunk } from "./request/request";
 import { v4 } from "uuid";
 import { getModuleLorebooks, getModuleTriggers } from "./modules";
 import { Mutex } from "../mutex";
-import { tokenCounter, tokenize } from "../tokenizer";
+import { tokenize } from "../tokenizer";
 import { fetchNative, readImage } from "../globalApi.svelte";
 import { loadLoreBookV3PromptFromCompatibilitySnapshot } from './lorebook.svelte';
 import { getPersonaPrompt, getUserName, getUserIcon } from '../util';
@@ -1205,23 +1205,14 @@ export async function runScripted(code:string, arg:{
 
                 let totalTokens = 0
                 const loreBooks = []
-                // When the budget cannot stop the walk (a missing reserve makes it NaN), every prompt is parsed anyway, so
-                // the prompts are parsed first and counted in one request where counts run natively.
-                const parsedAhead = Number.isNaN(maxContext) || maxContext === Infinity
-                    ? fullLoreBooks.map((book) => risuChatParser(book.prompt, { chara: selectedChar, ...scriptingParserOptions(db) }).trim())
-                    : null
-                const counter = tokenCounter()
-                if (parsedAhead) {
-                    await counter.prefetch(parsedAhead.filter((parsed) => parsed.length > 0))
-                }
 
-                for (const [index, book] of fullLoreBooks.entries()) {
-                    const parsed = parsedAhead?.[index] ?? risuChatParser(book.prompt, { chara: selectedChar, ...scriptingParserOptions(db) }).trim()
+                for (const book of fullLoreBooks) {
+                    const parsed = risuChatParser(book.prompt, { chara: selectedChar, ...scriptingParserOptions(db) }).trim()
                     if (parsed.length === 0) {
                         continue
                     }
 
-                    const tokens = await counter.count(parsed)
+                    const tokens = await tokenize(parsed)
 
                     if (totalTokens + tokens > maxContext) {
                         break

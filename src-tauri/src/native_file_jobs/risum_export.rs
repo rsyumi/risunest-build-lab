@@ -3,7 +3,6 @@ use super::error::{
     asset_missing, cancelled, destination_error_with, invalid_input, io_error, job_error,
     store_error,
 };
-use super::card_mapping::{MAPPING_LIMITS, MAPPING_STACK_BYTES, MAX_MAPPED_CARD_BYTES};
 use super::{JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError};
 use crate::asset_repository::owner_manifest_codec::OwnerManifestEntry;
 use crate::asset_repository::PayloadCas;
@@ -11,16 +10,12 @@ use crate::persistent_store::{
     export::{self, destination},
     PreparedRisuSaveExport, RevisionReadLease, StoreResult,
 };
-use risunest_formats::module_export::risum_metadata_text;
-use risunest_ir::json::parse_json;
-use risunest_ir::Budget;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
-use std::sync::{atomic::AtomicBool, Arc};
 use uuid::Uuid;
 
 const RPACK_MAP: &[u8; 512] = include_bytes!("../../../src/ts/rpack/rpack_map.bin");
@@ -281,10 +276,8 @@ fn write_projected_risum(
     let object = module
         .as_object_mut()
         .ok_or_else(|| invalid_input("pinned root module must be an object"))?;
-    // `exportModuleLegacy` writes the frames of `assets ?? []`.
     let assets = object
         .get_mut("assets")
-        .filter(|value| !value.is_null())
         .map(|value| {
             value
                 .as_array_mut()
@@ -306,8 +299,7 @@ fn write_projected_risum(
             let tuple = asset
                 .as_array_mut()
                 .ok_or_else(|| invalid_input(format!("RISUM asset {position} must be a tuple")))?;
-            // `exportModuleLegacy` reads only the key, `tuple[1]`, and writes the rest as stored.
-            if tuple.len() < 2 {
+            if tuple.len() < 3 {
                 return Err(invalid_input(format!(
                     "RISUM asset {position} tuple is incomplete"
                 )));
@@ -316,6 +308,11 @@ fn write_projected_risum(
                 .as_str()
                 .ok_or_else(|| invalid_input(format!("RISUM asset {position} key is invalid")))?
                 .to_owned();
+            if !tuple[0].is_string() || !tuple[2].is_string() {
+                return Err(invalid_input(format!(
+                    "RISUM asset {position} tuple is invalid"
+                )));
+            }
             let alias = export::pinned_asset_alias(&reader.connection, &reader.target, &key)
                 .map_err(store_error)?;
             let (hash, size) =
@@ -347,19 +344,8 @@ fn write_projected_risum(
             tuple[1] = Value::String(String::new());
         }
     }
-    let metadata = match ported_metadata(&module, MAX_MAPPED_CARD_BYTES) {
-        Some(metadata) => metadata,
-        None => {
-            // `exportModuleLegacy` writes `assets ?? []`, the key added last where it is absent.
-            if let Some(object) = module.as_object_mut() {
-                if matches!(object.get("assets"), None | Some(Value::Null)) {
-                    object.insert("assets".to_owned(), Value::Array(Vec::new()));
-                }
-            }
-            serde_json::to_vec_pretty(&json!({"module": module, "type": "risuModule"}))
-                .map_err(|error| invalid_input(error.to_string()))?
-        }
-    };
+    let metadata = serde_json::to_vec_pretty(&json!({"module": module, "type": "risuModule"}))
+        .map_err(|error| invalid_input(error.to_string()))?;
     if metadata.len() > crate::import_export_jobs::MAX_CONTENT_METADATA_BYTES {
         return Err(NativeJobError::too_large("module", "RISUM metadata exceeds the importer limit"));
     }
@@ -391,51 +377,6 @@ fn write_projected_risum(
     }
     output.write_all(&[0]).map_err(io_error)?;
     Ok(asset_count as u64)
-}
-
-/// The metadata frame `exportModuleLegacy` writes for the pinned module, built by `risunest-formats` from the module
-/// `JSON.parse` reads from its `serde_json` text. `None` where the port declines (a text above `max_bytes`, an own
-/// `__proto__` key, asset tuples TS reads with JS semantics), and the job writes its own layout.
-fn ported_metadata(module: &Value, max_bytes: usize) -> Option<Vec<u8>> {
-    let mut module_text = BoundedText { bytes: Vec::new(), max_bytes };
-    serde_json::to_writer(&mut module_text, module).ok()?;
-    let module_text = String::from_utf8(module_text.bytes).ok()?;
-    let module_text = module_text.as_str();
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("risum-metadata".into())
-            .stack_size(MAPPING_STACK_BYTES)
-            .spawn_scoped(scope, || {
-                let budget = Budget::new(MAPPING_LIMITS, Arc::new(AtomicBool::new(false))).ok()?;
-                let module = parse_json(module_text, &budget).ok()?;
-                let text = risum_metadata_text(&module, &budget).ok()?;
-                Some(text.as_unicode()?.as_bytes().to_vec())
-            })
-            .ok()?
-            .join()
-            .ok()
-            .flatten()
-    })
-}
-
-/// The bytes written to it, refusing a write past `max_bytes`, so a module above the cutoff is not written out in full.
-struct BoundedText {
-    bytes: Vec<u8>,
-    max_bytes: usize,
-}
-
-impl Write for BoundedText {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if self.bytes.len() + data.len() > self.max_bytes {
-            return Err(std::io::Error::other("RISUM module text exceeds the port's cutoff"));
-        }
-        self.bytes.extend_from_slice(data);
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 fn write_verified_rpack_object(
@@ -495,20 +436,10 @@ mod tests {
         AssetAlias, AssetOwnerHead, AssetOwnerLocator,
         PersistentStore, StoreError,
     };
-    use risunest_ir::stage::StageError;
     use serde_json::json;
     use std::cell::Cell;
     use std::io::Cursor;
     use tempfile::TempDir;
-
-    const EXPORT_CASES: &[u8] = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/rust-core/formats/risum-export.cases.json"
-    ));
-    const EXPORT_EXPECTED: &[u8] = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/rust-core/formats/risum-export.expected.json"
-    ));
 
     #[test]
     fn writes_positional_frames_with_tuple_tails_duplicates_and_zero_bytes() {
@@ -825,126 +756,5 @@ mod tests {
             fs::read(parse_root.join(&parsed.assets[2].payload.staged_name)).unwrap(),
             b""
         );
-    }
-
-    /// The file the native job writes for `module`, the stored root module, from a store holding `payloads` by key.
-    fn exported(module: &Value, payloads: &serde_json::Map<String, Value>) -> Vec<u8> {
-        let directory = TempDir::new().unwrap();
-        let mut store = PersistentStore::open(directory.path()).unwrap();
-        let cas = PayloadCas::new(directory.path()).unwrap();
-        let aliases = payloads
-            .iter()
-            .map(|(key, payload)| alias(key, &hex::decode(payload.as_str().unwrap()).unwrap(), &cas))
-            .collect::<Vec<_>>();
-        let staging = store.replace_begin().unwrap().staging_id;
-        store.replace_put_root(&staging, &json!({"modules": [module]})).unwrap();
-        store.replace_put_presets(&staging, &[]).unwrap();
-        store.replace_put_asset_aliases(&staging, &aliases).unwrap();
-        let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
-        let prepared = store.prepare_risu_save_export(revision).unwrap();
-        let owned = directory.path().join("owned");
-        let chosen = directory.path().join("chosen");
-        fs::create_dir(&owned).unwrap();
-        fs::create_dir(&chosen).unwrap();
-        let destination = chosen.join("module.risum");
-        let job = JobRegistry::default()
-            .create(JobKind::ExportRisuModule)
-            .unwrap();
-        export_risu_module(
-            prepared,
-            0,
-            &owned,
-            &directory.path().join("handoffs"),
-            Some(&destination),
-            &job,
-        )
-        .unwrap();
-        fs::read(destination).unwrap()
-    }
-
-    /// The metadata frame of a RISUM file, decoded.
-    fn metadata_text(file: &[u8]) -> String {
-        let length = u32::from_le_bytes(file[2..6].try_into().unwrap()) as usize;
-        let mut decode = [0_u8; 256];
-        for (byte, encoded) in RPACK_MAP[..256].iter().enumerate() {
-            decode[*encoded as usize] = byte as u8;
-        }
-        String::from_utf8(file[6..6 + length].iter().map(|byte| decode[*byte as usize]).collect()).unwrap()
-    }
-
-    /// Replays `tests/fixtures/rust-core/formats/risum-export.*.json`, the files `exportModuleLegacy` writes, recorded
-    /// by `benchmarks/rust-core-oracles/formats-risum-export.oracle.test.ts`. Where the port builds the metadata, the
-    /// native file is TS's byte for byte; where it declines, it is the layout the job wrote before the port, with
-    /// `assets ?? []` as TS writes it.
-    #[test]
-    fn native_risum_export_writes_the_file_ts_writes() {
-        let digest: String = Sha256::digest(EXPORT_CASES)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let cases: Value = serde_json::from_slice(EXPORT_CASES).unwrap();
-        let expected: Value = serde_json::from_slice(EXPORT_EXPECTED).unwrap();
-        assert_eq!(expected["fixtureSha256"], json!(digest), "regenerate the expected file");
-        let (cases, recorded) = (
-            cases["cases"].as_array().unwrap(),
-            expected["cases"].as_array().unwrap(),
-        );
-        assert_eq!(cases.len(), recorded.len());
-        let (mut ported, mut changed, mut declined) = (0, 0, 0);
-        for (case, record) in cases.iter().zip(recorded) {
-            let id = case["id"].as_str().unwrap();
-            assert_eq!(case["id"], record["id"]);
-            let (module, payloads) = (&case["module"], case["payloads"].as_object().unwrap());
-            let result = &record["result"];
-            let file = exported(module, payloads);
-            // What the job wrote before the port, from the same module and payloads.
-            let frames = module["assets"].as_array().map_or_else(Vec::new, |assets| {
-                assets
-                    .iter()
-                    .map(|tuple| hex::decode(payloads[tuple[1].as_str().unwrap()].as_str().unwrap()).unwrap())
-                    .collect()
-            });
-            let layout = |module: &Value| {
-                let mut bytes = Vec::new();
-                write_risum(&mut bytes, module, &frames, || false).map(|()| bytes).ok()
-            };
-            let own = layout(module);
-            if case["native"] == "ported" {
-                assert_eq!(metadata_text(&file), result["metadata"].as_str().unwrap(), "{id}");
-                assert_eq!(hex::encode(&file), result["file"].as_str().unwrap(), "{id}");
-                ported += 1;
-                changed += usize::from(own.as_ref() != Some(&file));
-            } else {
-                let budget = Budget::new(MAPPING_LIMITS, Arc::new(AtomicBool::new(false))).unwrap();
-                let parsed = parse_json(&serde_json::to_string(module).unwrap(), &budget).unwrap();
-                let reason = risum_metadata_text(&parsed, &budget).map(|_| ()).unwrap_err();
-                assert!(
-                    matches!(&reason, StageError::Unsupported(name) if json!(name) == case["native"]["declined"]),
-                    "{id}: {reason:?}"
-                );
-                // That layout, of the module with `assets ?? []`.
-                let mut fallback = module.clone();
-                if matches!(fallback.get("assets"), None | Some(Value::Null)) {
-                    fallback["assets"] = json!([]);
-                }
-                assert_eq!(Some(&file), layout(&fallback).as_ref(), "{id}");
-                declined += 1;
-            }
-        }
-        // Where TS writes otherwise than the job did before, the ported file is TS's.
-        assert!(ported >= 11 && changed >= 6 && declined >= 3, "{ported} {changed} {declined}");
-    }
-
-    #[test]
-    fn native_risum_metadata_is_ported_up_to_its_size_cutoff() {
-        let (cases, expected): (Value, Value) = (
-            serde_json::from_slice(EXPORT_CASES).unwrap(),
-            serde_json::from_slice(EXPORT_EXPECTED).unwrap(),
-        );
-        let module = &cases["cases"][0]["module"];
-        let length = serde_json::to_string(module).unwrap().len();
-        let metadata = expected["cases"][0]["result"]["metadata"].as_str().unwrap();
-        assert_eq!(ported_metadata(module, length).as_deref(), Some(metadata.as_bytes()));
-        assert_eq!(ported_metadata(module, length - 1), None);
     }
 }

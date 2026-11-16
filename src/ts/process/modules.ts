@@ -55,11 +55,9 @@ export async function importPreparedNativeModuleContent(
     const [
         { runNativePreparedContentRoute },
         { activatePreparedNativeModuleContent },
-        { prepareNativeContentImport },
     ] = await Promise.all([
         import('../storage/nativePreparedContentRoute'),
         import('../storage/nativeModuleContentActivation'),
-        import('../storage/nativeFileJobs'),
     ])
     const result = await runContentImport(
         input.displayName,
@@ -69,8 +67,6 @@ export async function importPreparedNativeModuleContent(
                 input.source,
                 input.displayName,
                 {
-                    prepare: (source, displayName, prepareOptions) =>
-                        prepareNativeContentImport(source, displayName, prepareOptions, undefined, 'module'),
                     map: async (content) => content,
                     activate: (content, lifecycle, signal) =>
                         activatePreparedNativeModuleContent(

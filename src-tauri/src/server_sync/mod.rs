@@ -50,9 +50,6 @@ pub(crate) struct SyncError {
     /// An activation failed before changing an already usable local library.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_local_ready: Option<bool>,
-    /// This stored-page invocation was rejected before applying its staged units.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receive_not_applied: Option<bool>,
     /// Where the error was raised. Kept for the device log, never sent.
     #[serde(skip)]
     pub at: &'static std::panic::Location<'static>,
@@ -70,7 +67,6 @@ impl SyncError {
             status,
             retryable,
             startup_local_ready: None,
-            receive_not_applied: None,
             at: std::panic::Location::caller(),
             cause: None,
         }

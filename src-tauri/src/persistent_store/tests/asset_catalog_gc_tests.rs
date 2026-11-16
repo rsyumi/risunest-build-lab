@@ -1717,7 +1717,7 @@ fn unused_file_cleanup_keeps_aliases_referenced_in_any_stored_form_or_held_by_an
         "assets/shared.png", "assets/html.png", "assets/backslash.png", "assets/한글.png",
         "assets/plugin-bare.png", "assets/setting.png", "assets/archived.png",
         "assets/archived-html.png", "assets/archived-chat.png", "assets/archived-local.png",
-        "assets/snapshotted.png", "assets/ledger.png", "assets/receive-receipt.png",
+        "assets/snapshotted.png", "assets/ledger.png",
     ];
     // Only this alias is old enough for the snapshot to hold it.
     put_asset(&mut store, "assets/snapshotted.png", b"synthetic snapshotted body");
@@ -1773,7 +1773,6 @@ fn unused_file_cleanup_keeps_aliases_referenced_in_any_stored_form_or_held_by_an
     let device = store.device_store().unwrap();
     device.write_setting("official-account.pending-assets.v1", &json!([{"key": "assets/setting.png"}])).unwrap();
     device.write_setting("official-account.asset-ledger.v1", &json!({"assets/ledger.png": 1})).unwrap();
-    device.write_setting(super::super::lww::NATIVE_RECEIVE_RECEIPT_SETTING, &json!({"affected_keys": ["assets/receive-receipt.png"]})).unwrap();
     for key in keys.iter().copied().chain(["assets/manifest.png"]) {
         backdate_alias(&store, key, 1_000);
     }
@@ -1793,13 +1792,13 @@ fn unused_file_cleanup_keeps_aliases_referenced_in_any_stored_form_or_held_by_an
     store.connection.execute("UPDATE root SET value = '{}' WHERE generation = ?1", [&generation]).unwrap();
 
     let deleted = store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now }).unwrap();
-    assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/ledger.png", "assets/receive-receipt.png"]);
-    kept(&store, &["assets/ledger.png", "assets/receive-receipt.png"]);
+    assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/ledger.png"]);
+    kept(&store, &["assets/ledger.png"]);
 
     store.snapshot_delete(&snapshot.id).unwrap();
     let deleted = store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now }).unwrap();
     assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/snapshotted.png"]);
-    kept(&store, &["assets/ledger.png", "assets/receive-receipt.png", "assets/snapshotted.png"]);
+    kept(&store, &["assets/ledger.png", "assets/snapshotted.png"]);
 }
 
 /// Reads what the archives without a record name, as the store does once after it opens

@@ -169,11 +169,6 @@ async function openedPreparedContentDependencies(): Promise<AndroidOpenedPrepare
     }
 }
 
-// A preset pick the app lost before it finished is not imported from the opened files.
-async function discardInterruptedPresetSpool(source: AndroidSpoolReady): Promise<void> {
-    if (!await discardAndroidSafSource(source.token)) throw new NativeFileJobError('discard-failed', 'Interrupted preset source cleanup failed')
-}
-
 export async function importAndroidContentSpoolBatch(
     sources: AndroidSpoolReady[],
     failures: AndroidSpoolFailure[],
@@ -183,10 +178,6 @@ export async function importAndroidContentSpoolBatch(
         openedPreparedContentDependencies(),
     ])
     return await importOpenedAndroidContentSpools(sources, failures, async (source, context) => {
-        if (source.importDestination === 'preset') {
-            await discardInterruptedPresetSpool(source)
-            return null
-        }
         const result = await importAndroidOpenedPreparedContent(
             source,
             dependencies,
@@ -199,10 +190,6 @@ export async function importAndroidContentSpoolBatch(
 export async function importAndroidCharacterSpool(
     source: AndroidSpoolReady,
 ): Promise<NativeAndroidCharacterSpoolResult<string>> {
-    if (source.importDestination === 'preset') {
-        await discardInterruptedPresetSpool(source)
-        return { kind: 'declined' }
-    }
     const { androidSpoolReplayDestination, importReplayedAndroidContentSpool } = await import(
         './androidContentPicker'
     )

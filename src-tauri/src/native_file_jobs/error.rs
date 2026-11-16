@@ -14,7 +14,7 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
         }
         StoreError::AssetInventoryBusy => NativeJobError::new("library-operation-busy", error.to_string()),
         StoreError::Validation { .. } | StoreError::CommitDecode { .. } => invalid_input(error.to_string()),
-        StoreError::Committed { .. } | StoreError::SnapshotReleased | StoreError::SnapshotPinned { .. } | StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::SchemaMismatch { .. } | StoreError::Store { .. } => {
+        StoreError::Committed { .. } | StoreError::SnapshotReleased | StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::SchemaMismatch { .. } | StoreError::Store { .. } => {
             NativeJobError::new("store-error", error.to_string())
         }
     }
