@@ -39,8 +39,8 @@
     {
       "path": "benchmarks/appLock/fixture.ts",
       "mode": "100644",
-      "bytes": 11214,
-      "sha256": "25af1e2202a9a764cc4bb2aeba3f35c3efff5dae081d47a39237d27648bcd1d9"
+      "bytes": 12805,
+      "sha256": "fbc75d817b7119ad2afcfaee88df74f88ceca9a1cb005ae29646b0a12e35e64d"
     },
     {
       "path": "benchmarks/appLock/frames.py",
@@ -249,8 +249,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 54267,
-      "sha256": "b424c31ceb7fd64bb6593d92ccc125325991958725bf2074ade7a405b807a7a5"
+      "bytes": 56216,
+      "sha256": "4cf17d200d5ac6e19e5c35ff38f515cfdc8b143ba55c36e69b2995c427c76459"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -7941,8 +7941,8 @@
     {
       "path": "src-tauri/src/persistent_store/commands.rs",
       "mode": "100644",
-      "bytes": 209298,
-      "sha256": "d5f64d68c16de521667872b2dfd41d2f2e1bf0d380c89b6091ee0533c6e9a8e5"
+      "bytes": 211187,
+      "sha256": "1ffc9e2c32a7958e27ae2defc02a35c47af7a5c486487033fa14081f6d2871b0"
     },
     {
       "path": "src-tauri/src/persistent_store/commands/archive_names.rs",
@@ -19863,8 +19863,8 @@
     {
       "path": "tests/browser/pluginIframe.browser.spec.ts",
       "mode": "100644",
-      "bytes": 34861,
-      "sha256": "a0142cd03352ad5e79881ec90e3e2386384ae0678c6ea6605a2b5a488391fc77"
+      "bytes": 34891,
+      "sha256": "ee69581401b0b4f9db82762d53ffcd6e1781f949d254dc22a096fec6895bfc5a"
     },
     {
       "path": "tests/browser/settingsKeyboard.browser.spec.ts",
