@@ -4425,8 +4425,8 @@
     {
       "path": "server/manager/install/windows.test.ps1",
       "mode": "100644",
-      "bytes": 50408,
-      "sha256": "6e1c4423109310b655c04fcab371467eaba4e124581f65ea59ffdcabe37f6d34"
+      "bytes": 59086,
+      "sha256": "204036b78a7babf54ccc82b6f3241d65bb248fc6b63c8fadeca4fc10527b7392"
     },
     {
       "path": "server/manager/src/bin/risunest-sync-manager-background.rs",
