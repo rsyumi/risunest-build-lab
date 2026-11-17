@@ -39,8 +39,8 @@
     {
       "path": "benchmarks/appLock/fixture.ts",
       "mode": "100644",
-      "bytes": 12805,
-      "sha256": "fbc75d817b7119ad2afcfaee88df74f88ceca9a1cb005ae29646b0a12e35e64d"
+      "bytes": 13417,
+      "sha256": "8a6599b24eeff27f2065c3dd0b3b68a85409b4a82f1968e626a6e474132deb0f"
     },
     {
       "path": "benchmarks/appLock/frames.py",
