@@ -310,7 +310,7 @@
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
       "bytes": 185790,
-      "sha256": "5080ec49ab7a2fcafc947dc324a345194a8c7c02174c0ea94889764cbf376f36"
+      "sha256": "2c8430c3ec7776ff225595862f84a3c862b7f4a21f2d30e53e48936390e4b18c"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
@@ -670,7 +670,7 @@
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
       "bytes": 185620,
-      "sha256": "5b680ceb46afbd2877ba2a6851b3147d71a2b72ed73e0bd1e542cd59bcbf8d4c"
+      "sha256": "d8269c5938778cc040cb8bb4042e5260e2cee80f1c51a37d913401b9c619ea39"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
@@ -3340,7 +3340,7 @@
       "path": "package.json",
       "mode": "100644",
       "bytes": 10937,
-      "sha256": "95f228cae5605508443dd4ecaf8e11210be162ecdb1c63acda1dc893e3f8dff8"
+      "sha256": "bec406a4a7a994f716880d23cec9514d7525ebca7e04b10a3caa8fea432b69b4"
     },
     {
       "path": "patches/@tauri-apps__plugin-http@2.8.0.patch",
@@ -4168,13 +4168,13 @@
       "path": "server/manager/Cargo.lock",
       "mode": "100644",
       "bytes": 63859,
-      "sha256": "b4cef0d9b40864ee6acf6a0ca4488f6a2df639d6998d7b5f5215342e2c6167fd"
+      "sha256": "51b99f2c697e9eed5cb784157c0d837987fd4a7280c361211a53dc078a29b3d3"
     },
     {
       "path": "server/manager/Cargo.toml",
       "mode": "100644",
       "bytes": 1577,
-      "sha256": "d91723ba0600aba2c3fdc3c3850c4688435ebca5f6cefa6bf4a4d97fdaad521f"
+      "sha256": "f04f3138e278abaa851c1f4500e4857e50238fd0628a6dda993a35ff3ee2b927"
     },
     {
       "path": "server/manager/gui/index.html",
@@ -4186,7 +4186,7 @@
       "path": "server/manager/gui/package.json",
       "mode": "100644",
       "bytes": 865,
-      "sha256": "926116ddc629979c7035e7efd9cc0816d937453dff2b53381400d2d10ba1010f"
+      "sha256": "d7c086c77b10713434e57b5bdfed6e8bf8b72e1beb1e2d88a9753dd492c55f24"
     },
     {
       "path": "server/manager/gui/pnpm-lock.yaml",
@@ -4198,13 +4198,13 @@
       "path": "server/manager/gui/src-tauri/Cargo.lock",
       "mode": "100644",
       "bytes": 143353,
-      "sha256": "5040dfb19d4b987db7e44e0fca6b1dcf53f3da3914a2c05833b4fe6d077e5d22"
+      "sha256": "6421623548690b09a42ce3dba08b8d506fa3a27fbaf9ffeb280246b562bca0d3"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.toml",
       "mode": "100644",
       "bytes": 972,
-      "sha256": "7dc4846576810beb9b2751cf7ba293f30641a031d64913b076b6e67a71e950d9"
+      "sha256": "b2ebf64459f543601b63859cef016c1d6b2ced10dcca4d9b05bc868bfaea41c7"
     },
     {
       "path": "server/manager/gui/src-tauri/build.rs",
@@ -4276,7 +4276,7 @@
       "path": "server/manager/gui/src-tauri/tauri.conf.json",
       "mode": "100644",
       "bytes": 1290,
-      "sha256": "d04b56325d7853ee0ff35c08632cf624dceec8dcb60709345768095ecc2e33e0"
+      "sha256": "836b0fd4f3b938f5dd2b4a8eed56e4c50b0f6e1039f23ee905d5fb8897357457"
     },
     {
       "path": "server/manager/gui/src/App.svelte",
@@ -4425,8 +4425,8 @@
     {
       "path": "server/manager/install/windows.test.ps1",
       "mode": "100644",
-      "bytes": 59086,
-      "sha256": "204036b78a7babf54ccc82b6f3241d65bb248fc6b63c8fadeca4fc10527b7392"
+      "bytes": 50408,
+      "sha256": "6e1c4423109310b655c04fcab371467eaba4e124581f65ea59ffdcabe37f6d34"
     },
     {
       "path": "server/manager/src/bin/risunest-sync-manager-background.rs",
@@ -4473,8 +4473,8 @@
     {
       "path": "server/manager/src/platform/mod.rs",
       "mode": "100644",
-      "bytes": 27107,
-      "sha256": "6eebb2fd69f73eb90e665f2da7cc51fd1d38a2fb931e0543bcbd2c2b28b6133c"
+      "bytes": 28370,
+      "sha256": "dc66e7cde602ace9ee2774f7c3e8157c2a4fb409b5195609cde0967b98a1131d"
     },
     {
       "path": "server/manager/src/platform/paths.rs",
@@ -4491,8 +4491,8 @@
     {
       "path": "server/manager/src/platform/windows.rs",
       "mode": "100644",
-      "bytes": 25061,
-      "sha256": "f15586828e13e9640903eb9dcfe6d1df928a9f2aa5c8f466f6c07658bd88830d"
+      "bytes": 29916,
+      "sha256": "2fec065b345304287ed7c00b667fec50c7394f0ab24a2c9cb73bcee568c56ba2"
     },
     {
       "path": "server/manager/src/platform/windows/gui.rs",
@@ -4636,13 +4636,13 @@
       "path": "server/sync/Cargo.lock",
       "mode": "100644",
       "bytes": 55028,
-      "sha256": "068afc48e79c6eac726b0e6b9b1694dc18b9327c0023e822d3d99d39dc7c568d"
+      "sha256": "b4c8a33876e5947c1506ca6f792aed2947817ee936657df623ebc8326825c67f"
     },
     {
       "path": "server/sync/Cargo.toml",
       "mode": "100644",
       "bytes": 1914,
-      "sha256": "0a94152cc1dd8a5858f987567e3abd316f8b1cc184ec6da65a1d9c0cfc206364"
+      "sha256": "c30ecd6ddb5db4a2e2ec26ceb9c2be4c3be7e0c34a23da1df4a739a01202fe8d"
     },
     {
       "path": "server/sync/README.md",
@@ -5050,7 +5050,7 @@
       "path": "server/version.json",
       "mode": "100644",
       "bytes": 163,
-      "sha256": "0f9795bb1d1ee630028a3cd4553c6089833f5374d07a20a8cf3117e7e1d420a0"
+      "sha256": "3e29f4b277d4e922e341b51b1fb455f45f2d460624f59e58cd3be85e891c6bda"
     },
     {
       "path": "src-tauri/.gitignore",
@@ -5062,13 +5062,13 @@
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
       "bytes": 190283,
-      "sha256": "74c7779374ab3cc265bf3bd80facf4a253b23e2fe8a8869109e21157e44d61e3"
+      "sha256": "7610d3d5d12fa90eed4766f1cf254a31b9aa882f6a571052b15e8707c5d2b782"
     },
     {
       "path": "src-tauri/Cargo.toml",
       "mode": "100644",
       "bytes": 8661,
-      "sha256": "7060019c22828a77bcfadcf1edb9791831917d7586f41f284e1d611f6693f8d9"
+      "sha256": "946704a9d2f400468acd8bf52f72e4f627f48a09fc7210972435a05f04165480"
     },
     {
       "path": "src-tauri/Info.plist",
@@ -5848,7 +5848,7 @@
       "path": "src-tauri/gen/apple/project.yml",
       "mode": "100644",
       "bytes": 4852,
-      "sha256": "5197469982d830eff5a088a424bdf33b95d39090545abba6fe516429d61763b2"
+      "sha256": "9d783c397c1967bbbe39126913ca79fc1d1f97be36fdf078f3995467d8e96d0c"
     },
     {
       "path": "src-tauri/gen/apple/risunest.xcodeproj/project.pbxproj",
@@ -5878,7 +5878,7 @@
       "path": "src-tauri/gen/apple/risunest_iOS/Info.plist",
       "mode": "100644",
       "bytes": 3910,
-      "sha256": "f078dc7a634f38b70e1aecd284fcbf593b37e2ba49d97de0c7feb50fdacf0322"
+      "sha256": "93b90cbad7341c498a4cd8b70e56ef18d4a92281f80f75e55d539edc95dfa156"
     },
     {
       "path": "src-tauri/gen/apple/risunest_iOS/risunest_iOS.entitlements",
@@ -9034,7 +9034,7 @@
       "path": "src-tauri/tauri.conf.json",
       "mode": "100644",
       "bytes": 3198,
-      "sha256": "bb89a0d50a618aa246727f62ab028ed63754e7a7a722cf72b024665e6cf07c3a"
+      "sha256": "8b476336a905d3e9b3a9340d579c2767114c83e4c1eb530dd9df624677508165"
     },
     {
       "path": "src-tauri/tauri.ios.conf.json",
@@ -20152,7 +20152,7 @@
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
       "bytes": 185598,
-      "sha256": "72cf70fd0680f72ca80ffcda03060b525511fd99b7aeba9a65329dfa574414cd"
+      "sha256": "ecca410c62acb0173a5d007e33786fd0de6406111f8c4d685a62973be41acfba"
     },
     {
       "path": "tests/native/native/Cargo.toml",
@@ -20584,7 +20584,7 @@
       "path": "version.json",
       "mode": "100644",
       "bytes": 25,
-      "sha256": "d4c2fe723957189455921c4d3cedd0cf6e0f4a639fd532c71406b60f41530ed1"
+      "sha256": "ff1c0a652f38113cac3c47782617644745f5e795d770302679b6486cb883d5a3"
     },
     {
       "path": "vite.config.ts",
@@ -20693,8 +20693,8 @@
     {
       "path": ".github/workflows/release.yml",
       "mode": "100644",
-      "bytes": 66391,
-      "sha256": "a3cebed3bf50547dae7ce1dd427107c9b31c2026da2aa75ad2bf9c5b47903c6c",
+      "bytes": 66602,
+      "sha256": "78df1a40e0b92fae76a7363da3429ddbcd55417eb3d458c36718cc4c3ba46cb0",
       "reason": "private-control-or-generated"
     },
     {
@@ -21188,6 +21188,13 @@
       "reason": "explanatory-document"
     },
     {
+      "path": "release-notes/app/1.4.1.md",
+      "mode": "100644",
+      "bytes": 2977,
+      "sha256": "052a4e5c364c5f7dc5e0b3cf10d44acdc1aa0dd29d56deaa1467cf98dd1361fe",
+      "reason": "explanatory-document"
+    },
+    {
       "path": "release-notes/sync/1.0.0.md",
       "mode": "100644",
       "bytes": 90,
@@ -21255,6 +21262,13 @@
       "mode": "100644",
       "bytes": 241,
       "sha256": "5cb88ece8288396dcca0aa58d49ab46caa0e774b4e8bc5377a8d051aa0a8248e",
+      "reason": "explanatory-document"
+    },
+    {
+      "path": "release-notes/sync/1.1.3.md",
+      "mode": "100644",
+      "bytes": 217,
+      "sha256": "719d79ed5908d52bf4540218d8d17cc1a87f780c9bccd9f2c6e44f3ed0bb7bb1",
       "reason": "explanatory-document"
     },
     {
