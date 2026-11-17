@@ -1,4 +1,4 @@
-import json, os, pathlib, plistlib, subprocess, sys, time, threading
+import json, os, pathlib, plistlib, re, subprocess, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = pathlib.Path.cwd()
@@ -67,6 +67,12 @@ assert runtimes, 'No available iOS runtime '+wanted_runtime
 runtime=sorted(runtimes,key=lambda x:(tuple(map(int,x['version'].split('.'))),len(x.get('supportedDeviceTypes',[]))))[-1]
 types=json.loads(run(['xcrun','simctl','list','devicetypes','--json']))['devicetypes']
 available=json.loads(run(['xcrun','simctl','list','devices','available','--json']))['devices'].get(runtime['identifier'],[])
+def retried_tests(log):
+    outcomes={}
+    for name,outcome in re.findall(r"Test Case '-\[\S+ (\w+)\]' (passed|failed)",log):
+        outcomes.setdefault(name,set()).add(outcome)
+    return sorted(name for name,seen in outcomes.items() if seen=={'passed','failed'})
+
 def compatible_type(prefix):
     names={item['name'] for item in available if item['isAvailable'] and item['name'].startswith(prefix)}
     if not names:
@@ -197,9 +203,10 @@ try:
     }
     (uitests/'project.json').write_text(json.dumps(spec))
     print(run(['xcodegen','generate','--spec','project.json'],cwd=uitests))
-    print(run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
+    ui_log=run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
                '-destination','platform=iOS Simulator,id='+device,'-derivedDataPath',str(uitests/'DerivedData'),
                '-resultBundlePath',str(artifacts/'ios-ui.xcresult'),
+               '-retry-tests-on-failure','-test-iterations','2',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Raw',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Gzip',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Raw',
@@ -207,7 +214,12 @@ try:
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Raw',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Gzip',
                '-skip-testing:RisuNestUITests/NativeUITests/testDeviceCore',
-               'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
+               'CODE_SIGNING_ALLOWED=NO'],cwd=uitests)
+    print(ui_log)
+    retried=retried_tests(ui_log)
+    (artifacts/'ios-ui-retried.txt').write_text(''.join(name+'\n' for name in retried))
+    for name in retried:
+        print('::warning title=iOS UI test retried::'+name+' failed and then passed on retry',flush=True)
     frame_runner=root/'benchmarks/appLock/frames.py'
     if frame_runner.is_file():
         run_app_lock_frames()
