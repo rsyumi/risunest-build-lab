@@ -55,8 +55,7 @@ final class AppLockCoordinator {
             guard let self = self, self.state.releaseUnconfirmed(epoch: epoch) else { return }
             NSLog("RisuNest app lock cover released after %.0f s without a confirmed frame", Self.unconfirmedCoverLimit)
             self.renderCover()
-            // The page writes the release to the device log, which has no Swift entry point.
-            self.emit(releasedUnconfirmedAfterSeconds: Self.unconfirmedCoverLimit)
+            self.emit()
         }
         unconfirmedRelease = release
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.unconfirmedCoverLimit, execute: release)
@@ -176,10 +175,8 @@ final class AppLockCoordinator {
                        blue: CGFloat(rgb & 255) / 255, alpha: 1)
     }
 
-    private func emit(releasedUnconfirmedAfterSeconds: TimeInterval? = nil) {
-        var detail = state.snapshot(at: Self.now()).payload
-        if let seconds = releasedUnconfirmedAfterSeconds { detail["releasedUnconfirmedAfterSeconds"] = seconds }
-        guard let data = try? JSONSerialization.data(withJSONObject: detail),
+    private func emit() {
+        guard let data = try? JSONSerialization.data(withJSONObject: state.snapshot(at: Self.now()).payload),
               let payload = String(data: data, encoding: .utf8) else { return }
         webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('risunest-app-lock',{detail:\(payload)}))", completionHandler: nil)
     }
