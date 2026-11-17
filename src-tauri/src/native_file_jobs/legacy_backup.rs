@@ -1651,7 +1651,9 @@ mod tests {
         use restore::ReplacementSink as _;
         use serde_json::json;
         let directory = tempfile::tempdir().unwrap();
-        let app = crate::test_app::mock_app();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
         app.manage(crate::persistent_store::commands::PersistentStoreState::with_test_store(
             PersistentStore::open(&directory.path().join("store")).unwrap(),
         ));

@@ -3,7 +3,7 @@ import { getChatVar } from '../parser/chatVar.svelte';
 import {selectedCharID} from '../stores.svelte'
 import { type Message, type loreBook } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
-import { tokenCountBatch } from "../tokenizer";
+import { tokenize } from "../tokenizer";
 import { risuChatParser } from "../parser/parser.svelte";
 import { findCharacterbyId, pickHashRand, selectSingleFile } from "../util";
 import { alertError, alertNormal } from "../alert";
@@ -340,7 +340,6 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
         }|null
     }[] = []
     const activatedIndexes = new Set<number>()
-    const activeTokens = tokenCountBatch()
     let disabledUIPrompts:string[] = []
     let matchTimes = 0
     while(matching){
@@ -667,17 +666,13 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
                     // so cutoff reflects what actually reaches the context, not the unevaluated source.
                     // runVar is left false (matching the output path in index.svelte.ts), so this
                     // evaluation has no side effects like setvar.
-                    tokens: await activeTokens.add(risuChatParser(content, {chara: char})),
+                    tokens: await tokenize(risuChatParser(content, {chara: char})),
                     priority: priority,
                     source: fullLore[i].comment || `lorebook ${i}`,
                     inject: inject ?? null
                 })
                 activatedIndexes.add(i)
 
-                // These chat variables outlive the send, so a count that fails surfaces before they are set.
-                if(keepActivateAfterMatch || dontActivateAfterMatch){
-                    await activeTokens.flush()
-                }
                 if(keepActivateAfterMatch){
                     setSelectedChatVariable('__internal_ka_' + (fullLore[i].id ?? pickHashRand(5555,fullLore[i].content).toString()), 'true')
                 }
@@ -702,8 +697,6 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
             }
         }
     }
-
-    for(const [index, rest] of (await activeTokens.settle()).entries()) actives[index].tokens += rest
 
     const activesSorted = actives.sort((a,b) => {
         return b.priority - a.priority

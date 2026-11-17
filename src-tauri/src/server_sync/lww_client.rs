@@ -6,6 +6,7 @@ use super::{
     transfer::Transfer,
     Result, SyncError,
 };
+#[cfg(test)]
 use crate::persistent_store::lww::ApplyReceive;
 use crate::persistent_store::{
     lww::{
@@ -52,53 +53,6 @@ pub(crate) struct ReceivePage {
 }
 fn receive_page_more() -> bool { true }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ReceiveDescriptor {
-    #[serde(flatten)]
-    pub(crate) header: Header,
-    pub(crate) incoming_keys: Vec<risunest_sync_wire::unit::UnitKey>,
-    pub(crate) progress: Progress,
-    pub(crate) received_units: usize,
-    pub(crate) receive_frontier: Option<DecimalU64>,
-    pub(crate) more: bool,
-    pub(crate) has_body_references: bool,
-    pub(crate) has_representative_references: bool,
-}
-impl ReceivePage {
-    fn descriptor(&self) -> ReceiveDescriptor {
-        let has_body_references = self.page.changes.iter().any(|change| {
-            let key = change.key.components();
-            match &change.value {
-                UnitValue::Inline { .. } => matches!(key[0].as_str(), "asset" | "inlay"),
-                UnitValue::Object { descriptor, .. } if key[0] != "messages" =>
-                    !descriptor.dependencies.is_empty() || descriptor.dependency_root.is_some() || descriptor.relation_root.is_some(),
-                _ => false,
-            }
-        });
-        let has_representative_references = self.page.changes.iter().any(|change| {
-            let key = change.key.components();
-            match key[0].as_str() {
-                "character" => matches!(key[2].as_str(), "image" | "trashTime"),
-                "exists" => key[1] == "character",
-                "archive" | "asset" => true,
-                "order" => key[1] == "characters",
-                _ => false,
-            }
-        });
-        ReceiveDescriptor {
-            header: self.page.header.clone(),
-            incoming_keys: self.page.changes.iter().map(|change| change.key.clone()).collect(),
-            progress: self.page.progress.clone(),
-            received_units: self.page.changes.len(),
-            receive_frontier: self.receive_frontier,
-            more: self.more,
-            has_body_references,
-            has_representative_references,
-        }
-    }
-}
-
 pub(crate) struct OperationLog(pub(crate) Connection);
 impl OperationLog {
     pub(crate) fn path(root: &Path) -> std::path::PathBuf {
@@ -109,6 +63,10 @@ impl OperationLog {
         let db = crate::sqlite_open::open(Self::path(root))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS publications(id TEXT PRIMARY KEY, digest TEXT NOT NULL, body BLOB NOT NULL, intent TEXT NOT NULL, receipt TEXT,acknowledged INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS pending_publications ON publications(id) WHERE receipt IS NULL; CREATE INDEX IF NOT EXISTS unacknowledged_publications ON publications(id) WHERE acknowledged=0;")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS bootstrap(authority TEXT PRIMARY KEY,pin TEXT NOT NULL,after_key TEXT,cursor TEXT NOT NULL); CREATE TABLE IF NOT EXISTS receive_pages(authority TEXT PRIMARY KEY,body TEXT NOT NULL,next_key TEXT,bootstrap INTEGER NOT NULL,done INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS configurations(slot TEXT PRIMARY KEY,config TEXT NOT NULL); CREATE TABLE IF NOT EXISTS bindings(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS claims(id TEXT PRIMARY KEY,body TEXT NOT NULL);")?;
+        // Units of a state pin that finished pages received up to after_key, so a bootstrap resumed
+        // in a later session still reports how much of the pin is left. The count is kept from the
+        // pin's first page; a bootstrap an earlier version began has none.
+        db.execute_batch("CREATE TABLE IF NOT EXISTS bootstrap_received(pin TEXT PRIMARY KEY,after_key TEXT NOT NULL,units INTEGER NOT NULL);")?;
         Ok(Self(db))
     }
     pub(crate) fn prepare(&self, publication: &Publication) -> Result<Vec<u8>> {
@@ -252,6 +210,14 @@ impl OperationLog {
         )?;
         Ok(())
     }
+}
+/// Drops the received counts of pins no bootstrap reads any more.
+fn forget_received_counts(log: &Connection) -> Result<()> {
+    log.execute(
+        "DELETE FROM bootstrap_received WHERE pin NOT IN (SELECT json_extract(pin,'$.pinId') FROM bootstrap WHERE json_valid(pin))",
+        [],
+    )?;
+    Ok(())
 }
 fn now_ms() -> Result<u64> {
     u64::try_from(
@@ -1098,10 +1064,6 @@ impl LwwClient {
         self.receive_page_with_frontier(store, header).map(|page| page.page)
     }
 
-    pub(crate) fn receive_descriptor(&self, store: &mut PersistentStore, header: &Header) -> Result<ReceiveDescriptor> {
-        Ok(self.receive_page_with_frontier(store, header)?.descriptor())
-    }
-
     pub(crate) fn receive_page_with_frontier(
         &self,
         store: &mut PersistentStore,
@@ -1195,8 +1157,8 @@ impl LwwClient {
             let pin: StatePin = serde_json::from_str(&pin)
                 .map_err(|_| SyncError::new("state-pin-integrity", 409))?;
             let mut query = vec![("pin", pin.pin_id.clone()), ("limit", "256".into())];
-            if let Some(after) = after {
-                query.push(("afterKey", after));
+            if let Some(after) = &after {
+                query.push(("afterKey", after.clone()));
             }
             let reply = self.client.request(
                 reqwest::Method::GET,
@@ -1212,6 +1174,7 @@ impl LwwClient {
                 self.log
                     .0
                     .execute("DELETE FROM bootstrap WHERE authority=?1", [&authority])?;
+                forget_received_counts(&self.log.0)?;
                 // A pin kept from an earlier page is replaced once; one made by this
                 // call that already expired is reported instead of pinning again.
                 if existing_pin.is_none() {
@@ -1226,10 +1189,37 @@ impl LwwClient {
             if page.pin_id != pin.pin_id || page.start_seq != pin.start_seq {
                 return Err(SyncError::new("invalid-state-page", 502));
             }
-            // Reading the whole state has no known size, so its pages count as they arrive.
-            self.client.lane().backlog(page.items.len() as u64, 0);
             next_key = page.next_key.map(|key| key.as_str().to_owned());
             done = next_key.is_none();
+            // The pin holds a known number of units; finished pages, including those of an
+            // earlier session, have received some of them.
+            let received: Option<i64> = match &after {
+                None => Some(0),
+                Some(after) => self
+                    .log
+                    .0
+                    .query_row(
+                        "SELECT units FROM bootstrap_received WHERE pin=?1 AND after_key=?2",
+                        params![pin.pin_id, after],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+            };
+            let items = page.items.len() as u64;
+            match received {
+                Some(received) => {
+                    let left = if done {
+                        0
+                    } else {
+                        pin.unit_count.0.saturating_sub(u64::try_from(received).unwrap_or(0).saturating_add(items))
+                    };
+                    self.client.lane().backlog(items, left);
+                }
+                // A bootstrap without a kept count, as one an earlier version began, received an
+                // unknown part of the pin; its pages report no known work rather than a total
+                // they never reach.
+                None => self.client.lane().backlog(0, 0),
+            }
             more = !done;
             receive_frontier = done.then_some(pin.start_seq);
             (
@@ -1369,32 +1359,6 @@ impl LwwClient {
             received_units,
         })
     }
-    pub(crate) fn apply_stored_receive(&self, store: &mut PersistentStore, request: &ApplyReceive) -> Result<ApplyResult> {
-        self.apply_stored_receive_with_baseline(store, request, None)
-    }
-    pub(crate) fn apply_stored_receive_with_baseline(&self, store: &mut PersistentStore, request: &ApplyReceive,
-        baseline: Option<&crate::persistent_store::receive_evidence::NativeReceiveEvidence>) -> Result<ApplyResult> {
-        (|| {
-            self.check()?;
-            if store.lww_binding_authority()? != request.header.binding_authority {
-                return Err(SyncError::new("binding-authority-changed", 409));
-            }
-            let body: Option<String> = self.log.0.query_row(
-                "SELECT body FROM receive_pages WHERE authority=?1",
-                [request.header.binding_authority.0.to_string()], |row| row.get(0),
-            ).optional()?;
-            let body = body.ok_or_else(|| SyncError::new("receive-page-missing", 409))?;
-            let page: ReceivePage = serde_json::from_str(&body)
-                .map_err(|_| SyncError::new("receive-page-integrity", 409))?;
-            if page.page.header != request.header {
-                return Err(SyncError::new("receive-page-changed", 409));
-            }
-            store.lww_stage_receive(&page.page)?;
-            Ok(())
-        })().map_err(|mut failure: SyncError| { failure.receive_not_applied = Some(true); failure })?;
-        Ok(store.lww_apply_receive_recorded_with_baseline(request, baseline)?)
-    }
-
     pub(crate) fn finish_receive(&self, store: &PersistentStore, header: &Header) -> Result<()> {
         self.check()?;
         self.client.lane().step(Step::Confirming);
@@ -1427,8 +1391,6 @@ impl LwwClient {
         }
         store.server_assert_receive_finished(&page)?;
         self.acknowledge_cursor(page.progress.cursor)?;
-        // Native history settles before its stored page goes, so a failed settle is retried with the page.
-        store.settle_native_receive_transport(&self.log.0, header)?;
         if boot && done {
             let pin: String = self.log.0.query_row(
                 "SELECT pin FROM bootstrap WHERE authority=?1",
@@ -1452,7 +1414,21 @@ impl LwwClient {
         let tx = self.log.0.unchecked_transaction()?;
         if boot && done {
             tx.execute("DELETE FROM bootstrap WHERE authority=?1", [&authority])?;
+            forget_received_counts(&tx)?;
         } else if boot {
+            // A count kept since the pin's first page moves on with after_key; a pin without one
+            // stays without one.
+            let units = page.changes.len() as i64;
+            tx.execute(
+                "UPDATE bootstrap_received SET after_key=?2,units=units+?3
+                 WHERE (pin,after_key)=(SELECT json_extract(pin,'$.pinId'),after_key FROM bootstrap WHERE authority=?1 AND json_valid(pin))",
+                params![authority, next, units],
+            )?;
+            tx.execute(
+                "INSERT INTO bootstrap_received SELECT json_extract(pin,'$.pinId'),?2,?3 FROM bootstrap WHERE authority=?1 AND json_valid(pin) AND after_key IS NULL
+                 ON CONFLICT(pin) DO UPDATE SET after_key=excluded.after_key,units=excluded.units",
+                params![authority, next, units],
+            )?;
             tx.execute(
                 "UPDATE bootstrap SET after_key=?1 WHERE authority=?2",
                 params![next, authority],
@@ -1460,7 +1436,6 @@ impl LwwClient {
         }
         tx.execute("DELETE FROM receive_pages WHERE authority=?1", [&authority])?;
         tx.commit()?;
-        store.clear_native_receive_receipt(header)?;
         Ok(())
     }
     pub(crate) fn acknowledge_cursor(&self, cursor: DecimalU64) -> Result<()> {
@@ -1642,9 +1617,8 @@ impl LwwClient {
                     .or(store.server_stored_config()?)
                     .filter(|config| config.library_id == self.client.config().library_id)
                     .ok_or_else(|| SyncError::new("server-unconfigured", 409))?;
-                let head = self.client.resolve_identity()?;
                 let mut residency = super::residency::Residency::open(store.repository_root())?;
-                residency.retain(&self.client, &config, &head, &missing)?;
+                residency.retain_current(&self.client, &config, &missing)?;
                 let hashes = missing.into_iter().map(|(hash, _)| hash).collect::<Vec<_>>();
                 let sizes = residency.active_sizes(&hashes)?;
                 let objects = hashes.into_iter().zip(sizes).map(|(object_hash, size)| {
@@ -1829,65 +1803,4 @@ fn wire_compare(
         super::hash_metrics::incomplete();
     }
     result
-}
-
-#[cfg(test)]
-mod receive_descriptor_tests {
-    use super::*;
-    use risunest_sync_wire::{descriptor::RecordDescriptor, stamp::Stamp};
-
-    fn descriptor(key: &[&str], value: UnitValue) -> ReceiveDescriptor {
-        ReceivePage {
-            page: StageReceive {
-                header: Header { binding_authority: 7.into(), request_id: "receive-descriptor".into() },
-                changes: vec![Change {
-                    key: risunest_sync_wire::unit::UnitKey::new(key).unwrap(),
-                    stamp: Stamp { physical_ms: 1.into(), logical: 0, writer_id: "writer".into() },
-                    value,
-                }],
-                progress: Progress { kind: "server".into(), cursor: 9.into(), writer_id: None },
-                admitted_time_upper_ms: 2.into(),
-            },
-            receive_frontier: Some(12.into()),
-            more: true,
-        }.descriptor()
-    }
-
-    #[test]
-    fn descriptor_returns_only_identity_projection_keys_and_receive_progress() {
-        let value = UnitValue::inline(&serde_json::to_vec(&"synthetic-content".repeat(1000)).unwrap()).unwrap();
-        let result = descriptor(&["root", "username"], value);
-        assert_eq!(serde_json::to_value(result).unwrap(), serde_json::json!({
-            "bindingAuthority": "7", "requestId": "receive-descriptor",
-            "incomingKeys": ["[\"root\",\"username\"]"],
-            "progress": { "kind": "server", "cursor": "9", "writerId": null },
-            "receivedUnits": 1, "receiveFrontier": "12", "more": true,
-            "hasBodyReferences": false, "hasRepresentativeReferences": false,
-        }));
-    }
-
-    #[test]
-    fn descriptor_preserves_body_and_representative_hydration_decisions() {
-        for (key, body, representative) in [
-            (vec!["asset", "assets/synthetic.png"], true, true),
-            (vec!["inlay", "synthetic"], true, false),
-            (vec!["character", "character", "image"], false, true),
-            (vec!["character", "character", "trashTime"], false, true),
-            (vec!["exists", "character", "character"], false, true),
-            (vec!["archive", "character"], false, true),
-            (vec!["order", "characters"], false, true),
-            (vec!["character", "character", "name"], false, false),
-        ] {
-            let received = descriptor(&key, UnitValue::inline(b"null").unwrap());
-            assert_eq!((received.has_body_references, received.has_representative_references), (body, representative), "{key:?}");
-        }
-        for root in [false, true] {
-            let mut record = RecordDescriptor::content("a".repeat(64));
-            if root { record.relation_root = Some("b".repeat(64)); }
-            else { record.dependencies.push("b".repeat(64)); }
-            let object = UnitValue::Object { descriptor_hash: "c".repeat(64), descriptor: record };
-            assert!(descriptor(&["character", "character", "description"], object.clone()).has_body_references);
-            assert!(!descriptor(&["messages", "character", "conversation"], object).has_body_references);
-        }
-    }
 }

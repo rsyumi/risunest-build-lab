@@ -45,67 +45,6 @@ describe('device settings', () => {
         expect(getDeviceSettings()).toEqual(defaults)
     })
 
-    it('reads the native Ollama opt-in as off unless the stored value is exactly true', async () => {
-        const absent = await loadDeviceSettings()
-        expect(absent.getNativeOllamaGeneration()).toBe(false)
-
-        for (const stored of ['false', '', 'TRUE', '1', '{"enabled":true}']) {
-            localStorage.setItem('risuNestNativeOllamaGeneration', stored)
-            const device = await loadDeviceSettings()
-            expect(device.getNativeOllamaGeneration(), stored).toBe(false)
-        }
-    })
-
-    it('keeps the native Ollama opt-in across reloads outside the settings blob', async () => {
-        localStorage.setItem('risuNestDeviceSettings', JSON.stringify({ ...defaults, performanceProfile: 'low-spec' }))
-        const device = await loadDeviceSettings()
-        device.updateNativeOllamaGeneration(true)
-        await device.flushDeviceSettings()
-
-        const reloaded = await loadDeviceSettings()
-        expect(reloaded.getNativeOllamaGeneration()).toBe(true)
-        expect(reloaded.getDeviceSettings()).toEqual({ ...defaults, performanceProfile: 'low-spec' })
-        expect(JSON.parse(localStorage.getItem('risuNestDeviceSettings')!)).toEqual({ ...defaults, performanceProfile: 'low-spec' })
-
-        reloaded.updateNativeOllamaGeneration(false)
-        const off = await loadDeviceSettings()
-        expect(off.getNativeOllamaGeneration()).toBe(false)
-    })
-
-    it('reports a failed opt-in write without throwing and keeps the previous value', async () => {
-        const device = await loadDeviceSettings()
-        const { createNativeDeviceMarkers, DEVICE_MARKER_KEYS } = await import('./deviceMarkers')
-        const markers = createNativeDeviceMarkers({
-            get: async () => null, readMany: async () => [], set: async () => {}, patch: async () => {},
-        }, DEVICE_MARKER_KEYS.map(() => null))
-        device.loadDeviceSettings(markers)
-        vi.spyOn(markers, 'setItem').mockImplementation(() => { throw new Error('store unavailable') })
-        const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-        expect(device.updateNativeOllamaGeneration(true)).toBe(false)
-        expect(device.getNativeOllamaGeneration()).toBe(false)
-        expect(report).toHaveBeenCalledWith('A device setting could not be stored', expect.any(Error))
-    })
-
-    it('stores the native Ollama opt-in as its own device marker and leaves it when other settings change', async () => {
-        const device = await loadDeviceSettings()
-        const { createNativeDeviceMarkers, DEVICE_MARKER_KEYS } = await import('./deviceMarkers')
-        const set = vi.fn(async (_key: string, _value: unknown) => {})
-        device.loadDeviceSettings(createNativeDeviceMarkers({
-            get: async () => null, readMany: async () => [], set, patch: async () => {},
-        }, DEVICE_MARKER_KEYS.map(() => null)))
-
-        device.updateNativeOllamaGeneration(true)
-        await device.flushDeviceSettings()
-        expect(set).toHaveBeenCalledExactlyOnceWith('risuNestNativeOllamaGeneration', 'true')
-
-        set.mockClear()
-        device.updateDeviceSettings({ messageSendKey: 'button' })
-        await device.flushDeviceSettings()
-        expect(set.mock.calls.map(([key]) => key)).toEqual(['risuNestDeviceSettings'])
-        expect(device.getNativeOllamaGeneration()).toBe(true)
-    })
-
     it('preserves an explicitly disabled generation keep-alive after reload', async () => {
         const { updateDeviceSettings } = await loadDeviceSettings()
         updateDeviceSettings({ androidKeepAliveDuringGeneration: false })

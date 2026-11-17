@@ -4,9 +4,9 @@ import type { SyncExitDrainAdapter } from '../syncExitCoordinator'
 import type { RetainableReplacementFence } from '../retainableReplacementFence'
 import { isTauri } from 'src/ts/platform'
 import { createSyncBindingRecoveryRegistration, installSyncBindingFlow } from './bindingProduction'
-import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentStoredLwwReceive, flushPendingDataLocally, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
+import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentLwwReceive, flushPendingDataLocally, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
 import type { PersistentMutationToken } from '../saveCoordinator'
-import { RevisionConflictError, type LwwStoredReceive, type LwwApplyResult } from '../persistentDataStore'
+import { RevisionConflictError, type LwwStageReceive, type LwwRemoteChange } from '../persistentDataStore'
 import { beginDeferredMobileBackgroundTask, runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../../mobileBackgroundTask'
 import { isBackgroundExpiryReason } from '../../iosNative'
 import { fencePluginExecutionForAuthorityReplacement, invalidatePluginCachesAfterAuthorityReplacement, restartPluginsAfterAuthorityReplacement } from 'src/ts/plugins/apiV3/v3.svelte'
@@ -75,6 +75,10 @@ let activating: Promise<void> | undefined
 let startupIdentity = ''
 let initialReceive = true
 let startupFailure: unknown
+// Launch requests retry quickly until one of them fails after its retries; later attempts wait for the scheduler.
+let startupRetriesSpent = false
+// The outage outlasted a retry: a launch request's quick retries or the next automatic attempt.
+let outageConfirmed = false
 let error = ''
 let serverUnavailable = false
 const recordFailure = (value: unknown) => {
@@ -126,7 +130,8 @@ const changed = () => {
     if (offlineNoticePending || offlineNoticeClaimed || !isTauri || document.visibilityState === 'hidden'
         || binding || (!context && persistedBinding?.target.kind !== 'server')
         || getDatabase().risunestSyncStatusUi === false
-        || !error || !serverUnavailable) return
+        || !error || !serverUnavailable
+        || !outageConfirmed) return
     offlineNoticePending = true
     // Native state survives a WebView reload, including iOS content-process recovery.
     void invoke<boolean>('server_sync_claim_offline_notice').then(claimed => {
@@ -259,17 +264,40 @@ const checkResumedReceiveContext = (c: BindingContext) => {
     if (!context) throw new Error(error || 'Sync binding is unavailable')
     checkReceiveContext(c)
 }
+const startupRetryDelays = [1_000, 2_000]
+// A retry starts only this soon after the first attempt: a slow failure is reported at once, and a wait that ran late while the app was suspended ends the retries.
+const startupRetryWindow = 10_000
+// A server update, a rate limit and a spent retry budget keep their own waits.
+const retriesQuickly = (value: unknown) => isServerSyncUnavailable(value) && !['server-updating', 'sync-retry-budget-exhausted'].includes(serverSyncErrorCode(value))
+    && !(typeof value === 'object' && value !== null && 'status' in value && value.status === 429)
+/** Resolves false, without waiting further, once the binding it waits for is stopped or replaced. */
+function startupRetryWait(captured: BindingContext, delay: number): Promise<boolean> {
+    if (captured.signal.aborted) return Promise.resolve(false)
+    return new Promise(resolve => {
+        const stop = () => { clearTimeout(timer); resolve(false) }
+        const timer = setTimeout(() => { captured.signal.removeEventListener('abort', stop); resolve(captured === context) }, delay)
+        captured.signal.addEventListener('abort', stop, { once: true })
+    })
+}
 async function startupRequest<T>(captured: BindingContext, command: string, args: Record<string, unknown>): Promise<T> {
-    try {
-        const result = await invoke<T>(command, args)
-        if (captured === context) startupFailure = undefined
-        return result
-    } catch (value) {
-        if (captured === context && initialReceive) {
-            const activationReady = typeof value === 'object' && value !== null && 'startupLocalReady' in value && value.startupLocalReady === true
-            startupFailure = command !== 'server_sync_lww_activate' || activationReady ? value : undefined
+    const started = performance.now()
+    const withinWindow = (wait: number) => performance.now() + wait - started <= startupRetryWindow
+    for (let attempt = 0; ; attempt++) {
+        try {
+            const result = await invoke<T>(command, args)
+            if (captured === context) startupFailure = undefined
+            return result
+        } catch (value) {
+            const delay = startupRetryDelays[attempt]
+            if (args.startup === true && !startupRetriesSpent && delay !== undefined && retriesQuickly(value)
+                && withinWindow(delay) && await startupRetryWait(captured, delay) && withinWindow(0)) continue
+            if (captured === context && args.startup === true && isServerSyncUnavailable(value)) { startupRetriesSpent = true; outageConfirmed = true }
+            if (captured === context && initialReceive) {
+                const activationReady = typeof value === 'object' && value !== null && 'startupLocalReady' in value && value.startupLocalReady === true
+                startupFailure = command !== 'server_sync_lww_activate' || activationReady ? value : undefined
+            }
+            throw value
         }
-        throw value
     }
 }
 function canStartPluginsOffline(value: unknown): boolean {
@@ -294,19 +322,26 @@ async function ensureActivated(captured: BindingContext): Promise<void> {
     await activating
     checkContext(captured)
 }
-interface ServerReceiveDescriptor extends LwwStoredReceive {
-    progress: { kind: 'server'; cursor: string }
-    receivedUnits: number
-    receiveFrontier?: string | null
-    more: boolean
-    hasBodyReferences: boolean
-    hasRepresentativeReferences: boolean
-}
+const receivedBodyReferences = (changes: LwwRemoteChange[]) => changes.some(change => {
+    const key: string[] = JSON.parse(change.key)
+    if (change.value.kind === 'inline') return key[0] === 'asset' || key[0] === 'inlay'
+    if (change.value.kind !== 'object' || key[0] === 'messages') return false
+    const descriptor = change.value.descriptor as { dependencies?: unknown[]; dependencyRoot?: unknown; relationRoot?: unknown }
+    return !!descriptor.dependencies?.length || !!descriptor.dependencyRoot || !!descriptor.relationRoot
+})
+const receivedRepresentativeReferences = (changes: LwwRemoteChange[]) => changes.some(change => {
+    const key: string[] = JSON.parse(change.key)
+    return key[0] === 'character' && (key[2] === 'image' || key[2] === 'trashTime')
+        || key[0] === 'exists' && key[1] === 'character'
+        || key[0] === 'archive' || key[0] === 'asset'
+        || key[0] === 'order' && key[1] === 'characters'
+})
 /** `continuation` lets hydration that a received page triggered start or continue while hidden. */
 function continueHydration(continuation = false): void {
     if ((!hydrationPending && !representativesPending) || !(foreground || continuation && continuing) || !context || context.signal.aborted || scheduler.isBlocked() || scheduler.isWaiting() || isLibraryFileOperationReserved()) return
     if (hydrating) { hydrationAgain = true; return }
     const captured = context
+    const epoch = scheduler.epoch()
     const representativesOnly = !hydrationPending
     hydrationPending = false
     representativesPending = false
@@ -321,7 +356,7 @@ function continueHydration(continuation = false): void {
         else hydrationPending = true
         if (serverSyncErrorCode(value) !== 'cancelled' && active() && !scheduler.isBlocked()) {
             recordFailure(value); hydrationError = error
-            if (isServerSyncUnavailable(value)) scheduler.reportFailure(value)
+            if (isServerSyncUnavailable(value)) scheduler.reportFailure(value, undefined, epoch)
         }
     }).finally(() => {
         hydrating = undefined
@@ -406,22 +441,22 @@ const scheduler = createServerSyncScheduler({
         for (;;) {
             captured.signal.throwIfAborted()
             if (captured !== context) throw new Error('Sync binding changed')
-            const request = await during('downloading', () => startupRequest<ServerReceiveDescriptor>(captured, 'server_sync_lww_pull', { request: header(), startup: initialReceive }))
-            receiveFrontier ??= request.receiveFrontier ?? undefined
+            const request = await during('downloading', () => startupRequest<LwwStageReceive & { receiveFrontier?: string; more?: boolean }>(captured, 'server_sync_lww_pull', { request: header(), startup: initialReceive }))
+            receiveFrontier ??= request.receiveFrontier
             captured.signal.throwIfAborted()
             checkContext(captured)
             initialReceive = false
             // A page is applied under the stage that received it, so reading many pages shows one stage.
-            try { await during('downloading', () => applyPersistentStoredLwwReceive(request, applied => invoke<LwwApplyResult>('server_sync_lww_apply_receive', { request: applied }))) }
+            try { await during('downloading', () => applyPersistentLwwReceive(request)) }
             catch (value) { throw localApplyFailure(value) }
             checkContext(captured)
-            if (request.hasBodyReferences) { receivedBodies = true; hydrationPending = true }
-            if (status.assetPolicy === 'remote' && request.hasRepresentativeReferences) { receivedBodies = true; representativesPending = true }
+            if (receivedBodyReferences(request.changes)) { receivedBodies = true; hydrationPending = true }
+            if (status.assetPolicy === 'remote' && receivedRepresentativeReferences(request.changes)) { receivedBodies = true; representativesPending = true }
             if ((!active() || isLibraryFileOperationReserved()) && !completeAvailable) break
             await invoke('server_sync_lww_ack', { request: { bindingAuthority: request.bindingAuthority, requestId: request.requestId } })
             checkContext(captured)
             if (request.more === false || (receiveFrontier !== undefined && BigInt(request.progress.cursor) >= BigInt(receiveFrontier))
-                || (request.more === undefined && request.receivedUnits === 0)) { notifySyncReceiveCompleted(); break }
+                || (request.more === undefined && request.changes.length === 0)) { notifySyncReceiveCompleted(); break }
         }
         if (receivedBodies) continueHydration(true)
     }),
@@ -444,8 +479,8 @@ const scheduler = createServerSyncScheduler({
     connect: async operationId => { if (context) { await ensureActivated(context); await invoke('server_sync_notify_start', { request: header(), operationId }) } },
     disconnect: async () => { await invoke('server_sync_notify_stop'); await invoke('server_sync_cancel') },
     stopNotifications: async () => { await invoke('server_sync_notify_stop') },
-    failed(value) { recordFailure(value); changed() },
-    recovered() { if (error && error !== hydrationError) { error = ''; changed() }; continueHydration() },
+    failed(value, retried) { if (retried) outageConfirmed = true; recordFailure(value); changed() },
+    recovered() { outageConfirmed = false; if (error && error !== hydrationError) { error = ''; changed() }; continueHydration() },
     retrying: continueHydration,
     activity() { settleAttempt(); changed() },
 })
@@ -460,9 +495,9 @@ async function keepAssetsRemote(c: BindingContext): Promise<void> {
 // Scheduler blocks and errors belong to one binding authority and never carry over to another.
 const adoptSchedulerAuthority = (c: BindingContext) => {
     const identity = bindingIdentity(c.state)
-    if (startupIdentity !== identity) { startupIdentity = identity; initialReceive = true; startupFailure = undefined }
+    if (startupIdentity !== identity) { startupIdentity = identity; initialReceive = true; startupFailure = undefined; startupRetriesSpent = false; outageConfirmed = false }
     if (schedulerAuthority === c.state.targetAuthority) return
-    scheduler.reset(); error = ''; hydrationError = ''; schedulerAuthority = c.state.targetAuthority
+    scheduler.reset(); error = ''; hydrationError = ''; outageConfirmed = false; schedulerAuthority = c.state.targetAuthority
 }
 const transport: SyncBindingTransport = {
     heldForCommittedRestore: () => heldForCommittedRestore,

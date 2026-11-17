@@ -6,7 +6,7 @@
     import type { AssetSection } from "src/ts/gallery/assetGallery";
     let galleryOwner = $state<{ id: string; section: AssetSection } | null>(null)
     import { language } from "../../lang";
-    import { tokenizeAccurateList } from "../../ts/tokenizer";
+    import { tokenizeAccurate } from "../../ts/tokenizer";
     import { getCurrentCharacter, type character } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { untrack } from 'svelte';
@@ -69,26 +69,18 @@
         firstMsg: string | null,
         localNote: string
     ) {
-        const fields: ('desc' | 'firstMsg' | 'localNote')[] = []
         if (desc !== null && lasttokens.desc !== desc) {
             lasttokens.desc = desc
-            fields.push('desc')
+            tokens.desc = await tokenizeAccurate(desc)
         }
         if (firstMsg !== null && lasttokens.firstMsg !== firstMsg) {
             lasttokens.firstMsg = firstMsg
-            fields.push('firstMsg')
+            tokens.firstMsg = await tokenizeAccurate(firstMsg)
         }
         if (lasttokens.localNote !== localNote) {
             lasttokens.localNote = localNote
-            fields.push('localNote')
+            tokens.localNote = await tokenizeAccurate(localNote)
         }
-        if (fields.length === 0) return
-        const texts = fields.map((field) => lasttokens[field])
-        const counts = await tokenizeAccurateList(texts)
-        // A count that resolves after a newer text for the same field is dropped.
-        fields.forEach((field, index) => {
-            if (lasttokens[field] === texts[index]) tokens[field] = counts[index]
-        })
     }
 
 

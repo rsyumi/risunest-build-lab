@@ -26,7 +26,7 @@ vi.mock('./modules', async (importOriginal) => ({
     ...await importOriginal<typeof import('./modules')>(),
     getModuleTriggers: () => [],
 }))
-vi.mock('../tokenizer', async () => (await import('./tests/scriptingsTestHarness')).tokenizerModule({ tokenize: vi.fn(async () => 0) }))
+vi.mock('../tokenizer', () => ({ tokenize: vi.fn(async () => 0) }))
 vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
 vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))
@@ -35,7 +35,6 @@ vi.mock('./files/inlays', () => ({ writeInlayImage: vi.fn() }))
 vi.mock('./memory/hypamemory', async () => (await import('./tests/scriptingsTestHarness')).hypamemoryModule())
 
 const { runTrigger } = await import('./triggers')
-const { encodeCounts } = await import('../tokenizer')
 const { requestChatData } = await import('./request/request')
 const { generateAIImage } = await import('./stableDiff')
 const { HypaProcesser } = await import('./memory/hypamemory')
@@ -961,32 +960,4 @@ test('pins display history for the full awaited trigger lifetime', async () => {
     expect(session.pinCount('compatibility')).toBe(1)
     await pending
     expect(session.pinCount('compatibility')).toBe(0)
-})
-
-test('counts the system prompts together', async () => {
-    const { chat, char, session } = fixture()
-    char.triggerscript[0].type = 'display'
-    char.triggerscript[0].effect = [
-        { type: 'v2Comment', value: '' },
-    ] as never
-    runtime.session = session
-    DBState.db = {
-        characters: [char],
-        templateDefaultVariables: '',
-    } as never
-    vi.mocked(encodeCounts).mockClear().mockImplementationOnce(async (texts) => texts.map((text) => text.length))
-
-    const result = await runTrigger(char, 'display', {
-        chat,
-        displayMode: true,
-        displayData: 'display',
-        additonalSysPrompt: {
-            start: 'opening',
-            historyend: '',
-            promptend: 'closing note',
-        },
-    })
-
-    expect(vi.mocked(encodeCounts).mock.calls).toEqual([[['opening', 'closing note']]])
-    expect(result?.tokens).toBe(19)
 })

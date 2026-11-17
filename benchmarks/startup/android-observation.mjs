@@ -1,60 +1,31 @@
+// Android observes build-only call sites because the native bridge is immutable.
+export const androidObservation = `(() => {
+    window.__startupObserveCall = function(command, invoke) {
+        if (!['pds_open','pds_read_root','pds_read_revision','pds_materialize','pds_commit','pds_replace_commit'].includes(command)) return invoke();
+        const entry = {command, start: performance.now(), ms: null, success: false, bytes: null};
+        window.__startupMetrics.calls.push(entry);
+        window.__startupBegin?.(command);
+        let promise;
+        try { promise = invoke(); } catch (error) {
+            entry.ms = performance.now() - entry.start;
+            window.__startupRecord?.(command, entry.start, false);
+            throw error;
+        }
+        promise.then(result => {
+            entry.ms = performance.now() - entry.start; entry.success = true;
+            window.__startupRecord?.(command, entry.start, true);
+            if (command === 'pds_open' && window.__startupMetrics.firstRevision === null)
+                window.__startupMetrics.firstRevision = result.revision;
+        }, () => {
+            entry.ms = performance.now() - entry.start;
+            window.__startupRecord?.(command, entry.start, false);
+        });
+        return promise;
+    };
+})()`
 import { instrumentation } from './cdp.mjs'
-import { IPC_COMMANDS, sanitizeObservationManifest } from './metrics.mjs'
 
-export function invocationObservation(manifest) {
-    const verified = sanitizeObservationManifest(manifest)
-    if (!verified) throw new Error('Invalid startup invocation observation manifest')
-    return `(() => {
-        const state = window.__startupMetrics;
-        state.ipcObservation = ${JSON.stringify(verified)};
-        state.observerFailure = null;
-        const commands = new Set(${JSON.stringify(IPC_COMMANDS)});
-        const safely = action => {
-            try { return action(); } catch { state.observerFailure = 'recording-failed'; }
-        };
-        const observe = (command, invoke, operation) => {
-            if (!operation && !commands.has(command)) return invoke();
-            const start = performance.now();
-            let entry;
-            safely(() => {
-                if (!operation) {
-                    if (state.calls.length >= 10000) throw new Error('Observation limit');
-                    entry = {command, start, ms: null, success: false, bytes: null};
-                    state.calls.push(entry);
-                    if (command === 'asset_cas_read_bytes') {
-                        state.mediaInFlight++;
-                        state.maxMediaInFlight = Math.max(state.maxMediaInFlight, state.mediaInFlight);
-                    }
-                }
-                window.__startupBegin(command);
-            });
-            const finish = (success, result) => safely(() => {
-                if (entry) {
-                    entry.ms = performance.now() - start;
-                    entry.success = success;
-                    if (command === 'asset_cas_read_bytes') state.mediaInFlight--;
-                    if (success && command === 'pds_open' && state.firstRevision === null
-                        && Number.isSafeInteger(result?.revision)) state.firstRevision = result.revision;
-                }
-                window.__startupRecord(command, start, success);
-            });
-            let promise;
-            try { promise = invoke(); } catch (error) { finish(false); throw error; }
-            if (!promise || typeof promise.then !== 'function') { finish(true, promise); return promise; }
-            try {
-                promise.then(value => { finish(true, value); }, () => { finish(false); })
-                    .catch(() => { state.observerFailure = 'recording-failed'; });
-            } catch { state.observerFailure = 'recording-failed'; }
-            return promise;
-        };
-        window.__startupObserveCall = (command, invoke) => observe(command, invoke, false);
-        window.__startupObserveOperation = (stage, invoke) => observe(stage, invoke, true);
-    })()`
-}
-
-export function startupInstrumentation(platform, diagnosticStages = false, manifest) {
-    if (manifest?.platform !== platform || manifest.diagnosticStages !== diagnosticStages)
-        throw new Error('Startup observer platform or diagnostic option mismatch')
+export function startupInstrumentation(platform, diagnosticStages = false) {
     const diagnostics = `;(() => {
         const seen = new Set();
         for (const hook of ['__startupBegin', '__startupRecord']) {
@@ -74,7 +45,7 @@ export function startupInstrumentation(platform, diagnosticStages = false, manif
     return (
         instrumentation +
         ';' +
-        invocationObservation(manifest) +
+        (platform === 'android' ? androidObservation : '') +
         (diagnosticStages ? diagnostics : '')
     )
 }

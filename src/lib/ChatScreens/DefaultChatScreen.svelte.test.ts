@@ -118,7 +118,6 @@ it('sends plain input through the bounded controller without complete-history ac
     send()
     await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
     expect(mocks.appended).toEqual([expect.objectContaining({ role: 'user', data: 'Bounded submitted text' })])
-    expect(mocks.generate.mock.calls[0][0]).toMatchObject({ nativeIntent: 'ordinary', continue: false })
     expect(mocks.acquireComplete).not.toHaveBeenCalled()
     expect(mocks.trigger).not.toHaveBeenCalled()
     expect(mocks.flush).toHaveBeenCalledWith('generation-input')

@@ -62,7 +62,7 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     withPausedPersistentWrites: f.paused,
     beginActivatedLibraryGuard: f.guard,
     refreshActivatedLibraryUnderPause: f.refresh,
-    applyPersistentStoredLwwReceive: f.apply,
+    applyPersistentLwwReceive: f.apply,
     flushPendingDataLocally: f.flush,
     getPersistentDataRuntime: () => f.runtime,
 }))
@@ -93,7 +93,7 @@ beforeEach(async () => {
     production = await import('./serverSyncProduction')
 })
 afterEach(() => { production.disposeNativeSyncBindings(); vi.useRealTimers(); vi.unstubAllGlobals() })
-const emptyReceive = () => ({ bindingAuthority: '0', requestId: 'empty', incomingKeys: [], receivedUnits: 0, progress: { kind: 'server', cursor: '0' }, more: false, hasBodyReferences: false, hasRepresentativeReferences: false })
+const emptyReceive = () => ({ bindingAuthority: '0', requestId: 'empty', changes: [], progress: { kind: 'server', cursor: '0' }, admittedTimeUpperMs: '0' })
 const bindingContext = () => ({ state: { target: { kind: 'server' as const, connectionId: 'server' }, targetAuthority: '0', selectionEpoch: '0', libraryId: 'library', progress: null }, signal: new AbortController().signal })
 const visible = (value: boolean) => { Object.defineProperty(document, 'visibilityState', { value: value ? 'visible' : 'hidden', configurable: true }); document.dispatchEvent(new Event('visibilitychange')) }
 const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
@@ -101,6 +101,16 @@ const hydrationCalls = () => f.invoke.mock.calls.filter(([command]) => command =
 const pullCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pull').length
 const openConversation = (conversationId: string) => { f.conversation = { characterId: 'selected-stable-id', conversationId }; f.viewport!({}) }
 const callOrder = (command: string) => f.invoke.mock.invocationCallOrder[f.invoke.mock.calls.findIndex(([name]) => name === command)]
+const activations = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_activate').length
+// A launch request retries after 1 s and then 2 s before an unavailable failure counts.
+const launchRetries = 3_000
+async function afterLaunchRetries<T>(operation: Promise<T>): Promise<T> {
+    const settled = operation.then(value => ({ value }), (error: unknown) => ({ error }))
+    await vi.advanceTimersByTimeAsync(launchRetries)
+    const result = await settled
+    if ('error' in result) throw result.error
+    return result.value
+}
 
 async function pluginStartup() {
     const { createPluginStartupGate } = await import('../../plugins/pluginStartupGate')
@@ -110,7 +120,7 @@ async function pluginStartup() {
             receive: signal => f.transport!.preparePluginStartup!({...bindingContext(), signal}) }),
         start: async () => { if (await gate.ensure()) starts++ },
     })
-    await gate.ensure(); await settle()
+    await afterLaunchRetries(gate.ensure()); await settle()
     return { gate, starts: () => starts }
 }
 
@@ -123,7 +133,7 @@ describe('production server LWW composition', () => {
             if (command === failedCommand && offline) throw { code: 'server-unreachable', status: 503, retryable: true, startupLocalReady: true }
             return base(command, args)
         })
-        await f.transport!.resumeBinding(bindingContext())
+        await afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))
         const startup = await pluginStartup()
         expect(startup.starts()).toBe(1)
         expect(startup.gate.refuse()).toBe(false)
@@ -132,7 +142,7 @@ describe('production server LWW composition', () => {
         await expect(f.transport!.receiveAvailableChanges!(bindingContext())).rejects.toMatchObject({code: 'server-unreachable'})
         offline = false
         await f.transport!.receiveAvailableChanges!(bindingContext())
-        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '0'}}), expect.any(Function))
+        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '0'}}))
         expect(startup.starts()).toBe(1)
     })
     it.each([
@@ -166,7 +176,7 @@ describe('production server LWW composition', () => {
             if (command === 'server_sync_lww_activate') throw {code: 'server-unreachable', status: 503, retryable: true, startupLocalReady}
             return base(command, args)
         })
-        await f.transport!.resumeBinding(bindingContext())
+        await afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))
         const startup = await pluginStartup()
         expect(startup.starts()).toBe(0)
         expect(startup.gate.refuse()).toBe(true)
@@ -186,7 +196,7 @@ describe('production server LWW composition', () => {
             if (command === failedCommand) throw {...failure, retryable: true, startupLocalReady: true}
             return base(command, args)
         })
-        await f.transport!.resumeBinding(bindingContext())
+        await afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))
         expect((await pluginStartup()).starts()).toBe(1)
         expect(f.invoke).toHaveBeenCalledWith(failedCommand, expect.objectContaining({startup: true}))
     })
@@ -202,7 +212,7 @@ describe('production server LWW composition', () => {
             return {...emptyReceive(), more: true, receiveFrontier: '2', progress: {kind: 'server', cursor: '1'}}
         })
         const startup = await pluginStartup()
-        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '1'}}), expect.any(Function))
+        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '1'}}))
         expect(startup.starts()).toBe(0)
         expect(startup.gate.refuse()).toBe(true)
     })
@@ -239,7 +249,10 @@ describe('production server LWW composition', () => {
         expect(f.alert).not.toHaveBeenCalled()
         expect(f.invoke.mock.calls.some(([name]) => name === 'server_sync_claim_offline_notice')).toBe(false)
         failure = { code: 'server-unreachable', retryable: true }
-        await vi.advanceTimersByTimeAsync(5000)
+        // The receive 5 s later is still the launch receive, so it retries before the outage counts.
+        await vi.advanceTimersByTimeAsync(5000 + launchRetries - 1)
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1)
         expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
     })
     it.each([false, true])('retries an offline startup activation before allowing any transfer after the server returns (manual retry: %s)', async manualRetry => {
@@ -251,14 +264,15 @@ describe('production server LWW composition', () => {
             if (command === 'pds_lww_binding_state') return bindingContext().state
             return base(command, args)
         })
-        visible(true); await expect(f.transport!.resumeBinding(bindingContext())).resolves.toBeUndefined(); await settle()
+        visible(true); await expect(afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))).resolves.toBeUndefined(); await settle()
         const transfers = () => f.invoke.mock.calls.filter(([name]) => ['server_sync_lww_push', 'server_sync_lww_pull', 'server_sync_lww_hydrate', 'server_sync_notify_start'].includes(name))
         expect(transfers()).toEqual([])
         if (manualRetry) await expect(production.retryServerSync()).rejects.toMatchObject({ code: 'server-unreachable' })
         openConversation('offline'); f.revision!(1, 'generation-complete'); await settle()
         await vi.advanceTimersByTimeAsync(5000)
         expect(transfers()).toEqual([])
-        expect(f.invoke.mock.calls.filter(([name]) => name === 'server_sync_lww_activate')).toHaveLength(manualRetry ? 3 : 2)
+        // Three launch attempts, then one each for the manual and the scheduled retry.
+        expect(activations()).toBe(manualRetry ? 5 : 4)
         offline = false
         await vi.advanceTimersByTimeAsync(9999); expect(transfers()).toEqual([])
         await vi.advanceTimersByTimeAsync(1); await settle()
@@ -273,7 +287,7 @@ describe('production server LWW composition', () => {
             if (command === 'server_sync_lww_activate') throw { code, retryable: code === 'server-unreachable' }
             return base(command, args)
         })
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        visible(true); await afterLaunchRetries(f.transport!.resumeBinding(bindingContext())); await settle()
         code = 'server-epoch-changed'
         await vi.advanceTimersByTimeAsync(5000)
         expect(production.getServerSyncController().snapshot().blockedCode).toBe(code)
@@ -292,7 +306,7 @@ describe('production server LWW composition', () => {
             if (command === 'server_sync_lww_pull' && offline) throw { code: 'server-unreachable', retryable: true }
             return base(command, args)
         })
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        visible(true); await afterLaunchRetries(f.transport!.resumeBinding(bindingContext())); await settle()
         expect(f.alert).not.toHaveBeenCalled()
         expect(f.invoke.mock.calls.some(([name]) => name === 'server_sync_claim_offline_notice')).toBe(false)
         f.database.risunestSyncStatusUi = true
@@ -303,6 +317,132 @@ describe('production server LWW composition', () => {
         visible(false); await settle(); visible(true); await settle()
         await vi.advanceTimersByTimeAsync(20000)
         expect(f.alert).toHaveBeenCalledTimes(claimed ? 1 : 0)
+    })
+    it.each([false, true])('retries the launch activation after 1 s and then 2 s before an outage counts (server stays down: %s)', async down => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        let failures = down ? Infinity : 2
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_claim_offline_notice') return true
+            if (command === 'server_sync_lww_activate' && failures > 0) { failures--; throw { code: 'server-unreachable', status: 503, retryable: true } }
+            return base(command, args)
+        })
+        visible(true)
+        const resumed = f.transport!.resumeBinding(bindingContext())
+        await vi.advanceTimersByTimeAsync(999); expect(activations()).toBe(1)
+        await vi.advanceTimersByTimeAsync(1); expect(activations()).toBe(2)
+        await vi.advanceTimersByTimeAsync(1999); expect(activations()).toBe(2)
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1); await resumed; await settle()
+        expect(activations()).toBe(3)
+        if (!down) {
+            expect(f.alert).not.toHaveBeenCalled()
+            expect(production.getServerSyncController().snapshot().error).toBe('')
+            expect(pullCalls()).toBeGreaterThan(0)
+            return
+        }
+        expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
+        expect(pullCalls()).toBe(0)
+        // Later launch attempts follow the scheduler's delays without quick retries.
+        await vi.advanceTimersByTimeAsync(5000)
+        expect(activations()).toBe(4)
+    })
+    it.each([
+        { slow: 8_500, attempts: 2 },
+        // A failure that took the whole connect timeout is reported as it is.
+        { slow: 10_000, attempts: 1 },
+    ])('retries a slow launch failure only while the retry starts within 10 s ($slow ms)', async ({ slow, attempts }) => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        let first = true
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command !== 'server_sync_lww_activate') return base(command, args)
+            if (first) { first = false; await new Promise(resolve => setTimeout(resolve, slow)) }
+            throw { code: 'server-timeout', status: 503, retryable: true }
+        })
+        let reported = false
+        const resumed = f.transport!.resumeBinding(bindingContext()).then(() => { reported = true })
+        // The failure is reported once no retry can start within the window, without waiting for one.
+        await vi.advanceTimersByTimeAsync(slow + 1000 * (attempts - 1)); await settle()
+        expect(reported).toBe(true)
+        await resumed
+        expect(activations()).toBe(attempts)
+    })
+    it('does not retry a launch request when its wait ends after the 10 s window', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_activate') throw { code: 'server-unreachable', status: 503, retryable: true }
+            return base(command, args)
+        })
+        const resumed = f.transport!.resumeBinding(bindingContext())
+        await vi.advanceTimersByTimeAsync(500)
+        // The app is suspended while the first retry waits, so its timer fires late.
+        vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 60_000)
+        await vi.advanceTimersByTimeAsync(500); await resumed
+        expect(activations()).toBe(1)
+    })
+    it('stops retrying a launch request once its binding is stopped', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_activate') throw { code: 'server-unreachable', status: 503, retryable: true }
+            return base(command, args)
+        })
+        const stopped = new AbortController()
+        const resumed = f.transport!.resumeBinding({ ...bindingContext(), signal: stopped.signal }).catch(() => {})
+        await vi.advanceTimersByTimeAsync(500); stopped.abort()
+        await vi.advanceTimersByTimeAsync(10_000); await resumed
+        expect(activations()).toBe(1)
+    })
+    it('shows the offline notice during use only once the next automatic retry also fails', async () => {
+        f.database.risunestSyncStatusUi = false
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        let offline = true, slow = false, connects = 0
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_claim_offline_notice') return true
+            if (offline && ['server_sync_lww_activate', 'server_sync_lww_pull', 'server_sync_notify_start'].includes(command)) {
+                // While slow, a receive fails after 6 s and every connect after the first after 2 s.
+                if (slow && (command === 'server_sync_lww_pull' || connects++ > 0)) await new Promise(resolve => setTimeout(resolve, command === 'server_sync_lww_pull' ? 6000 : 2000))
+                throw { code: 'server-unreachable', status: 503, retryable: true }
+            }
+            return base(command, args)
+        })
+        // A launch outage passes while the notice is off.
+        visible(true); await afterLaunchRetries(f.transport!.resumeBinding(bindingContext())); await settle()
+        offline = false; await vi.advanceTimersByTimeAsync(5000); await settle()
+        expect(production.getServerSyncController().snapshot().error).toBe('')
+        f.database.risunestSyncStatusUi = true
+        // A failure during use shows in the status at once; the notice waits for the next automatic retry.
+        offline = true; visible(false); await settle(); visible(true); await settle()
+        expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
+        expect(f.alert).not.toHaveBeenCalled()
+        offline = false; await vi.advanceTimersByTimeAsync(5000); await settle()
+        expect(production.getServerSyncController().snapshot().error).toBe('')
+        expect(f.alert).not.toHaveBeenCalled()
+        // A receive that began before the outage and fails after the retry started is not the retry failing.
+        offline = true; slow = true; visible(false); await settle(); visible(true); await settle()
+        await vi.advanceTimersByTimeAsync(6000)
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
+    })
+    it('shows the offline notice during use once the automatic asset download retry also fails', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_claim_offline_notice') return true
+            if (command === 'server_sync_lww_hydrate') throw { code: 'server-unreachable', status: 503, retryable: true }
+            // The receive takes a moment, so the retried download fails before it succeeds.
+            if (command === 'server_sync_lww_pull') { await new Promise(resolve => setTimeout(resolve, 100)); return emptyReceive() }
+            return base(command, args)
+        })
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(5_100)
+        expect(hydrationCalls()).toHaveLength(2)
+        expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
     })
     it('keeps startup closed across an empty intermediate page and projection, then stops at the first frontier', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -621,7 +761,7 @@ describe('production server LWW composition', () => {
         f.invoke.mockImplementation(async command => {
             if (command === 'server_sync_lww_hydrate') return new Promise<void>(resolve => { finish = resolve })
             if (command === 'server_sync_lww_pull') {
-                if (assetPage) { assetPage = false; return { ...emptyReceive(), requestId: 'asset-page', incomingKeys: [JSON.stringify(['asset', 'assets/new.png'])], receivedUnits: 1, hasBodyReferences: true, hasRepresentativeReferences: true } }
+                if (assetPage) { assetPage = false; return { ...emptyReceive(), requestId: 'asset-page', changes: [{ key: JSON.stringify(['asset', 'assets/new.png']), stamp: { physicalMs: '0', logical: '0', writerId: 'writer' }, value: { kind: 'inline', bytes: 'e30=' } }] } }
                 return emptyReceive()
             }
             return null
@@ -639,7 +779,7 @@ describe('production server LWW composition', () => {
         await production.receiveAvailableServerChanges(); await settle(); expect(hydrationCalls()).toHaveLength(0)
         let messagePage = true
         f.invoke.mockImplementation(async command => {
-            if (command === 'server_sync_lww_pull' && messagePage) { messagePage = false; return { ...emptyReceive(), requestId: 'messages', incomingKeys: [JSON.stringify(['messages', 'character', 'conversation'])], receivedUnits: 1 } }
+            if (command === 'server_sync_lww_pull' && messagePage) { messagePage = false; return { ...emptyReceive(), requestId: 'messages', changes: [{ key: JSON.stringify(['messages', 'character', 'conversation']), stamp: { physicalMs: '0', logical: '0', writerId: 'writer' }, value: { kind: 'object', descriptorHash: 'control', descriptor: { dependencies: ['page-control'] } } }] } }
             return command === 'server_sync_lww_pull' ? emptyReceive() : null
         })
         await production.receiveAvailableServerChanges(); await settle(); expect(hydrationCalls()).toHaveLength(0)
@@ -651,7 +791,7 @@ describe('production server LWW composition', () => {
         { key: ['archive', 'first'], value: { kind: 'deleted' } },
         { key: ['order', 'characters'], value: { kind: 'inline', bytes: btoa(JSON.stringify([{ id: 'folder', imgFile: 'assets/folder.png', data: [] }])) } },
     ]
-    const receiveUnder = async (assetPolicy: string, key: string[]) => {
+    const receiveUnder = async (assetPolicy: string, key: string[], value: unknown) => {
         const base = f.invoke.getMockImplementation()!
         f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
             ? { configured: true, writerId: 'writer', bindingAuthority: '0', assetPolicy } : base(command, args))
@@ -661,20 +801,20 @@ describe('production server LWW composition', () => {
         f.invoke.mockImplementation(async command => {
             if (command === 'server_sync_lww_pull' && page) {
                 page = false
-                return { ...emptyReceive(), incomingKeys: [JSON.stringify(key)], receivedUnits: 1, hasRepresentativeReferences: true }
+                return { ...emptyReceive(), changes: [{ key: JSON.stringify(key), value }] }
             }
             return command === 'server_sync_lww_pull' ? emptyReceive() : null
         })
         await production.receiveAvailableServerChanges(); await settle()
     }
-    it.each(representativeChanges)('refreshes representatives after receiving $key without downloading the full inventory', async ({ key }) => {
-        await receiveUnder('remote', key)
+    it.each(representativeChanges)('refreshes representatives after receiving $key without downloading the full inventory', async ({ key, value }) => {
+        await receiveUnder('remote', key, value)
         expect(hydrationCalls()).toEqual([['server_sync_lww_hydrate', {
             request: expect.objectContaining({ bindingAuthority: '0' }), selectedCharacterId: 'selected-stable-id', representativesOnly: true,
         }]])
     })
-    it.each(representativeChanges)('asks nothing of a device that keeps every asset after receiving $key', async ({ key }) => {
-        await receiveUnder('full', key)
+    it.each(representativeChanges)('asks nothing of a device that keeps every asset after receiving $key', async ({ key, value }) => {
+        await receiveUnder('full', key, value)
         expect(hydrationCalls()).toHaveLength(0)
     })
     it('sends updated list order to representative hydration without a library save', async () => {
@@ -881,7 +1021,7 @@ describe('production server LWW composition', () => {
         let complete!: () => void
         f.apply.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
         f.invoke.mockImplementation(async command => command === 'server_sync_lww_pull'
-            ? { bindingAuthority: '0', requestId: 'received-page', incomingKeys: [], receivedUnits: 0, progress: { kind: 'server', cursor: '0' }, more: false, hasBodyReferences: false, hasRepresentativeReferences: false }
+            ? { bindingAuthority: '0', requestId: 'received-page', changes: [], progress: { kind: 'server', cursor: '0' }, admittedTimeUpperMs: '0' }
             : null)
         const received = production.receiveAvailableServerChanges()
         await vi.advanceTimersByTimeAsync(0)
@@ -1513,7 +1653,7 @@ describe('server sync progress', () => {
         Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
         const pages: Array<() => void> = []
         let served = 0, reads = 0
-        const page = (index: number) => ({ bindingAuthority: '0', requestId: `page-${index}`, incomingKeys: index < 3 ? [JSON.stringify(['root', `key-${index}`])] : [], receivedUnits: index < 3 ? 1 : 0, progress: { kind: 'server', cursor: String(index) }, more: index < 3, hasBodyReferences: false, hasRepresentativeReferences: false })
+        const page = (index: number) => ({ bindingAuthority: '0', requestId: `page-${index}`, changes: index < 3 ? [{ key: JSON.stringify(['root', `key-${index}`]), value: { kind: 'inline' } }] : [], progress: { kind: 'server', cursor: String(index) }, admittedTimeUpperMs: '0' })
         f.invoke.mockImplementation(async command => {
             if (command === 'server_sync_lww_pull') { const index = served++; return index < 3 ? new Promise(resolve => pages.push(() => resolve(page(index)))) : page(index) }
             // Each read reports more of a receive whose backlog is known.
@@ -1629,10 +1769,14 @@ describe('server sync progress', () => {
     it.each(['resumeBinding', 'resumeNewDeviceBinding'] as const)('clears progress after %s activation fails without recording a successful sync', async method => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         const failure = { code: 'server-unreachable', retryable: true }
-        f.invoke.mockRejectedValueOnce(failure)
-        const pending = method === 'resumeBinding'
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command.startsWith('server_sync_lww_activate')) throw failure
+            return base(command, args)
+        })
+        const pending = afterLaunchRetries(method === 'resumeBinding'
             ? f.transport!.resumeBinding(bindingContext())
-            : f.transport!.resumeNewDeviceBinding!({ authorizationId: 'authorization', writerId: 'writer' }, { revision: 1, writerId: 'writer', bindingAuthority: '0' }, bindingContext())
+            : f.transport!.resumeNewDeviceBinding!({ authorizationId: 'authorization', writerId: 'writer' }, { revision: 1, writerId: 'writer', bindingAuthority: '0' }, bindingContext()))
         if (method === 'resumeBinding') await expect(pending).resolves.toBeUndefined()
         else await expect(pending).rejects.toBe(failure)
         f.transport!.reportStopped!(failure)

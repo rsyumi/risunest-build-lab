@@ -68,11 +68,10 @@ function spoolFailures(failures: readonly AndroidSpoolFailure[]) {
     }))
 }
 
-/** The JSON converter destination of an opened spool, or null when `importPrepared` decides, as for a preset. */
+/** The JSON converter destination of an opened spool, or null when the native classifier decides. */
 export function androidSpoolReplayDestination(
     source: AndroidSpoolReady,
 ): 'character' | 'module' | 'auto' | null {
-    if (source.importDestination === 'preset') return null
     return source.importDestination
         ?? (/\.lorebook$/i.test(source.displayName) ? 'module'
             : /\.json$/i.test(source.displayName) ? 'auto' : null)

@@ -36,7 +36,6 @@ const leaseMembers = {
 
 // Every store member, for the same reason.
 const storeMembers = {
-    nativeReceive: 'optional',
     messageMetadataReadMode: 'optional',
     lwwBindingState: 'optional',
     lwwReadOutbox: 'optional',
@@ -49,14 +48,6 @@ const storeMembers = {
     readRoot: 'method',
     readRevision: 'optional',
     readLibraryIdentity: 'optional',
-    rebaseConversationHistory: 'optional',
-    readNativeReceiveEvidence: 'optional',
-    readConflictCopySource: 'optional',
-    hydrateConflictCopy: 'optional',
-    copyConflictedConversation: 'optional',
-    archiveReconcileHistories: 'optional',
-    hydrateArchiveReconcile: 'optional',
-    reconcileArchivedCharacter: 'optional',
     queryPresets: 'method',
     readPreset: 'method',
     queryCharacters: 'method',

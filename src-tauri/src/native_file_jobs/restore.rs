@@ -3279,7 +3279,7 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
         StoreError::SnapshotReleased => {
             NativeJobError::new("store-error", "persistent snapshot was released")
         }
-        StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::SnapshotPinned { .. } => NativeJobError::new("store-error", error.to_string()),
+        StoreError::RawBodyUnavailable | StoreError::CommitBusy => NativeJobError::new("store-error", error.to_string()),
         StoreError::AssetInventoryBusy => NativeJobError::new("library-operation-busy", error.to_string()),
         // A sync binding switch before activation refuses the commit like a concurrent revision.
         StoreError::Validation { message } if message == "binding-authority-changed" => {

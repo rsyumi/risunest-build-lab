@@ -14,32 +14,22 @@ pub(super) fn incremental_commit<T>(
     body: impl FnOnce(&Transaction<'_>, &str, T) -> StoreResult<()>,
 ) -> StoreResult<RevisionResult> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let result = apply_incremental(&transaction, expected_revision, prepare, body)?;
-    transaction.commit()?;
-    Ok(result)
-}
-
-pub(super) fn apply_incremental<T>(
-    transaction: &Transaction<'_>,
-    expected_revision: i64,
-    prepare: impl FnOnce(&Transaction<'_>, &str) -> StoreResult<T>,
-    body: impl FnOnce(&Transaction<'_>, &str, T) -> StoreResult<()>,
-) -> StoreResult<RevisionResult> {
-    let actual_revision = current_revision(transaction)?;
+    let actual_revision = current_revision(&transaction)?;
     if actual_revision != expected_revision {
         return Err(StoreError::RevisionConflict {
             expected: expected_revision,
             actual: actual_revision,
         });
     }
-    let active = active_generation(transaction)?;
-    let prepared = prepare(transaction, &active)?;
+    let active = active_generation(&transaction)?;
+    let prepared = prepare(&transaction, &active)?;
     let revision = actual_revision + 1;
     let generation = active;
-    super::content_change_index::begin_mutation(transaction, &generation, revision, "local")?;
-    body(transaction, &generation, prepared)?;
-    super::content_change_index::finish_mutation(transaction)?;
-    set_active(transaction, revision, &generation)?;
+    super::content_change_index::begin_mutation(&transaction, &generation, revision, "local")?;
+    body(&transaction, &generation, prepared)?;
+    super::content_change_index::finish_mutation(&transaction)?;
+    set_active(&transaction, revision, &generation)?;
+    transaction.commit()?;
     Ok(RevisionResult { revision })
 }
 
@@ -163,155 +153,126 @@ fn commit_inner(
     incremental_commit(
         connection,
         input.expected_revision,
-        |transaction, active| prepare_working_set(transaction, active, input, capture_targets, asset_aliases),
-        |transaction, generation, prepared| {
-            apply_working_set(transaction, generation, input, asset_aliases, prepared, lww.map(|(header, stamp, _)| (header, stamp)))?;
-            if let Some((header, _, digest)) = lww {
+        |transaction, active| {
+            if let Some(fence) = input.gallery_pending_fence {
+                if super::gallery::pending_fence(transaction)? != fence {
+                    return Err(StoreError::RevisionConflict { expected: input.expected_revision, actual: current_revision(transaction)? });
+                }
+            }
+            if input.root.as_ref().is_some_and(|root| root.get("account").is_some()) {
+                return Err(validation("Account credentials are device-local"));
+            }
+            if let Some(character) = &input.replace_character {
+                validate_character(character, "Selected character replacement")?;
+            }
+            if let Some(character) = &input.add_character {
+                validate_character(character, "Character addition")?;
+            }
+            let mut alias_identities = HashSet::new();
+            for alias in asset_aliases {
+                alias.validate()?;
+                if !alias_identities.insert((alias.kind.as_str(), alias.key.as_str())) {
+                    return Err(validation("Duplicate asset alias"));
+                }
+            }
+            if let Some(details) = &input.character_details {
+                validate_character_details(
+                    transaction,
+                    active,
+                    details,
+                    input.delete_character_ids.as_deref().unwrap_or_default(),
+                )?;
+            }
+            if let Some(ids) = &input.delete_character_ids {
+                let unique: HashSet<_> = ids.iter().collect();
+                if ids.len() > 128 || unique.len() != ids.len() || ids.iter().any(String::is_empty) {
+                    return Err(validation("Character deletion requires at most 128 unique nonempty IDs"));
+                }
+            }
+            super::lww::validate_local_targets(transaction,input)?;
+            reject_archived_targets(transaction, active, input)?;
+            let mut previous_root = None;
+            let owner_input = owner_validation_commit(transaction, active, input, &mut previous_root)?;
+            if owner_input.root.is_some() && previous_root.is_none() {
+                previous_root = Some(replacement_root(transaction, active)?);
+            }
+            validate_changed_owner_shapes(transaction, active, &owner_input, previous_root.as_ref())?;
+            validate_owner_heads_for_commit(&owner_input)?;
+            let retained = retained_commit_owner_heads(transaction, active, &owner_input, previous_root.as_ref())?;
+            let mut conversation_orders = BTreeSet::new();
+            for mutation in input.conversations.iter().flatten() {
+                match mutation {
+                    ConversationMutation::Delete { character_id, .. }
+                    | ConversationMutation::Reorder { character_id, .. } => {
+                        conversation_orders.insert(character_id.clone());
+                    }
+                    ConversationMutation::ReplaceRange { character_id, conversation_id, .. } => {
+                        let exists: bool = transaction.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3)",
+                            params![active, character_id, conversation_id], |row| row.get(0),
+                        )?;
+                        let created_by_unit = input.unit_mutations.iter().flatten().any(|mutation| {
+                            if let super::lww::UnitMutation::Set { key, .. } = mutation {
+                                let parts = key.components();
+                                parts.len() == 4 && parts[0] == "exists" && parts[1] == "conversation"
+                                    && parts[2] == *character_id && parts[3] == *conversation_id
+                            } else { false }
+                        });
+                        if !exists && !created_by_unit {
+                            conversation_orders.insert(character_id.clone());
+                        }
+                    }
+                }
+            }
+            let capture = LocalCapture::begin(transaction, active, capture_targets, asset_aliases, conversation_orders)?;
+            Ok((owner_input, retained, capture))
+        },
+        |transaction, generation, (owner_input, retained, capture)| {
+            if let Some(root) = &input.root {
+                put_root(transaction, generation, root)?;
+            }
+            if let Some(presets) = &input.replace_presets {
+                replace_presets(transaction, generation, presets)?;
+            }
+            for character_id in input.delete_character_ids.as_deref().unwrap_or_default() {
+                delete_character(transaction, generation, character_id)?;
+            }
+            if let Some(character) = &input.character {
+                put_character_detail(transaction, generation, character)?;
+            }
+            for detail in input.character_details.as_deref().unwrap_or_default() {
+                put_character_detail(transaction, generation, detail)?;
+            }
+            if let Some(character) = &input.replace_character {
+                replace_character(transaction, generation, character)?;
+            }
+            if let Some(character) = &input.add_character {
+                let character_id = required_string(character, "chaId", "Character addition")?;
+                if character_exists(transaction, generation, character_id)? {
+                    return Err(validation(format!(
+                        "Character {character_id} already exists"
+                    )));
+                }
+                replace_character(transaction, generation, character)?;
+            }
+            super::lww::apply_mutations(transaction, generation, input.unit_mutations.as_deref().unwrap_or_default())?;
+            for mutation in input.conversations.as_deref().unwrap_or_default() {
+                apply_conversation_mutation(transaction, generation, mutation)?;
+            }
+            for mutation in input.plugin_storage.as_deref().unwrap_or_default() {
+                apply_plugin_storage_mutation(transaction, generation, mutation)?;
+            }
+            for alias in asset_aliases {
+                put_asset_alias(transaction, generation, alias)?;
+            }
+            replace_changed_owner_heads(transaction, generation, &owner_input, &retained)?;
+            if let Some((header, stamp, digest)) = lww {
+                capture.record(transaction, generation, header, stamp)?;
                 transaction.execute("INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)", params![header.request_id, digest, current_revision(transaction)?+1])?;
             }
             Ok(())
         },
     )
-}
-
-pub(super) struct PreparedWorkingSet<'a> {
-    owner_input: std::borrow::Cow<'a, WorkingSetCommit>,
-    retained: Vec<AssetOwnerHead>,
-    capture: LocalCapture<'a>,
-}
-
-pub(super) fn prepare_working_set<'a>(
-    transaction: &Transaction<'_>,
-    active: &str,
-    input: &'a WorkingSetCommit,
-    capture_targets: &'a WorkingSetCommit,
-    asset_aliases: &'a [AssetAlias],
-) -> StoreResult<PreparedWorkingSet<'a>> {
-    if let Some(fence) = input.gallery_pending_fence {
-        if super::gallery::pending_fence(transaction)? != fence {
-            return Err(StoreError::RevisionConflict { expected: input.expected_revision, actual: current_revision(transaction)? });
-        }
-    }
-    if input.root.as_ref().is_some_and(|root| root.get("account").is_some()) {
-        return Err(validation("Account credentials are device-local"));
-    }
-    if let Some(character) = &input.replace_character {
-        validate_character(character, "Selected character replacement")?;
-    }
-    if let Some(character) = &input.add_character {
-        validate_character(character, "Character addition")?;
-    }
-    let mut alias_identities = HashSet::new();
-    for alias in asset_aliases {
-        alias.validate()?;
-        if !alias_identities.insert((alias.kind.as_str(), alias.key.as_str())) {
-            return Err(validation("Duplicate asset alias"));
-        }
-    }
-    if let Some(details) = &input.character_details {
-        validate_character_details(
-            transaction,
-            active,
-            details,
-            input.delete_character_ids.as_deref().unwrap_or_default(),
-        )?;
-    }
-    if let Some(ids) = &input.delete_character_ids {
-        let unique: HashSet<_> = ids.iter().collect();
-        if ids.len() > 128 || unique.len() != ids.len() || ids.iter().any(String::is_empty) {
-            return Err(validation("Character deletion requires at most 128 unique nonempty IDs"));
-        }
-    }
-    super::lww::validate_local_targets(transaction,input)?;
-    reject_archived_targets(transaction, active, input)?;
-    let mut previous_root = None;
-    let owner_input = owner_validation_commit(transaction, active, input, &mut previous_root)?;
-    if owner_input.root.is_some() && previous_root.is_none() {
-        previous_root = Some(replacement_root(transaction, active)?);
-    }
-    validate_changed_owner_shapes(transaction, active, &owner_input, previous_root.as_ref())?;
-    validate_owner_heads_for_commit(&owner_input)?;
-    let retained = retained_commit_owner_heads(transaction, active, &owner_input, previous_root.as_ref())?;
-    let mut conversation_orders = BTreeSet::new();
-    for mutation in input.conversations.iter().flatten() {
-        match mutation {
-            ConversationMutation::Delete { character_id, .. }
-            | ConversationMutation::Reorder { character_id, .. } => {
-                conversation_orders.insert(character_id.clone());
-            }
-            ConversationMutation::ReplaceRange { character_id, conversation_id, .. } => {
-                let exists: bool = transaction.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3)",
-                    params![active, character_id, conversation_id], |row| row.get(0),
-                )?;
-                let created_by_unit = input.unit_mutations.iter().flatten().any(|mutation| {
-                    if let super::lww::UnitMutation::Set { key, .. } = mutation {
-                        let parts = key.components();
-                        parts.len() == 4 && parts[0] == "exists" && parts[1] == "conversation"
-                            && parts[2] == *character_id && parts[3] == *conversation_id
-                    } else { false }
-                });
-                if !exists && !created_by_unit {
-                    conversation_orders.insert(character_id.clone());
-                }
-            }
-        }
-    }
-    let capture = LocalCapture::begin(transaction, active, capture_targets, asset_aliases, conversation_orders)?;
-    Ok(PreparedWorkingSet { owner_input, retained, capture })
-}
-
-pub(super) fn apply_working_set(
-    transaction: &Transaction<'_>,
-    generation: &str,
-    input: &WorkingSetCommit,
-    asset_aliases: &[AssetAlias],
-    prepared: PreparedWorkingSet<'_>,
-    lww: Option<(&super::lww::Header, &risunest_sync_wire::stamp::Stamp)>,
-) -> StoreResult<()> {
-    let PreparedWorkingSet { owner_input, retained, capture } = prepared;
-    if let Some(root) = &input.root {
-        put_root(transaction, generation, root)?;
-    }
-    if let Some(presets) = &input.replace_presets {
-        replace_presets(transaction, generation, presets)?;
-    }
-    for character_id in input.delete_character_ids.as_deref().unwrap_or_default() {
-        delete_character(transaction, generation, character_id)?;
-    }
-    if let Some(character) = &input.character {
-        put_character_detail(transaction, generation, character)?;
-    }
-    for detail in input.character_details.as_deref().unwrap_or_default() {
-        put_character_detail(transaction, generation, detail)?;
-    }
-    if let Some(character) = &input.replace_character {
-        replace_character(transaction, generation, character)?;
-    }
-    if let Some(character) = &input.add_character {
-        let character_id = required_string(character, "chaId", "Character addition")?;
-        if character_exists(transaction, generation, character_id)? {
-            return Err(validation(format!(
-                "Character {character_id} already exists"
-            )));
-        }
-        replace_character(transaction, generation, character)?;
-    }
-    super::lww::apply_mutations(transaction, generation, input.unit_mutations.as_deref().unwrap_or_default())?;
-    for mutation in input.conversations.as_deref().unwrap_or_default() {
-        apply_conversation_mutation(transaction, generation, mutation)?;
-    }
-    for mutation in input.plugin_storage.as_deref().unwrap_or_default() {
-        apply_plugin_storage_mutation(transaction, generation, mutation)?;
-    }
-    for alias in asset_aliases {
-        put_asset_alias(transaction, generation, alias)?;
-    }
-    replace_changed_owner_heads(transaction, generation, &owner_input, &retained)?;
-    if let Some((header, stamp)) = lww {
-        capture.record(transaction, generation, header, stamp)?;
-    }
-    Ok(())
 }
 
 /// An archived character has no conversations and only a marker detail, so any

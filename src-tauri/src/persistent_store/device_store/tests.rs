@@ -789,7 +789,7 @@ fn device_settings_are_not_tracked_as_section_changes() {
 
 #[test]
 fn device_settings_accept_only_the_assigned_keys() {
-    let (_directory, store) = open();
+    let (_directory, mut store) = open();
     assert_eq!(
         DEVICE_SETTING_KEYS,
         [
@@ -805,8 +805,6 @@ fn device_settings_accept_only_the_assigned_keys() {
             "risuNestDeviceSettings",
             "risuNestAppLock",
             "risuNestStartupExclusions",
-            "risuNestNativeOllamaGeneration",
-            "risuNestNativeDisplayRender",
             "risuNestPluginSyncSettings",
             "risuNestDefaultPluginsAttempted",
             "risuNestUpdateSettings",
@@ -818,7 +816,6 @@ fn device_settings_accept_only_the_assigned_keys() {
             "official-account.asset-continuation.v1",
             "sync-conflict-backups.index.v1",
             "native-file-restore-receipts.v1",
-            "native-server-receive-receipt.v1",
         ]
     );
 
@@ -1488,14 +1485,11 @@ mod section_exchange {
             "official-account.asset-continuation.v1",
             "sync-conflict-backups.index.v1",
             "native-file-restore-receipts.v1",
-            "native-server-receive-receipt.v1",
             "risuNestServerSyncRestoreHold",
             "risuNestDisplayRecovery",
             "risu_lastsaved",
             "risuNestDefaultPluginsAttempted",
             "risuNestPluginSyncSettings",
-            "risuNestNativeOllamaGeneration",
-            "risuNestNativeDisplayRender",
         ] {
             assert!(!LOCAL_SETTING_KEYS.contains(&key));
             store
@@ -1891,28 +1885,4 @@ fn clear_hypa_cache_reclaims_vectors_and_issues_publishable_tombstones() {
     let cleared = store.revision().unwrap();
     store.clear_hypa_embeddings().unwrap();
     assert_eq!(store.revision().unwrap(), cleared);
-}
-
-#[test]
-fn borrowed_embedding_rows_preserve_raw_bytes_and_stop_on_consumer_error() {
-    let (_directory, mut store) = open();
-    store.write_hypa_embeddings(&[embedding("key-a", &[1.0]), embedding("key-b", &[2.0])]).unwrap();
-    store.connection().execute("UPDATE hypa_embeddings SET dimensions=2,vector=x'010203' WHERE cache_key='key-a'", []).unwrap();
-    let keys = vec!["key-a".to_owned(), "missing".to_owned(), "key-b".to_owned()];
-    let rows = store.read_hypa_embeddings(&keys).unwrap();
-    assert_eq!(rows[0].dimensions, 2);
-    assert_eq!(rows[0].vector.as_deref(), Some(&[1,2,3][..]));
-    let mut visited = Vec::new();
-    let result = store.visit_hypa_embeddings::<StoreError>(&keys, |index, row| {
-        visited.push((index, row.map(|(dimensions, bytes)| (dimensions, bytes.to_vec()))));
-        if index == 1 { return Err(invalid("synthetic consumer refusal")); }
-        Ok(())
-    });
-    assert!(matches!(result, Err(StoreError::Validation { .. })));
-    assert_eq!(visited, vec![(0, Some((2,vec![1,2,3]))), (1,None)]);
-    let mut called = false;
-    assert!(store.visit_hypa_embeddings::<StoreError>(&["key-a".into(), String::new()], |_, _| {
-        called = true; Ok(())
-    }).is_err());
-    assert!(!called, "validate every key before exposing any row");
 }

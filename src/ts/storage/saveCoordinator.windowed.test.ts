@@ -14,7 +14,6 @@ import {
     SaveCoordinator,
 } from './saveCoordinator.testSupport'
 import { safeStructuredClone } from '../polyfill'
-import { cloneConversationMetadata } from './selectedConversationLifecycle'
 
 vi.mock('../polyfill', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../polyfill')>()
@@ -202,21 +201,6 @@ describe('SaveCoordinator', () => {
             expect(() => harness.coordinator.retireWindowedSelectedConversation()).not.toThrow()
         })
 
-        it('rejects inconsistent refresh normalization before clearing an unsaved root edit', async () => {
-            const harness = makeWindowedHarness()
-            harness.database.username = 'Pending root edit'
-            harness.coordinator.markPersistentDataDirty(0)
-            const metadata = cloneConversationMetadata(harness.selected().chats[0])
-            expect(() => harness.coordinator.initialize(2, undefined, {
-                conversation: { before: metadata, after: { ...metadata, isStreaming: false } },
-            })).toThrow(/normalization/)
-            await harness.coordinator.flushPendingDataLocally('after-rejected-normalization')
-            expect(harness.commit.mock.calls[0][0]).toMatchObject({ rootMutations: [
-                { type: 'set', key: 'username', value: 'Pending root edit' },
-            ] })
-            expect(harness.database.username).toBe('Pending root edit')
-        })
-
         it('retires windowed ownership while only a storage-only mutation is queued behind the flush', async () => {
             const harness = makeWindowedHarness()
             harness.database.username = 'Saved before leaving'
@@ -347,32 +331,6 @@ describe('SaveCoordinator', () => {
                 },
             })
         }
-
-        it('captures a windowed recovery prefix without loading history and preserves a later journal suffix', () => {
-            const harness = makeWindowedHarness({ totalMessages: 10_000 })
-            harness.replaceAuthority({ ...harness.authority()!, sessionVersion: 1, totalMessages: 10_001 })
-            recordWindowedMutation(harness.coordinator, { sessionToken: harness.sessionToken, previousVersion: 0, sessionVersion: 1,
-                start: 10_000, deleteCount: 0, messages: [{ role: 'user', data: 'Captured append' }] })
-            const captured = harness.coordinator.captureReceiveConversationEdits('char-a', 'two', 2)
-            expect(captured.originalMessageCount).toBe(10_000)
-            expect(captured.messageCount).toBe(10_001)
-            expect(captured.ranges).toEqual([{ start: 10_000, deleteCount: 0, messages: [{ role: 'user', data: 'Captured append' }] }])
-            expect(captured.isCurrent()).toBe(true)
-            harness.replaceAuthority({ ...harness.authority()!, sessionVersion: 2, totalMessages: 10_001 })
-            recordWindowedMutation(harness.coordinator, { sessionToken: harness.sessionToken, previousVersion: 1, sessionVersion: 2,
-                start: 10_000, deleteCount: 1, messages: [{ role: 'user', data: 'Later edit of inserted row' }] })
-            expect(captured.isCurrent()).toBe(false)
-            expect(() => captured.assertPrefixCurrent()).not.toThrow()
-            expect(captured.ranges[0].messages[0].data).toBe('Captured append')
-            // The later edit rewrites only the row the captured entry inserted, so it folds into that entry.
-            const later = harness.coordinator.captureReceiveConversationEdits('char-a', 'two', 2)
-            expect(later.ranges).toEqual([{ start: 10_000, deleteCount: 0, messages: [{ role: 'user', data: 'Later edit of inserted row' }] }])
-            expect(later.messageCount).toBe(10_001)
-            expect(harness.readConversationWindow).not.toHaveBeenCalled()
-            expect(harness.commit).not.toHaveBeenCalled()
-            expect(harness.onPersisted).not.toHaveBeenCalled()
-            harness.coordinator.markCommittedWorkingSetRefreshRequired(2, new Error('Synthetic retained receive conflict'))
-        })
 
         it('rejects windowed adoption while ordinary dirty work is pending', () => {
             const database = makeDatabase()

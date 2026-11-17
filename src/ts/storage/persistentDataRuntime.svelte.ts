@@ -1,7 +1,6 @@
 import type { PluginStorageWriteCheck } from '../plugins/pluginStorageProtection'
 import { generatingConversations } from './generatingConversationRegistry'
 import type { LwwStageReceive, LwwApplyResult } from './persistentDataStore'
-import type { NativeGenerationPort } from './nativeGenerationPort'
 import { flushPersistentIdentityEdits, derivePersistentIdentityMirrors } from './persistentIdentityHooks'
 import { applyReceivedDisplaySettings } from '../gui/receivedDisplaySettings'
 import { isConversationStreaming } from './streamingConversationRegistry'
@@ -10,7 +9,7 @@ import { isTauri } from '../platform'
 import { restoreStreamingConversationState } from './streamingConversationRegistry'
 import { fillLorebookText } from './lorebookText'
 import { derived, get, readonly, writable } from 'svelte/store'
-import { doingChat, isNativeGenerationNavigationAllowed } from '../process/generationState'
+import { doingChat } from '../process/generationState'
 import { ReloadGUIPointer, selectedCharID, selIdState } from '../stores.svelte'
 import type { ActiveConversationSession } from './activeConversationSession'
 import type {
@@ -441,7 +440,7 @@ export function createProductionStateAdapter(options: {
         },
         conversationViewportRowBudget: getRuntimePerformanceBudgets().chatMountedMessageBudget,
         canActivateWorkingSet() {
-            return !get(doingChat) || isNativeGenerationNavigationAllowed()
+            return !get(doingChat)
         },
         canDeactivateWorkingSet() {
             return !get(doingChat)
@@ -466,8 +465,6 @@ export interface ProductionRuntimeConfiguration {
     onLocalRevision?: (revision: DataRevision) => void
     onFlushPromise?: (promise: Promise<void> | null) => void
     onBackgroundError?: (error: unknown) => void
-    /** The native generation commands; absent where the build has none. */
-    nativeGeneration?: NativeGenerationPort | null
     projectWorkingSet?(
         database: Database,
         selectedCharacterId: string | null,
@@ -510,7 +507,6 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
             },
             onFlushPromise: (promise) => productionConfiguration.onFlushPromise?.(promise),
             onBackgroundError: (error) => productionConfiguration.onBackgroundError?.(error),
-            getNativeGenerationPort: () => productionConfiguration.nativeGeneration ?? null,
             onLocalSaveFailure: (error) => localSaveFailure.set(error),
             onWorkingSetRefreshRequired: (revision) => workingSetRefreshRevision.set(revision),
             onDestructiveReplacementFenceChanged: (active) => destructiveReplacementActive.set(active),
@@ -842,7 +838,6 @@ export const hasPendingOfficialPublication = (): boolean =>
 
 export const getPersistentRevision = (): DataRevision => getPersistentDataRuntime().revision
 export const applyPersistentLwwReceive = (request: LwwStageReceive): Promise<LwwApplyResult> => getPersistentDataRuntime().applyLwwReceive(request)
-export const applyPersistentStoredLwwReceive: PersistentDataRuntime['applyStoredLwwReceive'] = (request, apply) => getPersistentDataRuntime().applyStoredLwwReceive(request, apply)
 export const commitPersistentUnitIntent: PersistentDataRuntime['commitPersistentUnitIntent'] = (reason, mutations, conversations, wholeMessages, projectionObserver, check) =>
     getPersistentDataRuntime().commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages, projectionObserver, check)
 export const commitPreparedUnitIntent: PersistentDataRuntime['commitPreparedUnitIntent'] = (reason, prepare) =>

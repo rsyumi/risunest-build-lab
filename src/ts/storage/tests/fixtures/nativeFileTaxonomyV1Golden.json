@@ -39,11 +39,6 @@
         "suffixes": [".risum"]
       },
       {
-        "kind": "preset",
-        "prefix": "preset-",
-        "suffixes": [".json", ".risup"]
-      },
-      {
         "kind": "dataset-export",
         "prefix": "risu-dataset-",
         "suffixes": [".json"]
