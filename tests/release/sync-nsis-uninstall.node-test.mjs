@@ -259,7 +259,7 @@ function holdDeletion(binary, path) {
     writeFileSync(release, 'release');
     waitForFixture(() => !existsSync(ready));
     await exited;
-    rmSync(signals, { recursive: true, maxRetries: 10, retryDelay: 100 });
+    rmSync(signals, { recursive: true });
   };
 }
 function writeManagerHook(directory) {

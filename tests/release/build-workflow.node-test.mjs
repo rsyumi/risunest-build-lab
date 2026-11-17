@@ -275,12 +275,14 @@ test("iOS portable source tests run before the simulator release gate", () => {
   assert.throws(() => verify(job.replace("pnpm ios:test:portable-source", "")));
 });
 
-test("APT packages install through the bounded mirror fallback", () => {
+test("APT retries downloads internally and failed index refreshes remain failures", () => {
   for (const name of ["release", "native-check", "linux-package-check", "pr-check"]) {
     const contents = readFileSync(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");
-    assert.doesNotMatch(contents, /apt-get/, name);
-    const steps = contents.split(/^      - /m).filter(step => step.includes("run: bash scripts/install-apt-packages.sh"));
-    assert.ok(steps.length >= 1, name);
-    for (const step of steps) assert.match(step, /timeout-minutes: 20\r?\n/, name);
+    const commands = contents.match(/sudo apt-get[^\n&]*/g) ?? [];
+    assert.ok(commands.length >= 2, name);
+    for (const command of commands) {
+      assert.match(command, /-o Acquire::Retries=2/);
+      if (/\bupdate\b/.test(command)) assert.match(command, /--error-on=any/);
+    }
   }
 });
