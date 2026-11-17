@@ -44,7 +44,9 @@ export class PayloadTooLargeError extends Error {
 /** Native JSON stores Unicode scalar values; preserve every valid code point exactly. */
 export function prepareNativePersistenceValue<T>(input: T, area = 'persistent data'): T {
     let replacements = 0
-    const wellFormed = (value: string): string => value.replace(
+    // Not in every supported WebView; where present it skips the scan for text that needs no change.
+    const isWellFormed = (String.prototype as { isWellFormed?: (this: string) => boolean }).isWellFormed
+    const wellFormed = (value: string): string => isWellFormed?.call(value) ? value : value.replace(
         /[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g,
         (part) => {
             if (part.length === 2) return part

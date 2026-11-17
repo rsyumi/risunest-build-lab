@@ -66,7 +66,7 @@ impl ReplacementSink for RecordingSink {
         Ok(())
     }
 
-    fn commit(&self, _staging_id: &str, _expected_revision: i64) -> StoreResult<RevisionResult> {
+    fn commit(&self, _staging_id: &str, _expected_revision: i64, _binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
         Err(StoreError::Store {
             message: "the recording sink does not activate".to_owned(),
         })
@@ -446,6 +446,28 @@ fn legacy_restore_stages_characters_while_the_source_is_still_being_read() {
         );
         assert!(read_at.windows(2).all(|pair| pair[0] < pair[1]), "{label}: {read_at:?}");
     }
+
+    // A `bin` value is charged at its converted JSON text, so the first record
+    // flushes alone and the second still shares a batch with the third.
+    let binary = |id: &str, length: usize| {
+        MessagePackValue::Map(vec![
+            entry("type", text("character")),
+            entry("chaId", text(id)),
+            entry("name", text(id)),
+            entry("chats", MessagePackValue::Array(Vec::new())),
+            entry("blob", MessagePackValue::Binary(vec![255; length])),
+        ])
+    };
+    let payload = root_bytes(vec![
+        entry(
+            "characters",
+            MessagePackValue::Array(vec![binary("binary-0", 400_000), binary("binary-1", 400_000), binary("small", 0)]),
+        ),
+        entry("botPresets", MessagePackValue::Array(Vec::new())),
+    ]);
+    let run = run_legacy(&legacy_wire(7, &payload), RestoreLimits::default(), Decoder::Streaming);
+    assert_eq!(run.outcome.unwrap(), (3, 0));
+    assert_eq!(*run.sink.batches.lock().unwrap(), [1, 2]);
 }
 
 #[test]
@@ -621,7 +643,7 @@ impl ReplacementSink for RootOnlySink {
         *self.observed.lock().unwrap()=Some((hex::encode(writer.0.finalize()),writer.1,records,maximum));
         Ok(())
     }
-    fn commit(&self,_:&str,_:i64)->StoreResult<RevisionResult> { panic!("decoder fixture never activates") }
+    fn commit(&self,_:&str,_:i64,_:Option<&str>)->StoreResult<RevisionResult> { panic!("decoder fixture never activates") }
     fn abort(&self,_:&str)->StoreResult<()> { Ok(()) }
 }
 
@@ -707,7 +729,7 @@ fn cancellation_during_root_sink_finalization_aborts_stage_and_owned_spool() {
             self.job.request_cancel().unwrap();
             self.store.lock().unwrap().replace_put_upstream_stream(id,root)
         }
-        fn commit(&self,_:&str,_:i64)->StoreResult<RevisionResult> { panic!("cancelled stage activated") }
+        fn commit(&self,_:&str,_:i64,_:Option<&str>)->StoreResult<RevisionResult> { panic!("cancelled stage activated") }
         fn abort(&self,id:&str)->StoreResult<()> {
             self.aborted.fetch_add(1,Ordering::AcqRel);
             self.store.lock().unwrap().replace_abort(id)

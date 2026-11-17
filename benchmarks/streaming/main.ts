@@ -6,6 +6,7 @@ import { isTauri } from "../../src/ts/platform";
 import { getDeviceSettings } from "../../src/ts/storage/deviceSettings";
 import { initializeDeviceMarkers } from "../../src/ts/storage/deviceMarkers";
 import { startStreamingSmoke } from "./fixture";
+import { showNativeHarness } from "../nativeAppLock";
 
 if (isTauri) {
   await invoke("pds_open");
@@ -13,3 +14,4 @@ if (isTauri) {
 }
 getDeviceSettings();
 startStreamingSmoke();
+if (isTauri) await showNativeHarness();

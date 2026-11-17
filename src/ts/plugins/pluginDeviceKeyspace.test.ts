@@ -139,24 +139,28 @@ describe('plugin device keyspace', () => {
         await expect(held.getItem('string', 'kept')).resolves.toBe('text')
     })
 
-    it('round-trips JSON representations and rejects unsupported values before writing', async () => {
+    it('keeps JSON values on the web and rejects every other value before writing', async () => {
         const storage = new SafeLocalPluginStorage('json-contract')
-        const values = [{ a: 1 }, [1, null], null, 42, 'text', new Date('2020-01-01T00:00:00Z'), new Uint8Array([1, 2])]
-        for (const value of values) {
+        for (const value of [{ a: 1 }, [1, null], null, 42, 'text']) {
             await storage.setItem('value', value)
-            await expect(storage.getItem('value')).resolves.toEqual(JSON.parse(JSON.stringify(value)))
+            await expect(storage.getItem('value')).resolves.toEqual(value)
         }
+        await storage.setItem('undefined', undefined)
+        await expect(pluginDeviceStorage.getItem('safe_plugin_["json-contract","json","undefined"]')).resolves.toBe('null')
         await storage.setItem('value', 'kept')
         const cycle: { self?: unknown } = {}; cycle.self = cycle
         const write = vi.spyOn(pluginDeviceStorage, 'setItem')
-        for (const value of [undefined, () => {}, Symbol('unsupported'), cycle, 1n]) {
-            await expect(storage.setItem('value', value)).rejects.toBeInstanceOf(TypeError)
-            await expect(storage.getItem('value')).resolves.toBe('kept')
+        for (const value of [new Date(0), new Uint8Array([1, 2]), cycle, 1n, -0, [undefined], new Map()]) {
+            await expect(storage.setItem('value', value)).rejects.toThrow(new TypeError('getLocalPluginStorage values that are not JSON are not supported on the web'))
         }
+        for (const value of [() => {}, Symbol('unsupported'), { nested: () => {} }]) {
+            await expect(storage.setItem('value', value)).rejects.toThrow(new TypeError('getLocalPluginStorage cannot store this value'))
+        }
+        await expect(storage.getItem('value')).resolves.toBe('kept')
         expect(write).not.toHaveBeenCalled()
         invalidatePluginDeviceKeyspaces('json-contract')
         await expect(storage.getItem('value')).resolves.toBe('kept')
-        await expect(storage.keys()).resolves.toEqual(['value'])
+        await expect(storage.keys()).resolves.toEqual(['undefined', 'value'])
         write.mockRestore()
     })
 
@@ -242,7 +246,7 @@ describe('plugin device keyspace', () => {
         await expect(keyspace.keys('string')).resolves.toEqual(operation === 'set' ? ['key'] : [])
     })
 
-    it('keeps writes durable but drops a cache that grows beyond its byte budget', async () => {
+    it('keeps recent values within the cache budget without hiding evicted keys', async () => {
         const { backend } = recordingBackend()
         const reads = vi.spyOn(backend, 'read')
         const hydrations = vi.spyOn(backend, 'hydrate')
@@ -250,9 +254,38 @@ describe('plugin device keyspace', () => {
         const value = 'x'.repeat(PLUGIN_DEVICE_CACHE_BYTES / 4)
         for (const key of ['one', 'two', 'three']) await keyspace.setItem('string', key, value)
         await expect(keyspace.getItem('string', 'three')).resolves.toBe(value)
-        expect(reads).toHaveBeenCalledOnce()
+        expect(reads).not.toHaveBeenCalled()
         expect(hydrations).toHaveBeenCalledOnce()
         await expect(keyspace.keys('string')).resolves.toEqual(['one', 'three', 'two'])
+        await expect(keyspace.getItem('string', 'one')).resolves.toBe(value)
+        await expect(keyspace.getItem('string', 'two')).resolves.toBe(value)
+        expect(reads).toHaveBeenCalledTimes(2)
+        // One oversized value must not evict a different small setting.
+        await keyspace.setItem('json', 'settings', '{"enabled":true}')
+        await keyspace.setItem('string', 'large', 'x'.repeat(PLUGIN_DEVICE_CACHE_BYTES))
+        await expect(keyspace.getItem('json', 'settings')).resolves.toBe('{"enabled":true}')
+        await expect(keyspace.getItem('string', 'two')).resolves.toBe(value)
+        expect(reads).toHaveBeenCalledTimes(2)
+        await expect(keyspace.keys('string')).resolves.toEqual(['large', 'one', 'three', 'two'])
+        await expect(keyspace.getItem('string', 'large')).resolves.toHaveLength(PLUGIN_DEVICE_CACHE_BYTES)
+        // Room for a newer value comes from the oldest values of either space,
+        // only as much as it needs.
+        await keyspace.setItem('json', 'archive', value)
+        await keyspace.setItem('string', 'recent', 'kept')
+        await expect(keyspace.getItem('json', 'settings')).resolves.toBe('{"enabled":true}')
+        await keyspace.setItem('json', 'later', value)
+        await expect(keyspace.getItem('string', 'recent')).resolves.toBe('kept')
+        expect(reads).toHaveBeenCalledTimes(3)
+
+        // A whole keyspace under the native limit can still pass the cache budget.
+        const hydrated = recordingBackend(['one', 'three', 'two'].map(key => ({ owner: 'b', space: 'string' as const, key, value })))
+        const hydratedReads = vi.spyOn(hydrated.backend, 'read')
+        const loaded = new PluginDeviceKeyspace('b', hydrated.backend)
+        await expect(loaded.getItem('string', 'two')).resolves.toBe(value)
+        expect(hydratedReads).not.toHaveBeenCalled()
+        await expect(loaded.getItem('string', 'one')).resolves.toBe(value)
+        expect(hydratedReads).toHaveBeenCalledOnce()
+        await expect(loaded.keys('string')).resolves.toEqual(['one', 'three', 'two'])
     })
 
     it('does not accumulate replacement costs for the same cached key', async () => {
@@ -263,6 +296,10 @@ describe('plugin device keyspace', () => {
         for (let index = 0; index < 8; index += 1) await keyspace.setItem('string', 'key', value)
         await expect(keyspace.getItem('string', 'key')).resolves.toBe(value)
         expect(reads).not.toHaveBeenCalled()
+        const large = 'y'.repeat(PLUGIN_DEVICE_CACHE_BYTES)
+        await keyspace.setItem('string', 'key', large)
+        await expect(keyspace.getItem('string', 'key')).resolves.toBe(large)
+        await expect(keyspace.keys('string')).resolves.toEqual(['key'])
     })
 
     it('answers for one owner and one space only', async () => {
@@ -320,7 +357,7 @@ describe('plugin device keyspace', () => {
         await expect(keyspace.getItem('string', 'token')).resolves.toBe('value')
     })
 
-    it('reads key by key when the keyspace is past the hydration limit', async () => {
+    it('loads uncached keys on demand past the hydration limit and keeps small values', async () => {
         const { backend } = recordingBackend(
             [
                 { owner: 'plugin-a', space: 'string', key: 'one', value: 'first' },
@@ -332,12 +369,55 @@ describe('plugin device keyspace', () => {
         const keyspace = new PluginDeviceKeyspace('plugin-a', backend)
 
         await expect(keyspace.getItem('string', 'one')).resolves.toBe('first')
+        await expect(keyspace.getItem('string', 'one')).resolves.toBe('first')
         await expect(keyspace.keys('string')).resolves.toEqual(['one', 'two'])
         expect(reads).toHaveBeenCalledTimes(1)
 
         await keyspace.setItem('string', 'three', 'third')
         await expect(keyspace.getItem('string', 'three')).resolves.toBe('third')
-        expect(reads).toHaveBeenCalledTimes(2)
+        expect(reads).toHaveBeenCalledTimes(1)
+        await expect(keyspace.getItem('string', 'two')).resolves.toBe('second')
+        await expect(keyspace.getItem('string', 'missing')).resolves.toBeNull()
+        expect(reads).toHaveBeenCalledTimes(3)
+        await expect(keyspace.keys('string')).resolves.toEqual(['one', 'three', 'two'])
+    })
+
+    it.each(['later write', 'remote change', 'pending write'] as const)('does not cache a partial read that a %s overtakes', async action => {
+        const owner = `partial-read-${action}`
+        const { backend, rows } = recordingBackend([{ owner, space: 'json', key: 'settings', value: 'old' }], { complete: false })
+        const read = backend.read.bind(backend), write = backend.write.bind(backend)
+        let readStarted!: () => void, releaseRead!: () => void, writeStarted!: () => void, releaseWrite!: () => void
+        const reading = new Promise<void>(resolve => { readStarted = resolve })
+        const readGate = new Promise<void>(resolve => { releaseRead = resolve })
+        const writing = new Promise<void>(resolve => { writeStarted = resolve })
+        const writeGate = new Promise<void>(resolve => { releaseWrite = resolve })
+        backend.read = async (...args) => {
+            const value = await read(...args)
+            readStarted(); await readGate
+            return value
+        }
+        backend.write = async (...args) => {
+            if (action === 'pending write') { writeStarted(); await writeGate }
+            return await write(...args)
+        }
+        const keyspace = new PluginDeviceKeyspace(owner, backend)
+        try {
+            await keyspace.keys('json')
+            const written = action === 'pending write' ? keyspace.setItem('json', 'settings', 'new') : null
+            if (written) await writing
+            const pending = keyspace.getItem('json', 'settings')
+            await reading
+            if (action === 'later write') await keyspace.setItem('json', 'settings', 'new')
+            if (action === 'remote change') {
+                rows()[0].value = 'new'
+                keyspace.invalidate()
+                await keyspace.keys('json')
+            }
+            if (written) { releaseWrite(); await written }
+            releaseRead()
+            expect(await pending).toBe('old')
+            expect(await keyspace.getItem('json', 'settings')).toBe('new')
+        } finally { keyspace.dispose() }
     })
 
     it('keeps the browser backend inside the same owner and space boundary', async () => {
@@ -360,6 +440,40 @@ describe('plugin device keyspace', () => {
 
 
 describe('native plugin device observations', () => {
+    it('keeps small JSON settings cached in an incomplete keyspace without hiding other keys or remote changes', async () => {
+        const owner = 'partial-cached-observations'
+        const { backend, rows } = recordingBackend([
+            { owner, space: 'json', key: 'settings', value: '{"enabled":true}' },
+            { owner, space: 'json', key: 'history', value: '"long"' },
+        ], { complete: false })
+        let sequence = 'epoch:0', available = true
+        const read = backend.read.bind(backend)
+        backend.sequence = async () => { if (!available) throw new Error('Unexpected native query'); return sequence }
+        backend.read = async (...args) => { if (!available) throw new Error('Unexpected native read'); return read(...args) }
+        const write = backend.write.bind(backend)
+        backend.write = async (owner, mutations, observations) => {
+            if (observations?.some(value => value.sequence !== sequence)) throw new Error('PLUGIN_STORAGE_STALE')
+            await write(owner, mutations)
+            return mutations.flatMap(value => value.type === 'clear' ? [] : [{ space: value.space, key: value.key, sequence }])
+        }
+        const keyspace = new PluginDeviceKeyspace(owner, backend)
+        const storage = new SafeLocalPluginStorage(owner, keyspace)
+        try {
+            expect(await storage.getItem('settings')).toEqual({ enabled: true })
+            available = false
+            expect(await storage.getItem('settings')).toEqual({ enabled: true })
+            expect(await storage.keys()).toEqual(['history', 'settings'])
+            available = true
+            rows()[0].value = '{"enabled":false}'; sequence = 'epoch:1'
+            await expect(storage.setItem('settings', { enabled: 'stale' })).rejects.toThrow('PLUGIN_STORAGE_STALE')
+            advancePluginStorageRemoteChanges([JSON.stringify(['plugin-local', owner, 'json', 'settings'])])
+            expect(await storage.getItem('settings')).toEqual({ enabled: false })
+            await storage.setItem('settings', { enabled: 'fresh' })
+            available = false
+            expect(await storage.getItem('settings')).toEqual({ enabled: 'fresh' })
+        } finally { keyspace.dispose() }
+    })
+
     it('reuses hydrated values with their original tokens until invalidated, without read IPC', async () => {
         const owner = 'native-cached-observations'
         const { backend, rows } = recordingBackend([{ owner, space: 'json', key: 'settings', value: 'old' }])

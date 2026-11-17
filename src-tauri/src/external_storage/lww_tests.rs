@@ -12,6 +12,8 @@ use risunest_sync_wire::{stamp::DecimalU64, unit::UnitKey};
 use futures::FutureExt;
 use std::sync::Arc;
 
+mod format_levels;
+
 fn run<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -632,8 +634,21 @@ fn reused_data_roots_keep_controls_reachable_and_skip_present_catalog_bodies() {
         let next_payload=lww_segment::open(&f.provider.contents(&next.locator.object).unwrap(),&f.sender.library,writer,2,&f.sender.root_key).unwrap();
         assert!(next_payload.data_catalogs.contains(&root));
         assert_eq!(f.receive_b().await,1);
-        for (id,reads) in before {assert_eq!(f.provider.read_attempts(&id),reads,"known root and its present controls must not be downloaded again");}
+        for (id,reads) in &before {assert_eq!(f.provider.read_attempts(id),*reads,"known root and its present controls must not be downloaded again");}
         assert_eq!(f.b.read_conversation("char","conv",None).unwrap().unwrap().value["message"].as_array().unwrap().len(),41);
+        // The receive replaced pages the root lists, so the receiver now holds them marked.
+        f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),
+            conversations:Some(vec![ConversationMutation::ReplaceRange{character_id:"char".into(),conversation_id:"conv".into(),
+                start:41,delete_count:0,messages:vec![serde_json::json!({"chatId":"synthetic-root-append-again","data":"append"})],
+                conversation:None,configured_index:None}]),..Default::default()}).unwrap();
+        assert_eq!(f.publish_a().await.segments.0,1);
+        for (id,reads) in &before {assert_eq!(f.provider.read_attempts(id),*reads,"a publisher downloaded the pages its commit replaced again");}
+        let third=f.sender.listing(&Cancellation::default()).await.unwrap().into_iter()
+            .find(|receipt|parse_segment_object_id(&receipt.locator.object).unwrap().1==3).unwrap();
+        assert!(lww_segment::open(&f.provider.contents(&third.locator.object).unwrap(),&f.sender.library,writer,3,&f.sender.root_key).unwrap().data_catalogs.contains(&root));
+        assert_eq!(f.receive_b().await,1);
+        for (id,reads) in &before {assert_eq!(f.provider.read_attempts(id),*reads,"a receiver downloaded the pages its receive replaced again");}
+        assert_eq!(f.b.read_conversation("char","conv",None).unwrap().unwrap().value["message"].as_array().unwrap().len(),42);
         let mut changed=root.clone(); changed.plaintext_sha256=[0xaa;32];
         assert!(f.a.external_lww_verified_data_catalog(&f.sender.target_scope(),&changed).is_err());
         let mut changed_hashes=hashes.clone(); changed_hashes.push("a".repeat(64));
@@ -682,6 +697,17 @@ fn oversized_control_pages_use_frozen_data_packs_and_preserve_newer_edits_on_ret
         let reopened=f.a.external_lww_pending(&f.sender.target_scope(),&writer).unwrap().unwrap().0;
         assert_eq!(reopened.controls,pending.controls);
         assert!(reopened.asset_job==pending.asset_job);
+        // As a run with the data root at an earlier location froze it, before a link moved it here.
+        let earlier=tempfile::tempdir().unwrap();
+        let mut frozen=reopened.clone();
+        for control in &mut frozen.controls {
+            let rest=control.source.components().rev().take_while(|part|part.as_os_str()!="external-storage").collect::<Vec<_>>();
+            control.source=rest.into_iter().rev().fold(earlier.path().join("RisuNestData").join("external-storage"),|path,part|path.join(part));
+        }
+        f.a.device_store().unwrap().connection().execute(
+            "UPDATE external_lww_segments SET metadata=?1 WHERE target=?2 AND writer=?3 AND seq=?4",
+            rusqlite::params![serde_json::to_string(&frozen).unwrap(),frozen.target,writer,frozen.seq.0.to_string()],
+        ).unwrap();
         assert_eq!(f.publish_a().await.segments.0,2,"exact older ACK must leave the newer messages version pending");
         assert_eq!(f.provider.contents(&pack).unwrap(),original_pack);
         let mut segments=f.sender.listing(&Cancellation::default()).await.unwrap();
@@ -1806,6 +1832,21 @@ fn native_unpublished_clock_repair_preserves_values_and_never_repairs_dispatched
             serde_json::json!("same-value"),
         );
         let original = f.a.lww_read_outbox(0.into(), 100).unwrap().entries;
+        f.a.device_store().unwrap().connection().execute("UPDATE lww_clock SET accepted=?1",
+            [serde_json::to_string(&future).unwrap()]).unwrap();
+        let error = f.sender.publish(&mut f.a, 0.into(), &[], &Cancellation::default()).await.err().unwrap();
+        assert_eq!(error.kind, ErrorKind::ClockSkew);
+        assert_eq!(serde_json::to_value(&error).unwrap()["detail"],
+            "stage=publish reason=clock-repair-failed repair_error=accepted-clock-correction-required");
+        f.a.device_store().unwrap().connection().execute("UPDATE lww_clock SET accepted=NULL", []).unwrap();
+        f.a.device_store().unwrap().connection().execute_batch(
+            "CREATE TEMP TRIGGER refuse_clock_repair BEFORE UPDATE ON lww_clock
+             BEGIN SELECT RAISE(ABORT, 'synthetic-private-value'); END;").unwrap();
+        let error = f.sender.publish(&mut f.a, 0.into(), &[], &Cancellation::default()).await.err().unwrap();
+        assert_eq!(serde_json::to_value(&error).unwrap()["detail"],
+            "stage=publish reason=clock-repair-failed repair_error=store-error");
+        f.a.device_store().unwrap().connection().execute_batch("DROP TRIGGER refuse_clock_repair").unwrap();
+        assert_eq!(f.a.lww_read_outbox(0.into(), 100).unwrap().entries, original);
         f.a.device_store_mut().unwrap().write_plugin_device_values("inactive", &[crate::persistent_store::device_store::plugin_values::PluginDeviceMutation::Set {space:"string".into(),key:"synthetic".into(),value:"kept".into()}]).unwrap();
         f.publish_a().await;
         assert_eq!(f.a.read_root(None).unwrap().value["language"], "same-value");

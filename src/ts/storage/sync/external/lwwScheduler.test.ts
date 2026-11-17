@@ -8,9 +8,10 @@ function fixture(withMaintenance = false) {
     const receive = vi.fn(async () => ({ count: 0, more: false }))
     const failed = vi.fn()
     const maintain = vi.fn(async () => {})
+    const checkFormat = vi.fn(async () => {})
     let available = true
-    const scheduler = createLwwScheduler({ available: () => available, publish, receive, failed, maintain: withMaintenance ? maintain : undefined, now: () => Date.now() })
-    return { scheduler, publish, receive, failed, maintain, unavailable: () => { available = false } }
+    const scheduler = createLwwScheduler({ available: () => available, publish, receive, failed, maintain: withMaintenance ? maintain : undefined, checkFormat, now: () => Date.now() })
+    return { scheduler, publish, receive, failed, maintain, checkFormat, unavailable: () => { available = false } }
 }
 /** Starting publishes whatever a previous session left; the edits below are counted after it. */
 async function started(f: ReturnType<typeof fixture>) {
@@ -297,6 +298,28 @@ describe('bounded LWW ownership under latency', () => {
         expect(f.publish.mock.calls.every(call => (call as unknown as [{turnLimit: number}])[0].turnLimit === 4)).toBe(true)
         f.scheduler.stop()
     })
+    it('reports catching up from a receive that left changes until a receive takes the rest or a failure blocks receiving', async () => {
+        vi.useFakeTimers()
+        let catchingUp = false
+        const seen: boolean[] = []
+        const results: Array<() => Promise<ReturnType<typeof turn>>> = [
+            async () => turn(4, true), async () => turn(2),
+            async () => turn(4, true), async () => { throw new Error('synthetic offline') },
+            async () => turn(4, true), async () => { throw Object.assign(new Error('synthetic rejected'), { retryable: false }) },
+        ]
+        const receive = vi.fn(() => { seen.push(catchingUp); return results.shift()!() })
+        const scheduler = createLwwScheduler({ available: () => true, publish: async () => turn(), receive, failed: () => {}, catchingUp: value => { catchingUp = value }, now: () => Date.now() })
+        scheduler.start(false); await scheduler.settled()
+        expect(seen).toEqual([false, true])
+        expect(catchingUp).toBe(false)
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(seen).toEqual([false, true, false, true])
+        expect(catchingUp).toBe(true)
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(seen).toEqual([false, true, false, true, true, true])
+        expect(catchingUp).toBe(false)
+        scheduler.stop()
+    })
     it('does not spin on a generating-only outbox or a zero-progress receive', async () => {
         const f = fixture(); await started(f)
         f.publish.mockResolvedValue(turn(0, true)); f.receive.mockResolvedValue(turn(0, true))
@@ -317,6 +340,39 @@ describe('bounded LWW ownership under latency', () => {
         expect(f.publish).toHaveBeenCalledTimes(1)
         f.scheduler.recovered(); await f.scheduler.settled()
         expect(f.publish).toHaveBeenCalledTimes(2)
+        f.scheduler.stop()
+    })
+    it('rechecks a library format block on each sync trigger, follows the kind it reports, and resumes once the level matches', async () => {
+        const f = fixture(); await started(f)
+        f.publish.mockRejectedValueOnce({ kind: 'libraryFormatSwitchRequired' })
+        f.scheduler.dirty(true); await f.scheduler.settled()
+        // Edits check the level again once they settle.
+        f.checkFormat.mockRejectedValueOnce({ kind: 'libraryFormatSwitchRequired' })
+        for (let i = 0; i < 6; i++) { f.scheduler.dirty(true); await vi.advanceTimersByTimeAsync(1_000) }
+        expect(f.checkFormat).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1_000)
+        expect(f.checkFormat).toHaveBeenCalledTimes(1); expect(f.publish).toHaveBeenCalledTimes(1)
+        f.checkFormat.mockRejectedValueOnce({ kind: 'appUpdateRequired' })
+        await f.scheduler.conversationOpened()
+        expect(f.failed).toHaveBeenLastCalledWith({ kind: 'appUpdateRequired' }, 'publish')
+        // A check that cannot reach the storage keeps the stop it already reports.
+        f.checkFormat.mockRejectedValueOnce({ kind: 'transient' })
+        f.failed.mockClear()
+        await f.scheduler.conversationOpened()
+        expect(f.failed).not.toHaveBeenCalled(); expect(f.publish).toHaveBeenCalledTimes(1)
+        await f.scheduler.resumeForeground()
+        expect(f.checkFormat).toHaveBeenCalledTimes(4); expect(f.publish).toHaveBeenCalledTimes(2)
+        f.scheduler.stop()
+    })
+    it('checks a library format block before a manual sync publishes', async () => {
+        const f = fixture(); await started(f)
+        f.publish.mockRejectedValueOnce({ kind: 'libraryFormatSwitchRequired' })
+        f.scheduler.dirty(true); await f.scheduler.settled()
+        f.checkFormat.mockRejectedValueOnce({ kind: 'libraryFormatSwitchRequired' })
+        await expect(f.scheduler.manualNow()).rejects.toEqual({ kind: 'libraryFormatSwitchRequired' })
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        await f.scheduler.manualNow()
+        expect(f.checkFormat).toHaveBeenCalledTimes(2); expect(f.publish).toHaveBeenCalledTimes(2)
         f.scheduler.stop()
     })
     it('coalesces waiting manual requests and one follow-up while a manual round runs', async () => {

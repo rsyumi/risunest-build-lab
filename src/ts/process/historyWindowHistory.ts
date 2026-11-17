@@ -1,5 +1,7 @@
 import type {
     ActiveConversationBackwardScan,
+    ActiveConversationMetadataBackwardScan,
+    ActiveConversationMetadataWindow,
     ActiveConversationWindow,
     MessageLocator,
 } from '../storage/activeConversationSession'
@@ -42,6 +44,36 @@ export class WindowedConversationHistoryOperation implements ConversationHistory
         const count = Math.min(Math.max(limit + localStart, 0) || limit, this.inner.totalMessages)
         if (count === 0) return this.emptyWindow(this.windowStart)
         return this.shiftWindow(this.inner.readRange(0, count))
+    }
+
+    readMetadataRange(startIndex: number, limit: number): ActiveConversationMetadataWindow {
+        const localStart = startIndex - this.windowStart
+        if (localStart >= 0) return this.shiftWindow(this.inner.readMetadataRange(localStart, limit))
+        const count = Math.min(Math.max(limit + localStart, 0) || limit, this.inner.totalMessages)
+        if (count === 0) {
+            this.inner.assertCurrent()
+            return this.emptyWindow(this.windowStart)
+        }
+        return this.shiftWindow(this.inner.readMetadataRange(0, count))
+    }
+
+    scanMetadataBackward(
+        startIndexExclusive = this.totalMessages,
+        limit?: number,
+    ): ActiveConversationMetadataBackwardScan {
+        const localStart = Math.max(startIndexExclusive - this.windowStart, 0)
+        const scan = limit === undefined
+            ? this.inner.scanMetadataBackward(localStart)
+            : this.inner.scanMetadataBackward(localStart, limit)
+        return {
+            ...scan,
+            entries: scan.entries.map((entry) => ({
+                ...entry,
+                absoluteIndex: entry.absoluteIndex + this.windowStart,
+            })),
+            startIndexExclusive: scan.startIndexExclusive + this.windowStart,
+            totalMessages: this.totalMessages,
+        }
     }
 
     scanBackward(
@@ -93,7 +125,7 @@ export class WindowedConversationHistoryOperation implements ConversationHistory
         }
     }
 
-    private shiftWindow(window: ActiveConversationWindow): ActiveConversationWindow {
+    private shiftWindow<T extends ActiveConversationMetadataWindow>(window: T): T {
         return {
             ...window,
             startIndex: window.startIndex + this.windowStart,

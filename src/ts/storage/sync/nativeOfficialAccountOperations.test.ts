@@ -3,19 +3,92 @@ import { get } from 'svelte/store'
 import { doingChat, reserveGeneration } from '../../process/generationState'
 import { isLibraryFileOperationReserved } from '../libraryFileOperation'
 import { cancelActiveNativeFileOperation, dismissNativeFileOperationOutcome, nativeFileOperation, nativeFileOperationOutcome } from '../nativeFileJobManager'
-import { publishNativeOfficialAccountBackup, restoreNativeOfficialAccountBackup } from './nativeOfficialAccountOperations'
+import { publishNativeOfficialAccountBackup, restoreNativeOfficialAccountBackup, recoverNativeOfficialAccountAssets, resumeNativeOfficialAccountAssets } from './nativeOfficialAccountOperations'
+import { syntheticNativeFileJobStatus } from '../nativeFileJobs'
+import { emptyOfficialAccountAssetCounts } from './officialAccountAssetOutcome'
+import { runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
+import { BackgroundExecutionExpiredError } from '../../iosNative'
+import { unprotectedMobileTask } from '../../mobileBackgroundTask.testSupport'
 
-const mocks = vi.hoisted(() => ({ restore: vi.fn(), publish: vi.fn(), assertAvailable: vi.fn() }))
+const mocks = vi.hoisted(() => ({ restore: vi.fn(), publish: vi.fn(), assertAvailable: vi.fn(), resumeAssets: vi.fn(), inspectAssets: vi.fn(), stopAssets: vi.fn() }))
 vi.mock('./nativeOfficialAccountFlow', () => ({ getNativeOfficialAccountFlow: () => mocks }))
 vi.mock('./serverSyncProduction', () => ({ getServerSyncController: () => ({ assertFileOperationAvailable: mocks.assertAvailable }) }))
-vi.mock('../../mobileBackgroundTask', () => ({
-    measuredTaskPercent: () => 0,
-    runWithMobileBackgroundTask: (_kind: string, operation: (task: unknown) => Promise<unknown>, signal: AbortSignal) => operation({ signal, progress: vi.fn() }),
-}))
+vi.mock('../../mobileBackgroundTask', async () => (await import('../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 beforeEach(() => { vi.clearAllMocks(); dismissNativeFileOperationOutcome(); doingChat.set(false) })
 
 describe('shared official account operations', () => {
+    it('does not turn expired background recovery into a deliberate stop', async () => {
+        const controller = new AbortController()
+        vi.mocked(runWithDeferredMobileBackgroundTask).mockImplementationOnce(async (_kind, operation) =>
+            operation(unprotectedMobileTask(controller.signal)))
+        mocks.resumeAssets.mockImplementationOnce(async options => {
+            controller.abort(new BackgroundExecutionExpiredError())
+            throw options.signal.reason
+        })
+        await expect(resumeNativeOfficialAccountAssets({ operationId: 'expired' }, false)).rejects.toMatchObject({ name: 'AbortError' })
+        expect(mocks.stopAssets).not.toHaveBeenCalled()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ interruption: 'background-expired' })
+    })
+    it.each(['none', 'retry', 'current-library'])('does not auto-run a %s continuation', async kind => {
+        mocks.inspectAssets.mockResolvedValue({ kind })
+        await recoverNativeOfficialAccountAssets()
+        expect(mocks.resumeAssets).not.toHaveBeenCalled()
+    })
+
+    it('visibly recovers an interrupted receipt with the common reservation and cancellation owner', async () => {
+        let finishStop!: () => void
+        mocks.stopAssets.mockImplementationOnce(() => new Promise<void>(resolve => { finishStop = resolve }))
+        mocks.inspectAssets.mockResolvedValue({ kind: 'interrupted', operationId: 'receipt-1' })
+        mocks.resumeAssets.mockImplementation(async options => {
+            expect(options.operationId).toBe('receipt-1')
+            const status = syntheticNativeFileJobStatus({ kind: 'restore-official-account-snapshot' }, 'downloading-account-assets')
+            status.officialAssets = { operationId: 'receipt-1', phase: 'downloading', state: 'running', counts: emptyOfficialAccountAssetCounts() }
+            options.onStatus(status)
+            await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => {
+                options.onStatus({ ...status, officialAssets: { ...status.officialAssets!, state: 'cancelled' } })
+                reject(options.signal.reason)
+            }))
+        })
+        const recovery = recoverNativeOfficialAccountAssets()
+        await vi.waitFor(() => expect(get(nativeFileOperation)?.status?.officialAssets?.operationId).toBe('receipt-1'))
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        // Automatic recovery is protected only if the app leaves the screen.
+        expect(runWithDeferredMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('restore', expect.any(Function), expect.any(AbortSignal))
+        expect(runWithMobileBackgroundTask).not.toHaveBeenCalled()
+        expect(get(nativeFileOperation)?.presentation).toBe('dialog')
+        cancelActiveNativeFileOperation()
+        await vi.waitFor(() => expect(mocks.stopAssets).toHaveBeenCalledWith('receipt-1'))
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        finishStop()
+        await recovery
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ state: 'cancelled', partialWritesPossible: true })
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+
+    it('reattaches duplicate requests for the same receipt instead of starting another worker', async () => {
+        let finish!: () => void
+        mocks.resumeAssets.mockImplementation(() => new Promise<void>(resolve => { finish = resolve }))
+        const first = resumeNativeOfficialAccountAssets({ operationId: 'receipt-2' })
+        const second = resumeNativeOfficialAccountAssets({ operationId: 'receipt-2' })
+        expect(first).toBe(second)
+        await vi.waitFor(() => expect(mocks.resumeAssets).toHaveBeenCalledOnce())
+        expect(runWithMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('restore', expect.any(Function), expect.any(AbortSignal), true)
+        finish(); await first
+    })
+    it('keeps a missing-only retry result visible until it is dismissed', async () => {
+        mocks.resumeAssets.mockImplementationOnce(async options => {
+            const status = syntheticNativeFileJobStatus({ kind: 'restore-official-account-snapshot' }, 'finishing-account-restore')
+            status.officialAssets = { operationId: 'receipt-missing', phase: 'finishing', state: 'succeeded',
+                counts: { ...emptyOfficialAccountAssetCounts(), required: 1, missing: 1 } }
+            options.onStatus(status)
+        })
+        await resumeNativeOfficialAccountAssets({ operationId: 'receipt-missing' })
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ state: 'succeeded',
+            status: { officialAssets: { counts: { missing: 1 } } } })
+        await dismissNativeFileOperationOutcome()
+        expect(get(nativeFileOperationOutcome)).toBeNull()
+    })
     it('keeps publication alive across callers and exposes measured asset progress', async () => {
         let finish!: () => void
         mocks.publish.mockImplementation(async (signal, progress) => {

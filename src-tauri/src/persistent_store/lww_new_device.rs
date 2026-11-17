@@ -397,7 +397,7 @@ impl PersistentStore {
         self.connection.execute("UPDATE lww_outbox SET authority=?2 WHERE authority=?1", params![header.binding_authority.0.to_string(), new_authority.0.to_string()])?;
         crate::server_sync::carry_operation_log(&self.repository_root, header.binding_authority, new_authority, false)
             .map_err(|failure| error(failure.code))?;
-        self.copy_device_unit_bodies(changes)?;
+        let missing = self.copy_device_unit_bodies(changes)?;
         self.external_lww_release_writer_jobs(old_writer_id)?;
         let root = self.repository_root.clone();
         let tx = self.device_store_mut()?.transaction()?;
@@ -411,7 +411,7 @@ impl PersistentStore {
         if current_writer != old_writer_id {
             return Err(error("new-device-intent-writer-changed"));
         }
-        reset_target_device(&tx, &root, header, changes, new_authority)?;
+        reset_target_device(&tx, &root, header, changes, new_authority, &missing)?;
         tx.execute("DELETE FROM lww_progress", [])?;
         // The retired writer never sends again, so its unsettled segments and
         // sequences are dropped instead of waiting for an answer forever.

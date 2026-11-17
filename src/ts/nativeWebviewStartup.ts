@@ -9,7 +9,7 @@ export function installNativeWebviewHandling() {
     fetch: nativeFetch,
     save: async (name, bytes) => {
       const { downloadFile } = await import("./globalApi.svelte");
-      return downloadFile(name, bytes, { saveDialog: true });
+      return downloadFile(name, bytes);
     },
     reportError: async error => {
       const { alertError } = await import("./alert");

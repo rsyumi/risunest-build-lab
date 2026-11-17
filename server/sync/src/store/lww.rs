@@ -1,6 +1,7 @@
 use super::{json, parse, random_id, Device, Store};
 use crate::{Error, Result};
 use risunest_sync_wire::{
+    library_format,
     lww::{
         AckRequest, CancelOperationRequest, ChangesPage, JournalItem, OperationReceipt,
         PushReceipt, PushRequest, StatePage, StatePin, TimeSample, UnitChange,
@@ -48,7 +49,7 @@ pub(super) fn parents(key: &UnitKey) -> Result<Vec<UnitKey>> {
 fn is_retirement(change: &UnitChange) -> bool {
     change.key.components()[0] == "exists" && change.value == UnitValue::Deleted
 }
-fn read_unit(db: &Connection, key: &str) -> Result<Option<UnitChange>> {
+pub(super) fn read_unit(db: &Connection, key: &str) -> Result<Option<UnitChange>> {
     db.query_row("SELECT body FROM units WHERE key=?1", [key], |r| {
         r.get::<_, String>(0)
     })
@@ -154,6 +155,28 @@ pub(super) fn alias_object(bytes: &str) -> Result<Option<String>> {
 fn is_alias(key: &UnitKey) -> bool {
     matches!(key.components()[0].as_str(), "asset" | "inlay")
 }
+/// A level push applies by level, not by stamp: a higher level applies, the
+/// same level is an accepted no-op, and nothing lowers or removes it.
+fn raises_level(library: u64, change: &UnitChange) -> Result<bool> {
+    let key = change.key.as_str();
+    if change.value == UnitValue::Deleted {
+        return Err(Error::new("library-format-downgrade", 409).for_key(key));
+    }
+    let level = library_format::level(&change.value)
+        .filter(|_| library_format::is_canonical(&change.value))
+        .ok_or_else(|| Error::new("invalid-library-format", 400).for_key(key))?;
+    if level < library {
+        return Err(Error::new("library-format-downgrade", 409).for_key(key));
+    }
+    Ok(level > library)
+}
+/// Content a level 1 library cannot hold: its released clients reject a
+/// `plugin-local` value that names byte parts.
+fn needs_level_two(change: &UnitChange) -> bool {
+    matches!(&change.value, UnitValue::Object { descriptor, .. }
+        if change.key.components()[0] == "plugin-local"
+            && (!descriptor.dependencies.is_empty() || descriptor.dependency_root.is_some()))
+}
 
 impl Store {
     pub fn time_sample(&self) -> Result<TimeSample> {
@@ -164,12 +187,21 @@ impl Store {
     }
 
     pub fn push(&self, device: &Device, request: &PushRequest) -> Result<PushReceipt> {
-        self.push_at(device, request, time_ms)
+        self.push_at(device, request, false, time_ms)
+    }
+    /// A level push that applies only while the library holds no other unit.
+    pub fn push_to_empty_library(
+        &self,
+        device: &Device,
+        request: &PushRequest,
+    ) -> Result<PushReceipt> {
+        self.push_at(device, request, true, time_ms)
     }
     pub(super) fn push_at(
         &self,
         device: &Device,
         request: &PushRequest,
+        empty_only: bool,
         clock: impl FnOnce() -> Result<u64>,
     ) -> Result<PushReceipt> {
         validate_id(&request.operation_id)?;
@@ -207,8 +239,31 @@ impl Store {
         if let Some(receipt) = replay(&tx, device, &request.operation_id, &digest)? {
             return Ok(receipt);
         }
+        let level = Self::stored_format(&tx)?;
+        // A level this server does not know waits for a server update, so the
+        // refusal is not kept as the operation's answer.
+        if request.changes.iter().any(|change| {
+            library_format::is_key(&change.key)
+                && library_format::level(&change.value)
+                    .is_some_and(|level| level > crate::LIBRARY_FORMAT_MAX_LEVEL)
+        }) {
+            return Err(Error::new("sync-server-update-required", 409));
+        }
         let validation = (|| -> Result<Vec<UnitChange>> {
             preparation?;
+            if empty_only {
+                if request.changes.len() != 1 || !library_format::is_key(&request.changes[0].key) {
+                    return Err(Error::new("invalid-precondition", 400));
+                }
+                let occupied: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM units WHERE key<>?1)",
+                    [library_format::KEY],
+                    |row| row.get(0),
+                )?;
+                if occupied {
+                    return Err(Error::new("library-not-empty", 409));
+                }
+            }
             // A device publishes with the one writer that joined, claimed or first published with it.
             let other_writer: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM writers WHERE device=?1 AND writer<>?2)",
@@ -255,6 +310,16 @@ impl Store {
                     return Err(
                         Error::new("equal-stamp-integrity", 409).for_key(change.key.as_str())
                     );
+                }
+                if library_format::is_key(&change.key) {
+                    if raises_level(level, change)? {
+                        winners.push(change.clone());
+                    }
+                    continue;
+                }
+                if level == 1 && needs_level_two(change) {
+                    return Err(Error::new("library-format-switch-required", 409)
+                        .for_key(change.key.as_str()));
                 }
                 let local = read_unit(&tx, change.key.as_str())?;
                 let decision = match &local {
@@ -306,6 +371,10 @@ impl Store {
             }
             Err(error) => return Err(error),
         };
+        let raised = winners
+            .iter()
+            .find(|change| library_format::is_key(&change.key))
+            .and_then(|change| library_format::level(&change.value));
         tx.execute(
             "INSERT OR IGNORE INTO writers VALUES(?1,?2)",
             params![request.writer_id, device.id],
@@ -388,6 +457,12 @@ impl Store {
             None,
         )?;
         tx.commit()?;
+        // Raised before the writer is released, so no later push commits
+        // against the old level.
+        if let Some(level) = raised {
+            self.format_level
+                .store(level, std::sync::atomic::Ordering::SeqCst);
+        }
         drop(db);
         self.announce_head();
         Ok(receipt)

@@ -40,7 +40,7 @@ export async function exportCompatibilityBackupFromSystemPicker(
     return runSharedNativeFileOperation(
         'export',
         `compatibility-backup-export:${target}`,
-        async ({ signal: managedSignal, onStatus }) => {
+        async ({ signal: managedSignal, onStatus, protect }) => {
             const controller = new AbortController()
             const cancel = () => controller.abort()
             const signals = [
@@ -85,6 +85,7 @@ export async function exportCompatibilityBackupFromSystemPicker(
                     destination = { type: 'desktopPath', path }
                 }
                 let report: NativeCompatibilityReport | undefined
+                let destinationChosen = false
                 const result = await runNativeCompatibleLocalBackupExport(
                     getPersistentDataRuntime(),
                     target,
@@ -98,8 +99,25 @@ export async function exportCompatibilityBackupFromSystemPicker(
                             onStatus(status)
                             options.onStatus?.(status)
                         },
+                        onDestinationChosen: () => {
+                            destinationChosen = true
+                            protect()
+                            options.onDestinationChosen?.()
+                        },
                     },
-                )
+                ).catch((error: unknown) => {
+                    // Backing out of the Android save picker ends like a dismissed
+                    // desktop dialog; a cancelled export still rejects.
+                    if (
+                        !destinationChosen &&
+                        !controller.signal.aborted &&
+                        error instanceof DOMException &&
+                        error.name === 'AbortError'
+                    )
+                        return null
+                    throw error
+                })
+                if (!result) return null
                 if (report) options.onReport?.(report)
                 return {
                     ...result,
@@ -111,6 +129,6 @@ export async function exportCompatibilityBackupFromSystemPicker(
             }
         },
         // Full-library admission prevents sync while the snapshot is captured.
-        { presentation: 'dialog', format: 'library-backup' },
+        { presentation: 'dialog', format: 'library-backup', protectAfterPicker: true },
     ).finally(resumeServerSyncAfterBackup)
 }

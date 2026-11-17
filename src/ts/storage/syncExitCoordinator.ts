@@ -52,6 +52,8 @@ export interface SyncExitCoordinatorDependencies {
     checkpointLocal(): Promise<void>
     captureTarget(): Promise<SyncExitTarget>
     selectedDrain(): SyncExitDrainAdapter | null | Promise<SyncExitDrainAdapter | null>
+    /** Runs once the coordinator decides to exit, before the caller ends the app. */
+    prepareExit?(): Promise<void>
     softWaitMillis?: number
     setTimer?(callback: () => void, delay: number): unknown
     clearTimer?(timer: unknown): void
@@ -372,7 +374,16 @@ export function createSyncExitCoordinator(
     return {
         requestExit(): Promise<SyncExitDisposition> {
             if (pending) return pending
-            pending = run().finally(() => {
+            pending = run().then(async (disposition) => {
+                if (disposition === 'exit') {
+                    try {
+                        await dependencies.prepareExit?.()
+                    } catch (error) {
+                        dependencies.reportError?.(error)
+                    }
+                }
+                return disposition
+            }).finally(() => {
                 pending = undefined
                 decision = undefined
                 repeatedClose = false

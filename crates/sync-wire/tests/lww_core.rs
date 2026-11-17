@@ -42,7 +42,37 @@ fn clock_admission_is_target_specific_fresh_and_includes_uncertainty() {
     assert!(clock.incoming_upper_ms("target", 900_100).is_err());
     let mut bad = sample(); bad.target_ms += MAX_CLOCK_SKEW_MS;
     assert_eq!(bad.admit().unwrap_err(), WireError("clock-skew"));
-    bad = sample(); bad.response_wall_ms += 1001; assert!(bad.admit().is_err());
+    for movement in [-5001_i64, -5000, -4999, 0, 4999, 5000, 5001] {
+        let mut shifted = sample();
+        shifted.response_wall_ms = (shifted.response_wall_ms as i64 + movement) as u64;
+        if movement.abs() > 5000 {
+            assert_eq!(shifted.admit().unwrap_err(), WireError("clock-discontinuity"), "{movement}");
+        } else {
+            let admitted = shifted.admit().unwrap();
+            assert_eq!(admitted.incoming_upper_ms("target", 100).unwrap(), 1_300_100, "{movement}");
+            assert_eq!(admitted.admit_incoming("target", 100, &stamp(1_300_101, 0)),
+                Err(WireError("incoming-clock-skew")));
+        }
+    }
+    // At the five-minute boundary, both sides of a correction must fit the offset proof.
+    for movement in [-5000_i64, 5000] {
+        for direction in [-1_i64, 1] {
+            let mut shifted = sample();
+            shifted.response_wall_ms = (shifted.response_wall_ms as i64 + movement) as u64;
+            let midpoint = (shifted.request_wall_ms + shifted.response_wall_ms) / 2;
+            shifted.target_ms = (midpoint as i64 + direction * 297_450) as u64;
+            assert!(shifted.admit().is_ok(), "{movement} {direction}");
+            shifted.target_ms = (shifted.target_ms as i64 + direction) as u64;
+            assert_eq!(shifted.admit().unwrap_err(), WireError("clock-skew"));
+        }
+    }
+    bad = sample(); bad.precision_ms = u64::MAX;
+    assert_eq!(bad.admit().unwrap_err(), WireError("clock-overflow"));
+    let mut edge = sample();
+    edge.request_wall_ms = u64::MAX - 100;
+    edge.response_wall_ms = u64::MAX;
+    edge.target_ms = u64::MAX - 50;
+    assert_eq!(edge.admit().unwrap().incoming_upper_ms("target", 100), Err(WireError("clock-overflow")));
     bad = sample(); bad.response_monotonic_ms = 0; bad.request_monotonic_ms = 1; assert!(bad.admit().is_err());
     bad = sample(); bad.cached_or_aged = true; assert!(bad.admit().is_err());
     bad = sample(); bad.successful = false; assert!(bad.admit().is_err());

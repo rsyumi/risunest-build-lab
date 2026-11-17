@@ -34,10 +34,12 @@ export interface OfficialAccountBootstrapDependencies {
     configurePublisher(publisher: OfficialRevisionPublisher | null): void
     assetReader: OfficialAccountAssetReader
     configureAssetReader(reader: OfficialAccountAssetReader | null): void
-    chooseExistingRemote(): Promise<'pull' | 'push'>
+    chooseExistingRemote(): Promise<'pull' | 'push' | 'cancel'>
     confirmInitialPush(): Promise<boolean>
     installDatabase(database: Database): void
     initializeWorkingSet(database: Database): Promise<void>
+    /** Turns account sync off in the installed database so it stays off until the user enables it again. */
+    disableAccountSync(): void
     onRemoteError(error: unknown): void
     /** Reports a boot pull skipped because local revisions were never published. */
     onPullSkipped?(input: { conflict: boolean }): void
@@ -108,10 +110,11 @@ export async function initializeOfficialAccountBootstrap(
     const wasEnabled = !dependencies.isTauri && dependencies.markers.getItem('accountst') === 'able'
     let revision = dependencies.local.revision
     let officialEnabled = false
+    let syncCancelled = false
 
     if (!dependencies.isTauri && accountSyncRequested(dependencies)) {
         try {
-            let action: 'pull' | 'push'
+            let action: 'pull' | 'push' | 'cancel'
             if (wasEnabled) {
                 action = 'pull'
             } else {
@@ -125,12 +128,17 @@ export async function initializeOfficialAccountBootstrap(
                 const pulled = await dependencies.adapter.pull()
                 if (pulled.kind === 'activated') revision = pulled.revision
                 if (pulled.kind === 'missing') action = 'push'
+                // Declining a restore that leaves data out keeps local data, like cancelling account sync.
+                if (pulled.kind === 'declined') action = 'cancel'
                 if (pulled.kind === 'kept-local') {
                     dependencies.onPullSkipped?.({ conflict: pulled.conflict })
                 }
             }
 
-            if (action === 'push') {
+            if (action === 'cancel') {
+                dependencies.markers.setItem('dosync', 'avoid')
+                syncCancelled = true
+            } else if (action === 'push') {
                 if (!await dependencies.confirmInitialPush()) {
                     dependencies.markers.setItem('dosync', 'avoid')
                 } else {
@@ -161,5 +169,7 @@ export async function initializeOfficialAccountBootstrap(
     }
     dependencies.installDatabase(resolved.database)
     await dependencies.initializeWorkingSet(resolved.database)
+    // After initialization, so the change is saved like any other edit.
+    if (syncCancelled) dependencies.disableAccountSync()
     return { database: resolved.database, revision, officialEnabled }
 }

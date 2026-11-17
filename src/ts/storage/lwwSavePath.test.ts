@@ -201,10 +201,15 @@ describe('LWW renderer save path', () => {
         expect(runtime.captureSelectedConversationTarget()!.storeRevision).toBe(runtime.revision)
         await source.ensureRange({ startIndex: 8, limit: 2, reason: 'viewport' })
         expect(source.snapshot().rowAt(8)!.message.data).toBe('synthetic-8')
-        mutations = [{ key: '["conversation","selected","selected-chat","note"]', type: 'set', value: 'Received note' }]
+        const link = { id: 'received-preset', fingerprint: 'received fingerprint' }
+        mutations = [
+            { key: '["conversation","selected","selected-chat","note"]', type: 'set', value: 'Received note' },
+            { key: '["conversation","selected","selected-chat","authorNotePreset"]', type: 'set', value: link },
+        ]
         await receive()
         expect(runtime.getActiveConversationViewportSource()).not.toBe(source)
         expect(selected().chats[0].note).toBe('Received note')
+        expect(selected().chats[0].authorNotePreset).toEqual(link)
         const afterReceiveRevision = runtime.revision
         await runtime.flushPendingDataLocally('after-relevant-receive')
         expect(runtime.revision).toBe(afterReceiveRevision)
@@ -373,15 +378,19 @@ describe('LWW renderer save path', () => {
         expect((await store.readRoot()).value).toHaveProperty('opaqueFutureField',{local:true})
     })
 
-    it('applies received chat edit popup and color scheme root settings', async () => {
+    it('applies received chat edit popup, color scheme, Realm creator block and loadout apply root settings', async () => {
         const {database} = await harness()
         database.risunestChatEditPopup = true
         const baseline = captureLwwWorkingSetBaseline(database,capturePersistentRoot(database),database.botPresets)
         const colorScheme = {...database.colorScheme,bgcolor:'#101010'}
-        const reader = createLeaseStub({readRoot:async()=>({revision:2,value:{...capturePersistentRoot(database),risunestChatEditPopup:false,colorScheme}})})
-        await applyLwwWorkingSetUnits(database,baseline,reader,['["root","risunestChatEditPopup"]','["root","colorScheme"]'])
+        const blockedRealmCreators = [{id:'synthetic-creator',name:'Synthetic creator'}]
+        const loadoutApplyOptions = {modules:false,globalVariables:true,preset:false,persona:true}
+        const reader = createLeaseStub({readRoot:async()=>({revision:2,value:{...capturePersistentRoot(database),risunestChatEditPopup:false,colorScheme,blockedRealmCreators,loadoutApplyOptions}})})
+        await applyLwwWorkingSetUnits(database,baseline,reader,['["root","risunestChatEditPopup"]','["root","colorScheme"]','["root","blockedRealmCreators"]','["root","loadoutApplyOptions"]'])
         expect(database.risunestChatEditPopup).toBe(false)
         expect(database.colorScheme).toEqual(colorScheme)
+        expect(database.blockedRealmCreators).toEqual(blockedRealmCreators)
+        expect(database.loadoutApplyOptions).toEqual(loadoutApplyOptions)
     })
 
     it('reports received root fields whose working-set value changed', async () => {
@@ -466,13 +475,14 @@ describe('LWW renderer save path', () => {
         Object.assign(live.chats[0],{opaqueOwn:'local-chat',isStreaming:true})
         const baseline = captureLwwWorkingSetBaseline(database,capturePersistentRoot(database),database.botPresets)
         live['statics'].messages = 5
+        const onboarding = {enabled:true,mode:'form' as const,questions:[{id:'q1',title:'Synthetic question',type:'text' as const,varName:'answer',options:[]}]}
         const reader = createLeaseStub({
-            readCharacter:async()=>({revision:2,value:{...live,opaqueOwn:'remote',lastInteraction:99,statics:{messages:100,shared:42}}}),
-            readConversationMetadata:async()=>({revision:2,value:{characterId:live.chaId,conversationId:live.chats[0].id,conversation:{...live.chats[0],opaqueOwn:'remote-chat',isStreaming:false,note:'shared note'},totalMessages:live.chats[0].message.length}}),
+            readCharacter:async()=>({revision:2,value:{...live,opaqueOwn:'remote',lastInteraction:99,statics:{messages:100,shared:42},onboarding}}),
+            readConversationMetadata:async()=>({revision:2,value:{characterId:live.chaId,conversationId:live.chats[0].id,conversation:{...live.chats[0],opaqueOwn:'remote-chat',isStreaming:false,note:'shared note',onboardingDone:true},totalMessages:live.chats[0].message.length}}),
         })
-        await applyLwwWorkingSetUnits(database,baseline,reader,['["character","char-a","opaqueOwn"]','["character","char-a","lastInteraction"]','["character","char-a","statics"]','["conversation","char-a","conv-long","opaqueOwn"]','["conversation","char-a","conv-long","isStreaming"]','["conversation","char-a","conv-long","note"]'])
-        expect(live).toMatchObject({opaqueOwn:'local',lastInteraction:7,statics:{messages:5,shared:42}})
-        expect(live.chats[0]).toMatchObject({opaqueOwn:'local-chat',isStreaming:true,note:'shared note'})
+        await applyLwwWorkingSetUnits(database,baseline,reader,['["character","char-a","opaqueOwn"]','["character","char-a","lastInteraction"]','["character","char-a","statics"]','["character","char-a","onboarding"]','["conversation","char-a","conv-long","opaqueOwn"]','["conversation","char-a","conv-long","isStreaming"]','["conversation","char-a","conv-long","note"]','["conversation","char-a","conv-long","onboardingDone"]'])
+        expect(live).toMatchObject({opaqueOwn:'local',lastInteraction:7,statics:{messages:5,shared:42},onboarding})
+        expect(live.chats[0]).toMatchObject({opaqueOwn:'local-chat',isStreaming:true,note:'shared note',onboardingDone:true})
     })
 
     it.each([false, true])('patches only catalog fields of received character units into a stub (kept baseline=%s)', async (keptBaseline) => {

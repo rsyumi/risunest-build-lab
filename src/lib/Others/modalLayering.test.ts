@@ -8,6 +8,7 @@ const customSidebarConfig = readFileSync('src/lib/Others/CustomSidebarConfig.sve
 const categoryManagerModal = readFileSync('src/lib/Others/HypaV3Modal/category-manager-modal.svelte', 'utf8')
 const tagManagerModal = readFileSync('src/lib/Others/HypaV3Modal/tag-manager-modal.svelte', 'utf8')
 const irisModal = readFileSync('src/lib/Others/IrisModal.svelte', 'utf8')
+const onboardingModal = readFileSync('src/lib/Others/OnboardingModal.svelte', 'utf8')
 const nativeFileJobDialog = readFileSync('src/lib/Others/NativeFileJobDialog.svelte', 'utf8')
 const persistentWorkingSetRecovery = readFileSync('src/lib/Others/PersistentWorkingSetRecovery.svelte', 'utf8')
 const updatePopup = readFileSync('src/lib/Others/UpdatePopup.svelte', 'utf8')
@@ -37,13 +38,15 @@ const observer = readFileSync('src/ts/observer.svelte.ts', 'utf8')
  * the update dialog and `z-work-dialog-recovery` for the working-set recovery. In-screen
  * layers such as chat overlay buttons, context menus, drag ghosts, and the text area stack
  * keep their local z-index so their internal ordering (for example the z-100 autocomplete
- * above the z-50 editor) survives.
+ * above the z-50 editor) survives. The code block menu is appended to the body and opens over
+ * whichever screen holds the code, so it sits on `z-modal-menu` above the modals.
  */
 const modalSources: Record<string, string> = {
     'AlertComp.svelte': alertComp,
     'PopupEditor.svelte': popupEditor,
     'TextEditorPopup.svelte': textEditorPopup,
     'IrisModal.svelte': irisModal,
+    'OnboardingModal.svelte': onboardingModal,
     'CustomSidebarConfig.svelte': customSidebarConfig,
     'HypaV3Modal/category-manager-modal.svelte': categoryManagerModal,
     'HypaV3Modal/tag-manager-modal.svelte': tagManagerModal,
@@ -64,7 +67,6 @@ const inScreenSources: Record<string, string> = {
     'UI/PromptDataItem.svelte': promptDataItem,
     'UI/GUI/TextAreaInput.svelte': textAreaInput,
     'ProTools/EasyPanel.svelte': easyPanel,
-    'ts/observer.svelte.ts': observer,
 }
 
 const workDialogSources: Record<string, string> = {
@@ -82,6 +84,12 @@ const styles = readFileSync(join(process.cwd(), 'src', 'styles.css'), 'utf8')
 
 function count(source: string, token: string): number {
     return source.split(token).length - 1
+}
+
+function utilityZIndex(name: string): number {
+    const match = styles.match(new RegExp(`@utility ${name} \\{\\s*z-index: (\\d+);\\s*\\}`))
+    expect(match, name).not.toBeNull()
+    return Number(match![1])
 }
 
 describe('modal layering', () => {
@@ -106,10 +114,12 @@ describe('modal layering', () => {
         expect(checkboxDialog).toContain('aria-describedby="checkbox-confirm-description"')
     })
 
-    it('mounts the text editor popup before the alerts so alerts cover it', () => {
+    it('mounts the text editor popup and the onboarding before the alerts so alerts cover them', () => {
         const app = readFileSync('src/App.svelte', 'utf8')
-        expect(app.indexOf('<TextEditorPopup ')).toBeGreaterThan(-1)
-        expect(app.indexOf('<TextEditorPopup ')).toBeLessThan(app.indexOf('<AlertComp />'))
+        for (const mount of ['<TextEditorPopup ', '<OnboardingModal />']) {
+            expect(app.indexOf(mount), mount).toBeGreaterThan(-1)
+            expect(app.indexOf(mount), mount).toBeLessThan(app.indexOf('<AlertComp />'))
+        }
     })
 
     it('leaves in-screen layers on their local z-index', () => {
@@ -117,6 +127,14 @@ describe('modal layering', () => {
             expect(count(source, 'z-modal'), name).toBe(0)
         }
         expect(count(textAreaInput, 'z-100')).toBe(1)
+    })
+
+    it('opens the code block menu above the modals and below the app lock', () => {
+        const menuLayer = utilityZIndex('z-modal-menu')
+        expect(menuLayer).toBeGreaterThan(utilityZIndex('z-modal'))
+        expect(menuLayer).toBeLessThan(utilityZIndex('z-app-lock'))
+        expect(count(observer, 'z-modal-menu')).toBe(1)
+        expect(/\bz-50\b/.test(observer)).toBe(false)
     })
 
     it('keeps work dialogs below the modal layer', () => {

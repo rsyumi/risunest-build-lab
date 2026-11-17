@@ -18,6 +18,9 @@ use std::{
 };
 /// The one mutable head, refused by every delete.
 const HEAD_OBJECT: &str = "head";
+/// Bounds a test wait only against a deadlock. A wait that spans the process-wide
+/// CPU permit also measures other tests' holds, so it gets no tighter bound.
+pub(crate) const DEADLOCK_TEST_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(super) fn capabilities(cas: bool) -> Capabilities {
     Capabilities {
@@ -102,8 +105,10 @@ pub(super) struct FakeState {
     pub(super) listing_delay: Option<std::time::Duration>,
     pub(super) incomplete_cleanup_delay: Option<std::time::Duration>,
     pub(super) incomplete_cleanup_empty_pages: usize,
+    pub(super) container_delete_error: Option<ErrorKind>,
     scripted_pages: Vec<(Collection, Result<ObjectPage>)>,
     inventory_upload_failure: Option<ErrorKind>,
+    open_failure: Option<ErrorKind>,
     upload_failure: Option<(usize, ErrorKind)>,
     first_upload: Option<std::time::Instant>,
     sent_body_bytes: u64,
@@ -247,6 +252,11 @@ impl FakeProvider {
     pub(crate) fn upload_attempts(&self, object: &str) -> usize {
         self.state.lock().unwrap().upload_attempts.iter().filter(|id| id.as_str() == object).count()
     }
+    /// Fails every later open of the repository, as a connection whose key or
+    /// sign-in this device lacks does.
+    pub(crate) fn fail_open(&self, kind: ErrorKind) {
+        self.state.lock().unwrap().open_failure = Some(kind);
+    }
     pub(crate) fn fail_inventory_upload(&self, kind: ErrorKind) {
         self.state.lock().unwrap().inventory_upload_failure = Some(kind);
     }
@@ -380,6 +390,7 @@ impl Provider for FakeProvider {
         Box::pin(async move {
             self.requested();
             c.check()?;
+            if let Some(kind) = self.state.lock().unwrap().open_failure { return Err(ProviderError::new(kind)); }
             let mut capabilities = capabilities(self.cas);
             capabilities.max_stored_bytes = Some(self.object_limit);
             let mut repository = repository();
@@ -578,6 +589,23 @@ impl Provider for FakeProvider {
             self.write(l, None, h.as_bytes())
         })
     }
+    fn replace_descriptor<'a>(
+        &'a self,
+        r: &'a RepositoryHandle,
+        l: &'a RemoteLocator,
+        b: &'a HeadBytes,
+        c: &'a Cancellation,
+    ) -> ProviderFuture<'a, HeadReceipt> {
+        Box::pin(async move {
+            self.requested();
+            c.check()?;
+            l.validate_for(r)?;
+            if self.state.lock().unwrap().roles.get(&l.object) != Some(&ObjectRole::Descriptor) {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+            self.write(l, None, b.as_bytes())
+        })
+    }
     fn supports_incomplete_cleanup(&self) -> bool { true }
     fn cleanup_incomplete_objects<'a>(&'a self, r: &'a RepositoryHandle, _protected: &'a [String], cursor: Option<&'a str>, limit: usize, deleting: &'a (dyn Fn(bool) + Send + Sync), cancel: &'a Cancellation) -> ProviderFuture<'a,IncompleteCleanupPage> {
         Box::pin(async move {
@@ -598,6 +626,17 @@ impl Provider for FakeProvider {
                 deleting(false);
             }
             Ok(IncompleteCleanupPage { removed: unfinished.len() as u64, next_cursor: None })
+        })
+    }
+    fn delete_empty_container<'a>(
+        &'a self, _: &'a RepositoryHandle, _: &'a RemoteLocator,
+        _: &'a [String], _: &'a Cancellation,
+    ) -> ProviderFuture<'a, ()> {
+        Box::pin(async move {
+            match self.state.lock().unwrap().container_delete_error.take() {
+                Some(kind) => Err(ProviderError::new(kind)),
+                None => Ok(()),
+            }
         })
     }
     fn delete_object<'a>(
@@ -637,21 +676,25 @@ impl Provider for FakeProvider {
                     oauth_error: None,
                     oauth_error_description: None,
                     cause: Default::default(),
+                    connection_id: None,
                 }),
                 Some(DeleteFault::Accepted) => Err(ProviderError {
                     kind: ErrorKind::Unsupported, http_status: Some(202), retry_at_ms: None,
                     oauth_error: None, oauth_error_description: None, cause: Default::default(),
+                    connection_id: None,
                 }),
                 Some(DeleteFault::NotFound) => {
                     self.forget(&l.object);
                     Err(ProviderError {
                         kind: ErrorKind::NotFound, http_status: Some(404), retry_at_ms: None,
                         oauth_error: None, oauth_error_description: None, cause: Default::default(),
+                        connection_id: None,
                     })
                 }
                 Some(DeleteFault::Unauthorized) => Err(ProviderError {
                     kind: ErrorKind::Unauthorized, http_status: Some(401), retry_at_ms: None,
                     oauth_error: None, oauth_error_description: None, cause: Default::default(),
+                    connection_id: None,
                 }),
                 // A target that is already gone answers the same as one removed now.
                 None => {

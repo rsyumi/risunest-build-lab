@@ -40,6 +40,8 @@ export interface BackupPickerContext {
     signal: AbortSignal
     onStatus(status: NativeFileJobStatus): void
     onSource(source: SourceInfo): void
+    /** Begins the background hold once a picker has returned. */
+    protect(): void
 }
 export type BackupSourceFactory = (
     context: BackupPickerContext,
@@ -80,7 +82,7 @@ export async function exportPortableBackupFromSystemPicker(
     return runSharedNativeFileOperation(
         'export',
         'portable-backup-export',
-        async ({ signal, onStatus }) => {
+        async ({ signal, onStatus, protect }) => {
             const joined = combineSignals(signal, options.signal)
             try {
                 checkSignal(joined.signal)
@@ -102,6 +104,7 @@ export async function exportPortableBackupFromSystemPicker(
                           })
                 if (!isTauriAndroid && !isTauriIOS && !path) return null
                 checkSignal(joined.signal)
+                let destinationChosen = false
                 return await runNativeArchiveExport(
                     getPersistentDataRuntime(),
                     isTauriIOS
@@ -118,20 +121,36 @@ export async function exportPortableBackupFromSystemPicker(
                             onStatus(status)
                             options.onStatus?.(status)
                         },
+                        onDestinationChosen() {
+                            destinationChosen = true
+                            protect()
+                            options.onDestinationChosen?.()
+                        },
                     },
-                )
+                ).catch((error: unknown) => {
+                    // Backing out of the Android save picker ends like a dismissed
+                    // desktop dialog; a cancelled export still rejects.
+                    if (
+                        !destinationChosen &&
+                        !joined.signal.aborted &&
+                        error instanceof DOMException &&
+                        error.name === 'AbortError'
+                    )
+                        return null
+                    throw error
+                })
             } finally {
                 joined.dispose()
             }
         },
-        { presentation: 'dialog', format: 'library-backup' },
+        { presentation: 'dialog', format: 'library-backup', protectAfterPicker: true },
     )
 }
 
 export function restoreBackupFromSystemPicker(
     options: BackupRestoreOptions = {},
 ) {
-    return restoreBackupFromNativeSource(async (context) => {
+    return restoreBackupFromSource(async (context) => {
         if (isTauriIOS) {
             const picked = await pickIOSBackupSource(context.signal)
             if (!picked) return null
@@ -146,7 +165,9 @@ export function restoreBackupFromSystemPicker(
                         name: source.displayName,
                         bytes: source.bytes,
                     }),
-                onProgress: (progress) =>
+                onProgress: (progress) => {
+                    // Copying starts once the picker returns, so the copy is the first protected work.
+                    context.protect()
                     context.onStatus(
                         syntheticNativeFileJobStatus(
                             {
@@ -162,7 +183,8 @@ export function restoreBackupFromSystemPicker(
                                     : { stageTotal: progress.totalBytes }),
                             },
                         ),
-                    ),
+                    )
+                },
             })
         const path = await open({
             multiple: false,
@@ -173,12 +195,20 @@ export function restoreBackupFromSystemPicker(
         })
         if (typeof path !== 'string') return null
         return { type: 'desktopPath', path }
-    }, options)
+    }, options, true)
 }
 
-export async function restoreBackupFromNativeSource(
+export function restoreBackupFromNativeSource(
     source: NativeFileJobSource | BackupSourceFactory,
     options: BackupRestoreOptions = {},
+): Promise<BackupRestoreResult | null> {
+    return restoreBackupFromSource(source, options, false)
+}
+
+async function restoreBackupFromSource(
+    source: NativeFileJobSource | BackupSourceFactory,
+    options: BackupRestoreOptions,
+    sourceFromPicker: boolean,
 ): Promise<BackupRestoreResult | null> {
     if (!isTauri)
         throw new NativeFileJobError(
@@ -223,9 +253,12 @@ export async function restoreBackupFromNativeSource(
                               signal: joined.signal,
                               onStatus,
                               onSource,
+                              protect: context.protect,
                           })
                         : source
                 if (!input) return null
+                // The source is chosen, so the restore holds the background task from here.
+                context.protect()
                 if (input.type === 'androidSeekable' || input.type === 'iosScoped' || input.type === 'savedConflict') selectedCustody = input
                 if (input.type === 'desktopPath')
                     onSource(await nativeRestoreDeadline(describeDesktopSource(input.path), 'source metadata', undefined, undefined, undefined, joined.signal))
@@ -340,6 +373,6 @@ export async function restoreBackupFromNativeSource(
                 }
             }
         },
-        { presentation: 'dialog', format: 'library-backup' },
+        { presentation: 'dialog', format: 'library-backup', protectAfterPicker: sourceFromPicker },
     )
 }

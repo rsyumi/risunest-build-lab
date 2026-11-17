@@ -5,7 +5,9 @@ import { DBState, selectedCharID } from '../stores.svelte'
 import { processMultiCommand } from './command'
 import { createConversationOperationContext } from './conversationOperationContext'
 import { createChatParserDependencyStamp } from '../chatRenderIdentity'
-import { DisplayReadRecord, recordAmbientChatVariableReads } from './scriptVariableReads'
+import { DisplayReadRecord, recordAmbientChatVariableReads, registerDisplayRow } from './scriptVariableReads'
+import { StallingWorker } from '../../../tests/support/regexWorker'
+import { authorNoteFingerprint, effectiveAuthorNote } from '../authorNotePresets'
 
 const runtime = vi.hoisted(() => ({
     unexpectedNativeRuntimeAccess: () => {
@@ -30,8 +32,12 @@ vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
 vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))
 vi.mock('./stableDiff', () => ({ generateAIImage: vi.fn() }))
 vi.mock('./files/inlays', () => ({ writeInlayImage: vi.fn() }))
+vi.mock('./memory/hypamemory', async () => (await import('./tests/scriptingsTestHarness')).hypamemoryModule())
 
 const { runTrigger } = await import('./triggers')
+const { requestChatData } = await import('./request/request')
+const { generateAIImage } = await import('./stableDiff')
+const { HypaProcesser } = await import('./memory/hypamemory')
 
 function fixture() {
     const chat = {
@@ -75,6 +81,110 @@ function fixture() {
 beforeEach(() => {
     runtime.session = null
     selectedCharID.set(0)
+})
+
+test('skips a stalled regex condition and replacement and continues the trigger', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    try {
+        const { chat, char } = fixture()
+        char.triggerscript = [{
+            comment: 'condition', type: 'start',
+            conditions: [{ type: 'exists', type2: 'regex', value: 'SLOW-condition|zero', depth: 2 }],
+            effect: [{ type: 'modifychat', index: '0', value: 'must not run' }],
+        }, {
+            comment: 'replacement', type: 'start', conditions: [], effect: [{
+                type: 'v2ReplaceString', source: 'source', sourceType: 'var',
+                regex: 'pattern', regexType: 'var', flags: 'gs', flagsType: 'value',
+                result: '$0', resultType: 'value', replacement: 'bad', replacementType: 'value',
+                outputVar: 'replacement', indent: 0,
+            }, {
+                type: 'v2RegexTest', value: 'finished', valueType: 'value', regex: '^finished$', regexType: 'value',
+                flags: '', flagsType: 'value', outputVar: 'continued', indent: 0,
+            }],
+        }] as character['triggerscript']
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        chat.scriptstate = { $source: '<unchanged>', $pattern: 'SLOW-replacement|unchanged' }
+        const regexGeneration = {}
+        const result = runTrigger(char, 'start', { chat, regexGeneration })
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect((await result)?.chat.scriptstate).toMatchObject({ $replacement: '<unchanged>', $continued: '1' })
+        expect((await result)?.chat.message[0].data).toBe('zero')
+        const nextChat = (await result)!.chat
+        nextChat.scriptstate.$source = '<updated>'
+        nextChat.scriptstate.$pattern = 'updated'
+        const repeated = await runTrigger(char, 'start', { chat: nextChat, regexGeneration })
+        expect(repeated?.chat.scriptstate.$replacement).toBe('<updated>')
+        nextChat.scriptstate.$source = '<next>'
+        nextChat.scriptstate.$pattern = 'next'
+        const nextGeneration = await runTrigger(char, 'start', { chat: nextChat, regexGeneration: {} })
+        expect(nextGeneration?.chat.scriptstate.$replacement).toBe('<bad>')
+    } finally { vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
+})
+
+test('skips a display trigger regex that timed out on other text in a later display run', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    try {
+        const { chat, char, session } = fixture()
+        char.triggerscript = [{
+            comment: 'display test', type: 'display', conditions: [], effect: [{
+                type: 'v2RegexTest', value: 'source', valueType: 'var', regex: 'SLOW-display-trigger|text', regexType: 'value',
+                flags: '', flagsType: 'value', outputVar: 'matched', indent: 0,
+            }],
+        }] as character['triggerscript']
+        runtime.session = session
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        chat.scriptstate = { $source: '<text>' }
+        const first = runTrigger(char, 'display', { chat, displayMode: true, displayData: 'row' })
+        await vi.advanceTimersByTimeAsync(10_000)
+        await first
+        chat.scriptstate.$source = '<edited text>'
+        let finished = false
+        const edited = runTrigger(char, 'display', { chat, displayMode: true, displayData: 'row' })
+            .finally(() => { finished = true })
+        await vi.advanceTimersByTimeAsync(1)
+        expect(finished).toBe(true)
+        await edited
+    } finally { vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
+})
+
+test('keeps lorebook name matches before a stalled comment, skips the rest, and later skips only that comment', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    const posted = vi.spyOn(StallingWorker.prototype, 'postMessage')
+    try {
+        const { chat, char } = fixture()
+        const lookup = (name: string) => [{ comment: 'lookup', type: 'start', conditions: [], effect: [{
+            type: 'v2GetLorebookByName', name, nameType: 'value', outputVar: 'found', indent: 0,
+        }] }] as character['triggerscript']
+        const late = Array.from({ length: 70 }, (_, index) => ({ comment: `alpha ${index}` }))
+        char.globalLore = [{ comment: 'Alpha' }, { comment: 'SLOW beta' }, {}, ...late] as character['globalLore']
+        char.triggerscript = lookup('alpha')
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        const requests = () => {
+            const count = posted.mock.calls.filter(([message]) => message.type === 'testEach').length
+            posted.mockClear()
+            return count
+        }
+        const first = runTrigger(char, 'start', { chat, regexGeneration: {} })
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect((await first)?.chat.scriptstate.$found).toBe('[0]')
+        expect(requests()).toBe(1)
+        const second = await runTrigger(char, 'start', { chat, regexGeneration: {} })
+        expect(second?.chat.scriptstate.$found).toBe(JSON.stringify([0, ...late.map((_, index) => index + 3)]))
+        expect(requests()).toBe(2)
+
+        char.triggerscript = lookup('(')
+        await expect(runTrigger(char, 'start', { chat, regexGeneration: {} })).rejects.toThrow(/Invalid regular expression/)
+        char.globalLore = [{}] as character['globalLore']
+        posted.mockClear()
+        expect((await runTrigger(char, 'start', { chat, regexGeneration: {} }))?.chat.scriptstate.$found).toBe('[]')
+        expect(requests()).toBe(0)
+    } finally { posted.mockRestore(); vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
 })
 
 test('keeps stored trigger permissions and parser identity stable during display', async () => {
@@ -254,11 +364,17 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
     const { chat, char, session } = fixture()
     char.triggerscript[0].effect = [
         { type: 'setvar', var: 'state', value: '', operator: '=' },
+        { type: 'v2GetAuthorNote', outputVar: 'before' },
         { type: 'v2SetAuthorNote', value: 'operation note', valueType: 'value' },
     ] as never
     runtime.session = session
+    // The stored copy already equals the written value, so only the dropped link shows the write.
+    chat.note = 'operation note'
+    chat.authorNotePreset = { id: 'preset', fingerprint: authorNoteFingerprint('operation note') }
+    const presets = [{ id: 'preset', name: 'Preset', text: 'Preset note' }]
     DBState.db = {
         characters: [char],
+        authorNotePresets: presets,
         templateDefaultVariables: '',
     } as never
 
@@ -267,8 +383,9 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
         manualName: 'ordered',
     })
 
-    expect(chat.scriptstate).toEqual({ '$state': '' })
-    expect(chat.note).toBe('operation note')
+    expect(chat.scriptstate).toEqual({ '$state': '', '$before': 'Preset note' })
+    expect(effectiveAuthorNote(presets, chat)).toBe('operation note')
+    expect(chat.authorNotePreset).toBeUndefined()
     expect(session.version).toBe(1)
 })
 
@@ -417,6 +534,8 @@ test.each(['variables', 'message edit'] as const)(
                 (error: unknown) => error,
             )
             await vi.advanceTimersByTimeAsync(0)
+            // Variables set before the wait are committed while it waits.
+            expect(chat.scriptstate).toEqual({ $state: 'new' })
             session.edit(session.locate(0), { role: 'user', data: 'concurrent', chatId: 'message-0' })
             await vi.advanceTimersByTimeAsync(1)
 
@@ -434,6 +553,118 @@ test.each(['variables', 'message edit'] as const)(
         }
     },
 )
+
+test.each([
+    { type: 'runLLM', value: 'prompt', inputVar: 'out' },
+    { type: 'runImgGen', value: 'prompt', negValue: '', inputVar: 'out' },
+    { type: 'checkSimilarity', value: 'value', source: 'source', inputVar: 'out' },
+    { type: 'v2RunLLM', value: 'prompt', valueType: 'value', outputVar: 'out', model: 'model' },
+    { type: 'v2ImgGen', value: 'prompt', valueType: 'value', negValue: '', negValueType: 'value', outputVar: 'out' },
+    { type: 'v2CheckSimilarity', source: 'source', sourceType: 'value', value: 'value', valueType: 'value', outputVar: 'out' },
+])('commits trigger variables before $type waits and message edits at the end', async (wait) => {
+    const { chat, char, session } = fixture()
+    char.lowLevelAccess = true
+    char.triggerscript[0].effect = [
+        { type: 'modifychat', index: '0', value: 'edited' },
+        { type: 'setvar', var: 'state', value: 'new', operator: '=' },
+        wait,
+    ] as never
+    runtime.session = session
+    DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+    const atWait: unknown[] = []
+    const record = () => atWait.push({
+        messages: chat.message.map((message) => message.data),
+        scriptstate: { ...chat.scriptstate },
+    })
+    vi.mocked(requestChatData).mockReset().mockImplementation(async () => {
+        record()
+        return { type: 'success', result: 'done' } as never
+    })
+    vi.mocked(generateAIImage).mockReset().mockImplementation(async () => {
+        record()
+        return false
+    })
+    vi.mocked(HypaProcesser).mockReset().mockImplementation(function () {
+        return {
+            addText: async () => { record() },
+            similaritySearch: async () => [],
+        } as never
+    })
+
+    await runTrigger(char, 'manual', { chat, manualName: 'ordered' })
+
+    expect(atWait).toEqual([{ messages: ['zero', 'one'], scriptstate: { $state: 'new' } }])
+    expect(chat.message.map((message) => message.data)).toEqual(['edited', 'one'])
+    expect(chat.scriptstate).toEqual({ $state: 'new', $out: expect.any(String) })
+})
+
+test('stops a trigger at the next wait once its conversation is no longer current', async () => {
+    const original = fixture()
+    original.char.lowLevelAccess = true
+    original.char.triggerscript[0].effect = [
+        // The first result is buffered after the conversation changed, so only the flush stops the second request.
+        { type: 'v2RunLLM', value: 'first', valueType: 'value', outputVar: 'first', model: 'model' },
+        { type: 'v2RunLLM', value: 'second', valueType: 'value', outputVar: 'second', model: 'model' },
+    ] as never
+    const replacement = fixture()
+    replacement.char.chaId = 'character-2'
+    replacement.chat.id = 'conversation-2'
+    const replacementSession = new ActiveConversationSession({
+        characterId: replacement.char.chaId,
+        conversationId: replacement.chat.id!,
+        conversation: replacement.chat,
+        storeRevision: 20,
+    })
+    runtime.session = original.session
+    DBState.db = {
+        characters: [original.char, replacement.char],
+        templateDefaultVariables: '',
+    } as never
+    let resolveFirst!: (value: unknown) => void
+    vi.mocked(requestChatData).mockReset()
+        .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }) as never)
+        .mockResolvedValue({ type: 'success', result: 'second' } as never)
+
+    const settled = runTrigger(original.char, 'manual', {
+        chat: original.chat,
+        manualName: 'ordered',
+    }).then(() => null, (error: unknown) => error)
+    await vi.waitFor(() => expect(requestChatData).toHaveBeenCalledOnce())
+    selectedCharID.set(1)
+    runtime.session = replacementSession
+    resolveFirst({ type: 'success', result: 'first' })
+
+    expect(await settled).toEqual(expect.objectContaining({
+        message: expect.stringMatching(/inactive/i),
+    }))
+    expect(requestChatData).toHaveBeenCalledOnce()
+    expect(original.chat.scriptstate).toEqual({})
+    expect(replacement.chat.scriptstate).toEqual({})
+})
+
+test.each([
+    { type: 'v2UpdateGUI', rebuilt: [true, true] },
+    { type: 'v2UpdateChatAt', index: '1', rebuilt: [false, true] },
+])('rebuilds the mounted rows that $type reaches', async ({ rebuilt, ...effect }) => {
+    const { chat, char, session } = fixture()
+    char.triggerscript[0].effect = [{ ...effect, indent: 0 }] as never
+    runtime.session = session
+    DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+    // Rows whose display read no chat variable.
+    const rows = [0, 1].map((index) => {
+        const row = registerDisplayRow(() => index)
+        row.track('body', new DisplayReadRecord())
+        return row
+    })
+    const initial = rows.map((row) => row.rebuildRevision)
+    try {
+        await runTrigger(char, 'manual', { chat, manualName: 'ordered' })
+
+        expect(rows.map((row, index) => row.rebuildRevision !== initial[index])).toEqual(rebuilt)
+    } finally {
+        for (const row of rows) row.dispose()
+    }
+})
 
 test('does not publish Trigger metadata to either conversation after navigation', async () => {
     const original = fixture()
@@ -478,7 +709,8 @@ test('does not publish Trigger metadata to either conversation after navigation'
             message: expect.stringMatching(/inactive/i),
         }))
         expect(original.chat.note).toBe('original note')
-        expect(original.chat.scriptstate).toEqual({})
+        // The variable was committed before the wait, while its conversation was current.
+        expect(original.chat.scriptstate).toEqual({ $state: 'operation value' })
         expect(replacement.chat.note).toBe('replacement note')
         expect(replacement.chat.scriptstate).toEqual({})
     } finally {
@@ -561,6 +793,31 @@ test('does not clone conversation history when no trigger exists', async () => {
     })).resolves.toBeNull()
 
     expect(historyReads).toBe(0)
+})
+
+test('does not copy the character when no trigger runs in this mode', async () => {
+    const { chat, char, session } = fixture()
+    let descriptionReads = 0
+    Object.defineProperty(char, 'desc', {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+            descriptionReads += 1
+            return 'description'
+        },
+    })
+    runtime.session = session
+    DBState.db = {
+        characters: [char],
+        templateDefaultVariables: '',
+    } as never
+
+    await runTrigger(char, 'output', { chat })
+    await runTrigger(char, 'manual', { chat, manualName: 'missing' })
+    expect(descriptionReads).toBe(0)
+
+    await runTrigger(char, 'manual', { chat, manualName: 'ordered' })
+    expect(chat.message.map((message) => message.data)).toEqual(['', 'one', 'tail'])
 })
 
 test('reuses a supplied operation chat across recursive triggers without cloning it', async () => {

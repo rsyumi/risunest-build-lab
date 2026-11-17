@@ -1,8 +1,11 @@
+mod archive_names;
 pub(crate) mod data_health;
+pub(crate) mod gallery;
 pub(crate) mod image_geometry;
 pub(crate) mod hypa;
 
 use super::archive::ArchivePreview;
+use super::asset_alias_orphans::{OrphanAliasScope, OWNED_ASSET_KEY_PREFIX};
 use super::device_store::plugin_values::{
     PluginDeviceHydration, PluginDeviceListItem, PluginDeviceMutation, PluginDeviceRead, PluginDeviceRange,
 };
@@ -65,18 +68,89 @@ impl Drop for ArchiveOperationGuard<'_> {
     }
 }
 
-#[derive(Default)]
+/// How long an operation waits for a page reset before it is refused like any
+/// other maintenance, so a wait that the reset itself depends on still ends.
+const RENDERER_RESET_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+#[cfg(test)]
+thread_local! {
+    /// Runs while the gate is still locked, just before this thread waits out a page reset.
+    static RESET_WAIT_ENTERED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 struct RendererGate {
     state: Mutex<RendererGateState>,
     drained: Condvar,
+    /// Wakes operations that wait out a page reset.
+    reopened: Condvar,
+    reset_wait: std::time::Duration,
+}
+
+impl Default for RendererGate {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            drained: Condvar::new(),
+            reopened: Condvar::new(),
+            reset_wait: RENDERER_RESET_WAIT,
+        }
+    }
+}
+
+impl RendererGate {
+    /// Waits, without occupying an async worker, until a page reset ends or `deadline` passes.
+    fn wait_out_reset<'a>(
+        &'a self,
+        state: std::sync::MutexGuard<'a, RendererGateState>,
+        deadline: std::time::Instant,
+    ) -> StoreResult<std::sync::MutexGuard<'a, RendererGateState>> {
+        if !state.resetting {
+            return Ok(state);
+        }
+        #[cfg(test)]
+        RESET_WAIT_ENTERED.with(|hook| { if let Some(hook) = hook.borrow_mut().take() { hook(); } });
+        crate::async_worker::blocking(|| {
+            let mut state = state;
+            while state.resetting {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                state = self
+                    .reopened
+                    .wait_timeout(state, remaining)
+                    .map_err(|error| StoreError::Store {
+                        message: format!("persistent renderer reset mutex poisoned: {error}"),
+                    })?
+                    .0;
+            }
+            Ok(state)
+        })
+    }
 }
 
 #[derive(Default)]
 struct RendererGateState {
     maintenance_active: bool,
+    /// The maintenance is a page reset, which operations wait out instead of failing.
+    resetting: bool,
+    /// A page started during other maintenance. When that maintenance ends,
+    /// admission passes to the page's reset instead of reopening.
+    reset_after_maintenance: bool,
     operations: usize,
     /// Advances whenever renderer maintenance starts.
     epoch: u64,
+    /// Long operations that stop when maintenance starts instead of delaying it.
+    cancellations: Vec<std::sync::Weak<AtomicBool>>,
+}
+
+impl RendererGateState {
+    fn begin_maintenance(&mut self) {
+        self.maintenance_active = true;
+        for cancel in self.cancellations.drain(..) {
+            if let Some(cancel) = cancel.upgrade() { cancel.store(true, Ordering::Release); }
+        }
+    }
 }
 
 /// Covers the entire native side effect, including work outside the SQLite lock.
@@ -109,11 +183,18 @@ pub(crate) struct DeviceMaintenanceGuard {
 
 impl Drop for DeviceMaintenanceGuard {
     fn drop(&mut self) {
-        self.gate
+        let mut state = self
+            .gate
             .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .maintenance_active = false;
+            .unwrap_or_else(|error| error.into_inner());
+        if std::mem::take(&mut state.reset_after_maintenance) {
+            state.resetting = true;
+        } else {
+            state.maintenance_active = false;
+            state.resetting = false;
+        }
+        self.gate.reopened.notify_all();
     }
 }
 
@@ -161,6 +242,15 @@ impl PersistentStoreState {
         Ok(true)
     }
 
+    /// Runs a write to a store file that does not go through the store, such as
+    /// the recovery shell's app lock record, after any store open under way.
+    pub(crate) fn outside_store_open<T>(&self, operation: impl FnOnce() -> T) -> StoreResult<T> {
+        let _store = lock_store(&self.store).map_err(|error| StoreError::Store {
+            message: format!("persistent store mutex poisoned: {error}"),
+        })?;
+        Ok(operation())
+    }
+
     pub(crate) fn maintenance_active(&self) -> bool {
         self.renderer_gate
             .state
@@ -168,9 +258,23 @@ impl PersistentStoreState {
             .is_ok_and(|state| state.maintenance_active)
     }
 
+    /// Admits an operation, waiting out a page reset of the main document.
     pub(crate) fn admit_renderer_operation(&self) -> StoreResult<RendererOperationGuard> {
-        self.try_admit_renderer_operation()?
+        self.try_admit_renderer_operation_at(None, true)?
             .ok_or_else(renderer_gate_error)
+    }
+
+    /// Sets `cancel` when renderer maintenance starts, so an admitted operation
+    /// that may run for minutes does not hold maintenance until it finishes.
+    pub(crate) fn cancel_on_renderer_maintenance(&self, cancel: &Arc<AtomicBool>) -> StoreResult<()> {
+        let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
+        if state.maintenance_active {
+            cancel.store(true, Ordering::Release);
+            return Ok(());
+        }
+        state.cancellations.retain(|registered| registered.strong_count() > 0);
+        state.cancellations.push(Arc::downgrade(cancel));
+        Ok(())
     }
 
     /// The maintenance epoch a command records when it is dispatched, before it
@@ -186,16 +290,20 @@ impl PersistentStoreState {
     /// Admits an operation dispatched at `epoch` only if no renderer maintenance
     /// or reset has started since, so a request queued before it never runs after it.
     pub(crate) fn admit_renderer_operation_dispatched_at(&self, epoch: u64) -> StoreResult<RendererOperationGuard> {
-        self.try_admit_renderer_operation_at(Some(epoch))?
+        self.try_admit_renderer_operation_at(Some(epoch), true)?
             .ok_or_else(renderer_gate_error)
     }
 
-    /// Admits an operation unless device maintenance holds the gate.
+    /// Admits an operation unless maintenance or a page reset holds the gate, without waiting.
     fn try_admit_renderer_operation(&self) -> StoreResult<Option<RendererOperationGuard>> {
-        self.try_admit_renderer_operation_at(None)
+        self.try_admit_renderer_operation_at(None, false)
     }
 
-    fn try_admit_renderer_operation_at(&self, dispatched: Option<u64>) -> StoreResult<Option<RendererOperationGuard>> {
+    fn try_admit_renderer_operation_at(
+        &self,
+        dispatched: Option<u64>,
+        wait_for_reset: bool,
+    ) -> StoreResult<Option<RendererOperationGuard>> {
         let mut state = self
             .renderer_gate
             .state
@@ -203,6 +311,15 @@ impl PersistentStoreState {
             .map_err(|error| StoreError::Store {
                 message: format!("persistent renderer admission mutex poisoned: {error}"),
             })?;
+        if wait_for_reset && state.resetting && dispatched.is_none_or(|epoch| epoch == state.epoch) {
+            let entered = state.epoch;
+            let deadline = std::time::Instant::now() + self.renderer_gate.reset_wait;
+            state = self.renderer_gate.wait_out_reset(state, deadline)?;
+            // A later page start or maintenance refuses what waited for this reset.
+            if state.epoch != entered {
+                return Ok(None);
+            }
+        }
         if state.maintenance_active || dispatched.is_some_and(|epoch| epoch != state.epoch) {
             return Ok(None);
         }
@@ -212,6 +329,7 @@ impl PersistentStoreState {
         }))
     }
 
+    #[track_caller]
     pub(crate) fn open_admitted_native_job_store(
         &self,
         operation: &RendererOperationGuard,
@@ -219,6 +337,7 @@ impl PersistentStoreState {
         with_store_mutex_admitted(self, operation, PersistentStore::open_native_job_store)
     }
 
+    #[track_caller]
     pub(crate) fn with_status_job_store<T>(&self, operation: impl FnOnce(&PersistentStore) -> T) -> StoreResult<T> {
         let permit = self.admit_renderer_operation()?;
         let mut cached = self.status_store.lock().map_err(|_| renderer_gate_error())?;
@@ -233,10 +352,11 @@ impl PersistentStoreState {
 
     pub(crate) fn acquire_cleanup_maintenance(&self, timeout: std::time::Duration) -> StoreResult<DeviceMaintenanceGuard> {
         let deadline = std::time::Instant::now() + timeout;
-        let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
+        let state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
+        let mut state = self.renderer_gate.wait_out_reset(state, deadline)?;
         if state.maintenance_active { return Err(renderer_gate_error()); }
-        state.maintenance_active = true;
         state.epoch += 1;
+        state.begin_maintenance();
         let maintenance = DeviceMaintenanceGuard { gate: Arc::clone(&self.renderer_gate) };
         while state.operations != 0 {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -250,8 +370,9 @@ impl PersistentStoreState {
             state = waited.0;
         }
         drop(state);
+        super::storage_breakdown::stop();
         self.status_store.lock().map_err(|_| renderer_gate_error())?.take();
-        self.store.lock().map_err(|_| renderer_gate_error())?.take();
+        lock_store(&self.store).map_err(|_| renderer_gate_error())?.take();
         Ok(maintenance)
     }
 
@@ -259,12 +380,12 @@ impl PersistentStoreState {
         let maintenance = self
             .try_acquire_renderer_maintenance()?
             .ok_or_else(renderer_gate_error)?;
+        super::storage_breakdown::stop();
         self.status_store.lock().map_err(|_| renderer_gate_error())?.take();
         // No new operation can enter between draining and closing the store.
         // Reopening after the guard is released refreshes the connection after
         // native restore and discards leases owned by the previous renderer.
-        self.store
-            .lock()
+        lock_store(&self.store)
             .map_err(|error| StoreError::Store {
                 message: format!("persistent store mutex poisoned: {error}"),
             })?
@@ -280,20 +401,20 @@ impl PersistentStoreState {
     }
 
     fn try_acquire_renderer_maintenance(&self) -> StoreResult<Option<DeviceMaintenanceGuard>> {
-        let mut state = self
+        let state = self
             .renderer_gate
             .state
             .lock()
             .map_err(|error| StoreError::Store {
                 message: format!("persistent renderer admission mutex poisoned: {error}"),
             })?;
-        // Advanced even when maintenance is already active, so a page reset
-        // then still refuses what the outgoing document dispatched.
+        let deadline = std::time::Instant::now() + self.renderer_gate.reset_wait;
+        let mut state = self.renderer_gate.wait_out_reset(state, deadline)?;
         state.epoch += 1;
         if state.maintenance_active {
             return Ok(None);
         }
-        state.maintenance_active = true;
+        state.begin_maintenance();
         let maintenance = DeviceMaintenanceGuard {
             gate: Arc::clone(&self.renderer_gate),
         };
@@ -321,23 +442,137 @@ impl PersistentStoreState {
                 message: "device maintenance guard belongs to another persistent store".to_owned(),
             });
         }
-        let mut store = self.store.lock().map_err(|error| StoreError::Store {
+        let mut store = lock_store(&self.store).map_err(|error| StoreError::Store {
             message: format!("persistent store mutex poisoned: {error}"),
         })?;
         open_persistent_store(app_data_dir, &mut store).map(|_| ())
     }
 
-    pub(crate) fn reset_renderer_session(&self) -> StoreResult<()> {
-        let Some(_maintenance) = self.try_acquire_renderer_maintenance()? else {
-            return Ok(());
-        };
-        let mut store = self.store.lock().map_err(|error| StoreError::Store {
-            message: format!("persistent store mutex poisoned: {error}"),
-        })?;
-        if let Some(store) = store.as_mut() {
-            store.release_all_revision_leases()?;
+    /// Starts the reset for a new main document without waiting, since a page
+    /// start arrives on the main thread. From here the outgoing document's
+    /// dispatched operations are refused and new operations wait until
+    /// `finish_renderer_reset` drops the returned guard. During other
+    /// maintenance, the reset starts when that maintenance ends.
+    pub(crate) fn begin_renderer_reset(&self) -> StoreResult<RendererReset> {
+        let mut state = self
+            .renderer_gate
+            .state
+            .lock()
+            .map_err(|error| StoreError::Store {
+                message: format!("persistent renderer admission mutex poisoned: {error}"),
+            })?;
+        // Advanced even when maintenance is already active, so the reset still
+        // refuses what the outgoing document dispatched.
+        state.epoch += 1;
+        if state.resetting || state.reset_after_maintenance {
+            return Ok(RendererReset::Pending);
         }
-        Ok(())
+        if state.maintenance_active {
+            state.reset_after_maintenance = true;
+            return Ok(RendererReset::AfterMaintenance(ResetAfterMaintenance {
+                gate: Some(Arc::clone(&self.renderer_gate)),
+            }));
+        }
+        state.begin_maintenance();
+        state.resetting = true;
+        Ok(RendererReset::Started(DeviceMaintenanceGuard {
+            gate: Arc::clone(&self.renderer_gate),
+        }))
+    }
+
+    /// Waits for the outgoing document's operations, releases its revision
+    /// leases and runs `after_drain` before new operations are admitted.
+    pub(crate) fn finish_renderer_reset(
+        &self,
+        maintenance: DeviceMaintenanceGuard,
+        after_drain: impl FnOnce(),
+    ) -> StoreResult<()> {
+        if !Arc::ptr_eq(&maintenance.gate, &self.renderer_gate) {
+            return Err(StoreError::Validation {
+                message: "renderer reset guard belongs to another persistent store".to_owned(),
+            });
+        }
+        let released = (|| {
+            let mut state = self
+                .renderer_gate
+                .state
+                .lock()
+                .map_err(|error| StoreError::Store {
+                    message: format!("persistent renderer admission mutex poisoned: {error}"),
+                })?;
+            while state.operations != 0 {
+                state = self
+                    .renderer_gate
+                    .drained
+                    .wait(state)
+                    .map_err(|error| StoreError::Store {
+                        message: format!("persistent renderer drain mutex poisoned: {error}"),
+                    })?;
+            }
+            drop(state);
+            let mut store = lock_store(&self.store).map_err(|error| StoreError::Store {
+                message: format!("persistent store mutex poisoned: {error}"),
+            })?;
+            match store.as_mut() {
+                Some(store) => store.release_all_revision_leases(),
+                None => Ok(()),
+            }
+        })();
+        after_drain();
+        drop(maintenance);
+        released
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_renderer_session(&self) -> StoreResult<()> {
+        match self.begin_renderer_reset()? {
+            RendererReset::Started(maintenance) => self.finish_renderer_reset(maintenance, || {}),
+            RendererReset::Pending => Ok(()),
+            RendererReset::AfterMaintenance(_) => panic!("a page start during maintenance resets after it ends"),
+        }
+    }
+}
+
+/// What a page start did to renderer admission.
+pub(crate) enum RendererReset {
+    /// This start closed admission; `finish_renderer_reset` reopens it.
+    Started(DeviceMaintenanceGuard),
+    /// Other maintenance holds admission and passes it to this start's reset when it ends.
+    AfterMaintenance(ResetAfterMaintenance),
+    /// An earlier start's reset has not finished and covers this start too.
+    Pending,
+}
+
+/// The reset of a page that started during other maintenance.
+pub(crate) struct ResetAfterMaintenance {
+    gate: Option<Arc<RendererGate>>,
+}
+
+impl ResetAfterMaintenance {
+    /// Waits, however long the maintenance lasts, until it ends, and returns
+    /// the guard that `finish_renderer_reset` takes.
+    pub(crate) fn wait_for_gate(mut self) -> DeviceMaintenanceGuard {
+        let gate = self.gate.take().expect("the reset holds its gate until it waits");
+        let mut state = gate.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.reset_after_maintenance {
+            state = gate.reopened.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+        drop(state);
+        DeviceMaintenanceGuard { gate }
+    }
+}
+
+impl Drop for ResetAfterMaintenance {
+    /// A reset dropped without running must not keep admission closed.
+    fn drop(&mut self) {
+        let Some(gate) = self.gate.take() else { return };
+        let mut state = gate.state.lock().unwrap_or_else(|error| error.into_inner());
+        // Before the maintenance ends, it reopens admission itself.
+        if std::mem::take(&mut state.reset_after_maintenance) {
+            return;
+        }
+        drop(state);
+        drop(DeviceMaintenanceGuard { gate });
     }
 }
 
@@ -395,6 +630,7 @@ fn start_retired_purge<R: tauri::Runtime>(app: &AppHandle<R>, state: &Persistent
         .name("pds-retired-purge".to_owned())
         .spawn(move || {
             let state = app.state::<PersistentStoreState>();
+            archive_names::record_held(&state);
             loop {
                 let pause = match logged(
                     "pds_retired_purge",
@@ -430,7 +666,7 @@ pub(crate) struct PersistentStoreOpenResult {
     revision: i64,
 }
 
-fn current_time_ms() -> StoreResult<i64> {
+pub(super) fn current_time_ms() -> StoreResult<i64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| StoreError::Store {
@@ -441,6 +677,14 @@ fn current_time_ms() -> StoreResult<i64> {
     })
 }
 
+/// Locks the renderer store. A wait or hold long enough to hold up other
+/// commands is recorded with the command that called the store helper.
+#[track_caller]
+fn lock_store(store: &Mutex<Option<PersistentStore>>) -> std::sync::LockResult<crate::slow_log::TimedGuard<'_, Option<PersistentStore>>> {
+    crate::slow_log::lock(store, "persistent store")
+}
+
+#[track_caller]
 pub(crate) fn with_store<T>(
     state: State<'_, PersistentStoreState>,
     operation: impl FnOnce(&PersistentStore) -> StoreResult<T>,
@@ -448,17 +692,19 @@ pub(crate) fn with_store<T>(
     with_store_mutex(&state, operation)
 }
 
+#[track_caller]
 pub(crate) fn with_store_if_ready<T>(
     state: &PersistentStoreState,
     operation: impl FnOnce(&PersistentStore) -> StoreResult<T>,
 ) -> StoreResult<Option<T>> {
     let Some(_guard) = state.try_admit_renderer_operation()? else { return Ok(None); };
-    let store = state.store.lock().map_err(|error| StoreError::Store {
+    let store = lock_store(&state.store).map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
     store.as_ref().map(operation).transpose()
 }
 
+#[track_caller]
 fn with_store_mutex<T>(
     state: &PersistentStoreState,
     operation: impl FnOnce(&PersistentStore) -> StoreResult<T>,
@@ -467,6 +713,7 @@ fn with_store_mutex<T>(
     with_store_mutex_admitted(state, &operation_guard, operation)
 }
 
+#[track_caller]
 fn with_store_mutex_admitted<T>(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
@@ -477,7 +724,7 @@ fn with_store_mutex_admitted<T>(
             message: "renderer operation permit belongs to another persistent store".to_owned(),
         });
     }
-    let store = state.store.lock().map_err(|error| StoreError::Store {
+    let store = lock_store(&state.store).map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
     let store = store.as_ref().ok_or_else(|| StoreError::Validation {
@@ -492,14 +739,13 @@ impl RendererOperationGuard {
     }
 }
 
-#[cfg(any(target_os = "android", test))]
 fn with_snapshot_directory<T>(
     state: &PersistentStoreState,
     operation: impl FnOnce(&Path) -> StoreResult<T>,
 ) -> StoreResult<T> {
     let _operation = state.admit_renderer_operation()?;
     let directory = {
-        let store = state.store.lock().map_err(|error| StoreError::Store {
+        let store = lock_store(&state.store).map_err(|error| StoreError::Store {
             message: format!("persistent store mutex poisoned: {error}"),
         })?;
         store
@@ -510,10 +756,11 @@ fn with_snapshot_directory<T>(
             .snapshots_dir
             .clone()
     };
-    // Archive owns its cross-process lock; listing does not need the live database.
+    // The archive owns its cross-process lock; a snapshot list or delete does not need the live database.
     operation(&directory)
 }
 
+#[track_caller]
 pub(crate) fn with_store_mut<T>(
     state: State<'_, PersistentStoreState>,
     operation: impl FnOnce(&mut PersistentStore) -> StoreResult<T>,
@@ -521,6 +768,7 @@ pub(crate) fn with_store_mut<T>(
     with_store_mutex_mut(&state, operation)
 }
 
+#[track_caller]
 fn with_store_mutex_mut<T>(
     state: &PersistentStoreState,
     operation: impl FnOnce(&mut PersistentStore) -> StoreResult<T>,
@@ -529,6 +777,7 @@ fn with_store_mutex_mut<T>(
     with_store_mutex_mut_admitted(state, &operation_guard, operation)
 }
 
+#[track_caller]
 pub(crate) fn with_store_mut_admitted<T>(
     state: State<'_, PersistentStoreState>,
     operation_guard: &RendererOperationGuard,
@@ -537,6 +786,7 @@ pub(crate) fn with_store_mut_admitted<T>(
     with_store_mutex_mut_admitted(&state, operation_guard, operation)
 }
 
+#[track_caller]
 fn with_store_mutex_mut_admitted<T>(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
@@ -547,7 +797,7 @@ fn with_store_mutex_mut_admitted<T>(
             message: "renderer operation permit belongs to another persistent store".to_owned(),
         });
     }
-    let mut store = state.store.lock().map_err(|error| StoreError::Store {
+    let mut store = lock_store(&state.store).map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
     let store = store.as_mut().ok_or_else(|| StoreError::Validation {
@@ -557,10 +807,12 @@ fn with_store_mutex_mut_admitted<T>(
     operation(store)
 }
 
-pub(crate) fn commit_staged_replacement(
-    app: &AppHandle,
+#[track_caller]
+pub(crate) fn commit_staged_replacement<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     staging_id: &str,
     expected_revision: Option<i64>,
+    binding_authority: Option<&str>,
 ) -> StoreResult<RevisionResult> {
     let state = app.state::<PersistentStoreState>();
     let operation_guard = state.admit_renderer_operation()?;
@@ -568,7 +820,7 @@ pub(crate) fn commit_staged_replacement(
         store.prepare_replace_commit(staging_id, expected_revision)
     })?;
     with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
-        store.finish_prepared_replace(prepared)
+        store.finish_prepared_replace_under(prepared, binding_authority)
     })
 }
 
@@ -597,6 +849,7 @@ pub(crate) fn open_for_renderer<R: tauri::Runtime>(
                 crate::nlog!("warn", "Asset journals await cleanup after the store opened: {error}");
             }
         }
+        crate::external_storage::leftovers::collect_released_content_later(app);
     }
     Ok(opened)
 }
@@ -621,11 +874,116 @@ fn open_renderer_persistent_store_admitted(
             message: "renderer operation permit belongs to another persistent store".to_owned(),
         });
     }
-    let mut store = state.store.lock().map_err(|error| StoreError::Store {
+    let mut store = lock_store(&state.store).map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
     let opening = store.is_none();
     open_persistent_store(app_data_dir, &mut store).map(|opened| (opened, opening))
+}
+
+/// Compacts the store files before the renderer opens the store when the
+/// previous start requested it, reporting the bytes copied through `progress`.
+/// Returns `None` when nothing was requested.
+#[tauri::command(async)]
+pub(crate) fn pds_store_compaction_at_start(
+    app: AppHandle,
+    state: State<'_, PersistentStoreState>,
+    progress: tauri::ipc::Channel<super::compaction::CompactionProgress>,
+) -> Result<Option<super::compaction::StartCompaction>, StoreError> {
+    logged("pds_store_compaction_at_start", (|| {
+        let operation_guard = state.admit_renderer_operation()?;
+        let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
+        let admission = app.try_state::<crate::native_file_jobs::NativeFileJobState>()
+            .map(|jobs| Arc::clone(&jobs.admission))
+            .ok_or_else(|| StoreError::Store { message: "native file admission is unavailable".to_owned() })?;
+        compact_requested_store(&state, &operation_guard, &app_data_dir, RequestedCompaction {
+            admission: &admission,
+            repository_lock: crate::asset_repository::coordinator::try_lock_repository_mutation,
+            available_space: |path: &Path| fs2::available_space(path),
+            progress_interval: super::compaction::PROGRESS_INTERVAL,
+        }, move |value| { let _ = progress.send(value); })
+    })())
+}
+
+struct RequestedCompaction<'a, S> {
+    admission: &'a Arc<crate::native_file_jobs::admission::Admission>,
+    /// Returns `None` when the repository mutation lock is busy.
+    repository_lock: fn() -> std::io::Result<Option<std::sync::MutexGuard<'static, ()>>>,
+    available_space: S,
+    progress_interval: std::time::Duration,
+}
+
+/// Compaction puts a copy in place of each store file, so a commit by another
+/// connection to the old file would be lost. Before the renderer opens the
+/// store nothing else holds the files: job and status stores open from the
+/// store, native jobs and server sync need the file admission taken here, asset
+/// job releases need the repository lock, and the recovery shell's app lock
+/// writer waits for the store mutex. A busy holder fails the compaction.
+fn compact_requested_store<S: Fn(&Path) -> std::io::Result<u64>>(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    app_data_dir: &Path,
+    compaction: RequestedCompaction<'_, S>,
+    report: impl Fn(super::compaction::CompactionProgress) + Clone + Send + 'static,
+) -> StoreResult<Option<super::compaction::StartCompaction>> {
+    if !operation_guard.belongs_to(state) {
+        return Err(StoreError::Validation {
+            message: "renderer operation permit belongs to another persistent store".to_owned(),
+        });
+    }
+    if !super::compaction::requested(app_data_dir)? {
+        return Ok(None);
+    }
+    let store = lock_store(&state.store).map_err(|error| StoreError::Store {
+        message: format!("persistent store mutex poisoned: {error}"),
+    })?;
+    // A renderer reload within the process finds the store open, and the
+    // request waits for the next start.
+    if store.is_some() {
+        return Ok(None);
+    }
+    // Recovery finishes on the files before they are copied.
+    let files = PersistentStore::open(app_data_dir)?.database_pages()?;
+    let permit = compaction.admission.file(true).ok();
+    let repository = (compaction.repository_lock)().ok().flatten();
+    let compacted = super::compaction::compact_requested(
+        app_data_dir,
+        files,
+        permit.is_some() && repository.is_some(),
+        compaction.available_space,
+        compaction.progress_interval,
+        report,
+    );
+    drop((permit, repository, store));
+    Ok(Some(compacted))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_store_compaction_request(
+    state: State<'_, PersistentStoreState>,
+) -> Result<StoreCompactionRequest, StoreError> {
+    logged(
+        "pds_store_compaction_request",
+        with_store(state, |store| Ok(match store.request_compaction(|path| fs2::available_space(path))? {
+            Some(shortfall_bytes) => StoreCompactionRequest::NoSpace { shortfall_bytes },
+            None => StoreCompactionRequest::Requested,
+        })),
+    )
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub(crate) enum StoreCompactionRequest {
+    Requested,
+    NoSpace { shortfall_bytes: u64 },
+}
+
+/// The reclaimable bytes the start notice offers, or `None` when it offers nothing.
+#[tauri::command(async)]
+pub(crate) fn pds_store_compaction_offer(
+    state: State<'_, PersistentStoreState>,
+) -> Result<Option<u64>, StoreError> {
+    logged("pds_store_compaction_offer", with_store(state, PersistentStore::compaction_offer))
 }
 
 fn open_persistent_store(
@@ -657,8 +1015,9 @@ pub(crate) fn pds_asset_gc_maintenance(
     }))
 }
 
-/// Sweeps one batch of message objects in each store, continuing from each
-/// store's cursor. It skips while device maintenance holds the renderer gate.
+/// Sweeps message objects in each store for up to the periodic budget,
+/// continuing from each store's cursor. It skips while device maintenance
+/// holds the renderer gate.
 #[tauri::command(async)]
 pub(crate) fn pds_message_object_sweep(
     app: AppHandle,
@@ -670,7 +1029,7 @@ pub(crate) fn pds_message_object_sweep(
     logged(
         "pds_message_object_sweep",
         sweep_message_pages(
-            file_admission(&app).as_ref(), &state, &operation_guard, current_time_ms()?, SweepBudget::OneBatch,
+            file_admission(&app).as_ref(), &state, &operation_guard, current_time_ms()?, SweepBudget::For(PERIODIC_MESSAGE_SWEEP_BUDGET),
         ),
     )
 }
@@ -686,6 +1045,17 @@ pub(crate) fn pds_read_root(
     lease: Option<String>,
 ) -> Result<Versioned<Value>, StoreError> {
     logged("pds_read_root", with_store(state, |store| store.read_root(lease.as_deref())))
+}
+
+/// The current revision, for callers that would otherwise read the whole root for it.
+#[tauri::command(async)]
+pub(crate) fn pds_read_revision(state: State<'_, PersistentStoreState>) -> Result<i64, StoreError> {
+    logged("pds_read_revision", with_store(state, |store| store.revision()))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_read_library_identity(state: State<'_, PersistentStoreState>) -> Result<String, StoreError> {
+    logged("pds_read_library_identity", with_store(state, |store| super::active_generation(&store.connection)))
 }
 
 #[tauri::command(async)]
@@ -781,14 +1151,24 @@ pub(crate) fn pds_query_conversations(
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_query_author_note_preset_usage(
+    state: State<'_, PersistentStoreState>,
+    preset_id: String,
+) -> Result<Vec<super::AuthorNotePresetUsage>, StoreError> {
+    logged("pds_query_author_note_preset_usage", with_store(state, |store| {
+        store.query_author_note_preset_usage(&preset_id)
+    }))
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_read_conversation(
     state: State<'_, PersistentStoreState>,
     character_id: String,
     conversation_id: String,
     lease: Option<String>,
-) -> Result<Option<Versioned<Value>>, StoreError> {
+) -> Result<Option<Versioned<super::StoredConversation>>, StoreError> {
     logged("pds_read_conversation", with_store(state, |store| {
-        store.read_conversation(&character_id, &conversation_id, lease.as_deref())
+        store.read_stored_conversation(&character_id, &conversation_id, lease.as_deref())
     }))
 }
 
@@ -809,9 +1189,9 @@ pub(crate) fn pds_read_conversation_window(
     state: State<'_, PersistentStoreState>,
     query: ConversationWindowQuery,
     lease: Option<String>,
-) -> Result<Option<Versioned<ConversationWindow>>, StoreError> {
+) -> Result<Option<Versioned<ConversationWindow<super::StoredJson>>>, StoreError> {
     logged("pds_read_conversation_window", with_store(state, |store| {
-        store.read_conversation_window(&query, lease.as_deref())
+        store.read_stored_conversation_window(&query, lease.as_deref())
     }))
 }
 
@@ -915,8 +1295,14 @@ pub(crate) fn pds_commit_asset_alias(
     state: State<'_, PersistentStoreState>,
     alias: AssetAlias,
     expected_revision: i64,
+    expected_library: Option<String>,
 ) -> Result<RevisionResult, StoreError> {
     logged("pds_commit_asset_alias", with_store_mut(state, |store| {
+        if let Some(expected) = expected_library {
+            if super::active_generation(&store.connection)? != expected {
+                return Err(StoreError::Validation { message: "Official asset library changed".into() });
+            }
+        }
         store.commit_asset_alias(&alias, expected_revision)
     }))
 }
@@ -1324,7 +1710,7 @@ pub(crate) fn pds_replace_commit(
     staging_id: String,
     expected_revision: Option<i64>,
 ) -> Result<RevisionResult, StoreError> {
-    logged("pds_replace_commit", commit_staged_replacement(&app, &staging_id, expected_revision))
+    logged("pds_replace_commit", commit_staged_replacement(&app, &staging_id, expected_revision, None))
 }
 
 #[tauri::command(async)]
@@ -1453,16 +1839,55 @@ pub(crate) fn pds_checkpoint(
     state: State<'_, PersistentStoreState>,
     mode: CheckpointMode,
 ) -> Result<(), StoreError> {
-    logged("pds_checkpoint", with_store(state, |store| store.checkpoint(mode)))
+    logged("pds_checkpoint", with_store(state, |store| store.checkpoint_or_passive(mode)))
+}
+
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_ARCHIVE_BUSY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `operation` with the store and its snapshot archive. A snapshot list or delete holds the
+/// archive without the store, so a busy archive is waited for after the store is released.
+fn with_store_and_snapshot_archive<T>(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    operation: impl FnOnce(&mut PersistentStore, super::snapshot_archive::Archive) -> StoreResult<T>,
+) -> StoreResult<T> {
+    if !operation_guard.belongs_to(state) {
+        return Err(StoreError::Validation {
+            message: "renderer operation permit belongs to another persistent store".to_owned(),
+        });
+    }
+    loop {
+        let directory = {
+            let mut store = lock_store(&state.store).map_err(|error| StoreError::Store {
+                message: format!("persistent store mutex poisoned: {error}"),
+            })?;
+            let store = store.as_mut().ok_or_else(|| StoreError::Validation {
+                message: "persistent store has not been opened".to_owned(),
+            })?;
+            match super::snapshot_archive::Archive::try_open(&store.snapshots_dir)? {
+                Some(archive) => return operation(store, archive),
+                None => store.snapshots_dir.clone(),
+            }
+        };
+        #[cfg(test)]
+        SNAPSHOT_ARCHIVE_BUSY.with(|hook| { if let Some(hook) = hook.borrow_mut().take() { hook(); } });
+        drop(super::snapshot_archive::Archive::open(&directory)?);
+    }
 }
 
 #[tauri::command(async)]
 pub(crate) fn pds_snapshot_create(
     state: State<'_, PersistentStoreState>,
     reason: String,
+    keep_count: Option<u32>,
 ) -> Result<SnapshotCreated, StoreError> {
-    logged("pds_snapshot_create", (|| {
-        let _operation = state.admit_renderer_operation()?;
+    // A capture of a large library runs for minutes, so it leaves the async worker to other commands.
+    logged("pds_snapshot_create", crate::async_worker::blocking(|| {
+        let keep = super::snapshot::KeepCount::requested(keep_count)?;
+        let operation = state.admit_renderer_operation()?;
         let snapshot_operation =
             state
                 .snapshot_operations
@@ -1471,45 +1896,29 @@ pub(crate) fn pds_snapshot_create(
                     message: format!("persistent snapshot mutex poisoned: {error}"),
                 })?;
         let started = std::time::Instant::now();
-        let (mut archive, scratch, current_bytes, inventory) = {
-            let mut store = state.store.lock().map_err(|error| StoreError::Store {
-                message: format!("persistent store mutex poisoned: {error}"),
+        let (mut archive, source, inventory) =
+            with_store_and_snapshot_archive(&state, &operation, |store, archive| {
+                let inventory = store.active_readers.defer_asset_inventory();
+                let source = super::snapshot::begin_capture(store, &archive, keep)?;
+                Ok((archive, source, inventory))
             })?;
-            let store = store.as_mut().ok_or_else(|| StoreError::Validation {
-                message: "persistent store has not been opened".to_owned(),
-            })?;
-            let archive = super::snapshot_archive::Archive::open(&store.snapshots_dir)?;
-            let inventory = store.active_readers.defer_asset_inventory();
-            let (scratch, current_bytes) =
-                super::snapshot::capture_scratch(store, &archive)?;
-            (archive, scratch, current_bytes, inventory)
-        };
-        let result = super::snapshot::archive_scratch(
-            &mut archive,
-            scratch,
-            current_bytes,
-            &reason,
-            started,
-        );
+        // The store is free again while the leased revision is copied and archived.
+        let result = source.copy().and_then(|(scratch, retention)| {
+            super::snapshot::archive_scratch(&mut archive, scratch, retention, &reason, started)
+        });
         drop(inventory);
         drop(archive);
         drop(snapshot_operation);
+        drop(operation);
         result
-    })())
+    }))
 }
 
 #[tauri::command(async)]
 pub(crate) fn pds_snapshot_list(
     state: State<'_, PersistentStoreState>,
 ) -> Result<Vec<SnapshotInfo>, StoreError> {
-    #[cfg(target_os = "android")]
-    {
-        logged("pds_snapshot_list", with_snapshot_directory(&state, super::snapshot::list))
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        logged("pds_snapshot_list", with_store(state, PersistentStore::snapshot_list))
-    }
+    logged("pds_snapshot_list", with_snapshot_directory(&state, super::snapshot::list))
 }
 
 #[tauri::command(async)]
@@ -1517,9 +1926,14 @@ pub(crate) fn pds_snapshot_delete(
     state: State<'_, PersistentStoreState>,
     id: String,
 ) -> Result<(), StoreError> {
+    // Removing a snapshot's unshared pages scans the whole archive.
     logged(
         "pds_snapshot_delete",
-        with_store(state, |store| store.snapshot_delete(&id)),
+        crate::async_worker::blocking(|| {
+            with_snapshot_directory(&state, |directory| {
+                super::snapshot_archive::Archive::open(directory)?.delete(&id)
+            })
+        }),
     )
 }
 
@@ -1529,7 +1943,14 @@ pub(crate) fn pds_storage_stats(
 ) -> Result<PersistentStorageStats, StoreError> {
     logged(
         "pds_storage_stats",
-        with_store(state, PersistentStore::storage_stats),
+        with_store(state, |store| {
+            let stats = store.storage_stats()?;
+            super::storage_breakdown::log_once(vec![
+                store.database_path.clone(),
+                store.database_path.with_file_name(super::device_store::DEVICE_DATABASE_FILE),
+            ]);
+            Ok(stats)
+        }),
     )
 }
 
@@ -1586,10 +2007,11 @@ fn pds_asset_gc_preview_all(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
 ) -> Result<AssetGcMaintenanceResult, StoreError> {
+    archive_names::record_before_cleanup(state, operation_guard);
     let now = current_time_ms()?;
     // Preview roots are scoped to this invocation. Deletion always collects fresh roots.
     let preview = with_store_mutex_admitted(state, operation_guard, |store| {
-        store.prepare_asset_gc_preview()
+        store.prepare_asset_gc_preview(now)
     })?;
     let mut cursor = None;
     let mut result = AssetGcMaintenanceResult {
@@ -1647,10 +2069,19 @@ pub(crate) fn pds_asset_gc_execute(
     )
 }
 
+/// How long a periodic sweep keeps taking batches in each store. A batch takes
+/// the store between saves, so one call stops early instead of finishing a
+/// pass over a large store.
+const PERIODIC_MESSAGE_SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+/// The pause between periodic batches, so a save waiting for the store takes
+/// it before the next batch does.
+const PERIODIC_MESSAGE_SWEEP_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// How many batches each store gets in one sweep call.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SweepBudget {
-    OneBatch,
+    /// Batches until this much time has passed, at least one per store.
+    For(std::time::Duration),
     UntilWrapped,
 }
 
@@ -1667,15 +2098,27 @@ fn sweep_message_pages(
         return Ok(());
     };
     for target in [super::MessageObjectStore::Library, super::MessageObjectStore::Device] {
+        let started = std::time::Instant::now();
+        let mut first = true;
         loop {
-            let Ok(_permit) = admission.file(false) else {
+            let Ok(permit) = admission.file(false) else {
                 return Ok(());
             };
-            let sweep = with_store_mutex_mut_admitted(state, operation_guard, |store| {
+            let sweep = with_store_mutex_mut_admitted(state, operation_guard, |store| if first {
                 store.sweep_message_page_objects(target, now, super::MESSAGE_PAGE_SWEEP_LIMIT)
+            } else {
+                store.continue_message_page_sweep(target, now, super::MESSAGE_PAGE_SWEEP_LIMIT)
             })?;
-            if sweep.wrapped || budget == SweepBudget::OneBatch {
+            drop(permit);
+            first = false;
+            if sweep.wrapped {
                 break;
+            }
+            if let SweepBudget::For(limit) = budget {
+                if started.elapsed() >= limit {
+                    break;
+                }
+                std::thread::sleep(PERIODIC_MESSAGE_SWEEP_PAUSE);
             }
         }
     }
@@ -1716,6 +2159,132 @@ fn pds_asset_gc_execute_all(
         }
     }
     Ok(result)
+}
+
+/// Keys one permanent-delete cleanup accepts, and the longest key it accepts.
+const DELETED_OWNER_CLEANUP_MAX_KEYS: usize = 100_000;
+const DELETED_OWNER_CLEANUP_MAX_KEY_BYTES: usize = 4096;
+
+/// The asset keys a permanently deleted character, module or persona named, and the wall-clock
+/// time its delete began, so an alias written since is kept.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeletedOwnerAssets {
+    keys: Vec<String>,
+    started_at_ms: i64,
+}
+
+/// Deletes the asset aliases nothing references, or with `owner` only those the deleted owner
+/// alone used, while the library is still at `expected_revision`. An owner's files are then
+/// deleted in the background with no grace for new files; the unused-file cleanup deletes the
+/// files of other aliases.
+#[tauri::command(async)]
+pub(crate) fn pds_asset_delete_orphaned_aliases(
+    app: AppHandle,
+    state: State<'_, PersistentStoreState>,
+    expected_revision: i64,
+    owner: Option<DeletedOwnerAssets>,
+) -> Result<RevisionResult, StoreError> {
+    logged(
+        "pds_asset_delete_orphaned_aliases",
+        delete_orphaned_aliases(&app, &state, expected_revision, owner),
+    )
+}
+
+fn delete_orphaned_aliases<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &PersistentStoreState,
+    expected_revision: i64,
+    owner: Option<DeletedOwnerAssets>,
+) -> StoreResult<RevisionResult> {
+    let operation_guard = state.admit_renderer_operation()?;
+    let owner = owner.map(|owner| {
+        if owner.keys.len() > DELETED_OWNER_CLEANUP_MAX_KEYS
+            || owner.keys.iter().any(|key| key.len() > DELETED_OWNER_CLEANUP_MAX_KEY_BYTES)
+            || owner.started_at_ms < 0
+        {
+            return Err(StoreError::Validation { message: "deleted owner cleanup input is out of bounds".into() });
+        }
+        let keys = owner.keys.into_iter()
+            .filter(|key| key.starts_with(OWNED_ASSET_KEY_PREFIX))
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok((keys, owner.started_at_ms))
+    }).transpose()?;
+    let now = current_time_ms()?;
+    let (revision, deleted) = with_store_mutex_mut_admitted(state, &operation_guard, |store| {
+        let actual = store.revision()?;
+        if actual != expected_revision {
+            return Err(StoreError::RevisionConflict { expected: expected_revision, actual });
+        }
+        let deleted = match &owner {
+            Some((keys, _)) if keys.is_empty() => Vec::new(),
+            Some((keys, started_at_ms)) => store.delete_orphaned_asset_aliases(
+                &OrphanAliasScope::DeletedOwner { keys, started_at_ms: *started_at_ms },
+            )?,
+            None => store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now })?,
+        };
+        Ok((store.revision()?, deleted))
+    })?;
+    if owner.is_some() && !deleted.is_empty() {
+        let objects = deleted.into_iter().map(|alias| alias.object_hash).collect();
+        let app = app.clone();
+        // The renderer adopts the revision before the files are gone, so its saves do not wait.
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<PersistentStoreState>();
+            let _ = logged(
+                "pds_asset_delete_deleted_owner_files",
+                delete_deleted_owner_files(&state, &operation_guard, objects),
+            );
+        });
+    }
+    Ok(RevisionResult { revision })
+}
+
+/// Deletes the files of a deleted owner's aliases, skipping the grace for new files since the
+/// owner is gone by the user's choice. Pages hold the store no longer than an unused-file cleanup
+/// page does.
+fn delete_deleted_owner_files(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    objects: std::collections::BTreeSet<String>,
+) -> StoreResult<()> {
+    let now = current_time_ms()?;
+    let marks = with_store_mutex_admitted(state, operation_guard, |store| {
+        store.prepare_asset_gc_delete_marks()
+    })?;
+    let objects = objects.into_iter().collect::<Vec<_>>();
+    let mut library = None;
+    for page in objects.chunks(asset_gc_execute_page() as usize) {
+        let page = page.iter().cloned().collect();
+        with_store_mutex_mut_admitted(state, operation_guard, |store| {
+            store.asset_gc_delete_exact_objects(&marks, &page, &mut library, now, 0)
+        })?;
+    }
+    Ok(())
+}
+
+/// Characters one permanent delete removes at most.
+const DELETED_CHARACTERS_MAX: usize = 128;
+
+/// The owned asset keys the conversations of characters about to be permanently deleted name,
+/// which a read of their details leaves out, and the keys of archived characters, whose details
+/// cannot be read.
+#[tauri::command(async)]
+pub(crate) fn pds_character_asset_keys(
+    state: State<'_, PersistentStoreState>,
+    character_ids: Vec<String>,
+) -> Result<Vec<String>, StoreError> {
+    let operation_guard = state.admit_renderer_operation()?;
+    if character_ids.len() > DELETED_CHARACTERS_MAX {
+        return Err(StoreError::Validation { message: "too many characters for one asset key read".into() });
+    }
+    logged(
+        "pds_character_asset_keys",
+        with_store_mutex_admitted(&state, &operation_guard, |store| {
+            store.character_conversation_asset_keys(&character_ids, DELETED_OWNER_CLEANUP_MAX_KEYS)
+        })
+        .map(|keys| keys.into_iter().collect()),
+    )
 }
 
 /// Candidates one cleanup page deletes.
@@ -1889,6 +2458,80 @@ pub(crate) fn pds_abort_plugin_device_write(
         store.device_store_mut()?.abort_plugin_device_write(&owner, &session_id);
         Ok(())
     }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_open_plugin_device_part(
+    app: AppHandle, state: State<'_, PersistentStoreState>, owner: String, byte_length: u64,
+) -> Result<String, StoreError> {
+    logged("pds_open_plugin_device_part", with_store_mut(state, |store| {
+        let device = store.device_store_mut()?;
+        let id = device.open_plugin_device_part(&owner, byte_length)?;
+        #[cfg(target_os = "android")]
+        {
+            let receiver_id = id.clone();
+            let receiver: Arc<crate::asset_byte_transport::AndroidReceiver> = Arc::new(move |offset, bytes| {
+                with_store_mut(app.state::<PersistentStoreState>(), |store| {
+                    store.device_store_mut()?.append_plugin_device_part(&receiver_id, offset, bytes)
+                }).map_err(|error| error.to_string())
+            });
+            let receiver = crate::asset_byte_transport::register_android_receiver(&id, receiver).map_err(|error| {
+                device.abort_plugin_device_part(&owner, &id);
+                StoreError::Validation { message: error }
+            })?;
+            device.attach_plugin_device_part_receiver(&id, receiver)?;
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = app;
+        Ok(id)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_append_plugin_device_part(
+    state: State<'_, PersistentStoreState>, upload_id: String, offset: u64, data: Vec<u8>,
+) -> Result<u64, StoreError> {
+    logged("pds_append_plugin_device_part", with_store_mut(state, |store| {
+        store.device_store_mut()?.append_plugin_device_part(&upload_id, offset, &data)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_append_plugin_device_part_raw(
+    state: State<'_, PersistentStoreState>, request: tauri::ipc::Request<'_>,
+) -> Result<u64, crate::asset_byte_transport::ByteTransferError> {
+    logged("pds_append_plugin_device_part_raw", crate::asset_byte_transport::raw_part(&request).and_then(|(id, offset, bytes)| {
+        with_store_mut(state, |store| store.device_store_mut()?.append_plugin_device_part(&id, offset, bytes))
+            .map_err(|error| error.to_string().into())
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_finish_plugin_device_part(
+    state: State<'_, PersistentStoreState>, owner: String, upload_id: String,
+) -> Result<String, StoreError> {
+    logged("pds_finish_plugin_device_part", with_store_mut(state, |store| {
+        store.device_store_mut()?.finish_plugin_device_part(&owner, &upload_id)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_abort_plugin_device_part(
+    state: State<'_, PersistentStoreState>, owner: String, upload_id: String,
+) -> Result<(), StoreError> {
+    logged("pds_abort_plugin_device_part", with_store_mut(state, |store| {
+        store.device_store_mut()?.abort_plugin_device_part(&owner, &upload_id);
+        Ok(())
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_read_plugin_device_part(
+    state: State<'_, PersistentStoreState>, hash: String, offset: u64,
+) -> Result<tauri::ipc::Response, StoreError> {
+    logged("pds_read_plugin_device_part", with_store(state, |store| {
+        store.device_store()?.read_plugin_device_part(&hash, offset)
+    }).map(tauri::ipc::Response::new))
 }
 
 #[tauri::command(async)]
@@ -2226,6 +2869,35 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    /// The lifecycle, exit and macOS save paths request a truncate through this command.
+    /// A reader outside the lease registry keeps it busy, and the commits stay in the WAL.
+    #[test]
+    fn checkpoint_command_checkpoints_passively_when_an_unregistered_reader_keeps_truncate_busy() {
+        let directory = tempdir().unwrap();
+        let store = PersistentStore::open(directory.path()).unwrap();
+        store.connection
+            .execute_batch("PRAGMA wal_autocheckpoint = 0; INSERT INTO app_kv VALUES ('first', '1');")
+            .unwrap();
+        store.connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let database_path = directory.path().join("persistent/persistent.sqlite");
+        let wal_path = std::path::PathBuf::from(format!("{}-wal", database_path.display()));
+        let reader = rusqlite::Connection::open(&database_path).unwrap();
+        reader.execute_batch("BEGIN; SELECT value FROM app_kv WHERE key = 'first';").unwrap();
+        store.connection.execute("INSERT INTO app_kv VALUES ('second', '2')", []).unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(PersistentStoreState::with_test_store(store));
+
+        pds_checkpoint(app.state(), CheckpointMode::Truncate)
+            .expect("busy truncate request checkpoints passively");
+        assert!(fs::metadata(&wal_path).unwrap().len() > 0);
+
+        reader.execute_batch("ROLLBACK").unwrap();
+        pds_checkpoint(app.state(), CheckpointMode::Truncate).expect("unblocked truncate");
+        assert_eq!(fs::metadata(&wal_path).unwrap().len(), 0);
+    }
+
     /// The intent recovery every mutable command runs first takes no device-store
     /// write when nothing settled, so another connection's long write does not fail it.
     #[test]
@@ -2276,8 +2948,9 @@ mod tests {
         let maintenance = state.acquire_raw_capture().unwrap();
         let during = state.renderer_dispatch_epoch().unwrap();
         assert!(state.admit_renderer_operation_dispatched_at(during).is_err());
-        state.reset_renderer_session().unwrap();
+        let reset = reset_after_maintenance(state.begin_renderer_reset());
         drop(maintenance);
+        state.finish_renderer_reset(reset.wait_for_gate(), || {}).unwrap();
         assert!(state.admit_renderer_operation_dispatched_at(during).is_err());
         assert!(state.admit_renderer_operation_dispatched_at(state.renderer_dispatch_epoch().unwrap()).is_ok());
         assert!(state.admit_renderer_operation().is_ok());
@@ -2324,7 +2997,7 @@ mod tests {
     }
 
     #[test]
-    fn a_periodic_sweep_visits_one_batch_per_store_and_resumes_from_the_cursor() {
+    fn a_periodic_sweep_stops_at_its_budget_and_resumes_from_the_cursor() {
         use crate::native_file_jobs::admission::Admission;
         let limit = super::super::MESSAGE_PAGE_SWEEP_LIMIT;
         let open = || {
@@ -2348,14 +3021,15 @@ mod tests {
             (read(&store.connection), read(store.device_store().unwrap().connection()))
         };
         let admission = Arc::new(Admission::default());
+        let spent = SweepBudget::For(std::time::Duration::ZERO);
 
         let (_periodic_directory, periodic) = open();
         assert_eq!(count(&periodic, "message_page_objects"), (limit + 1, limit + 1));
         let operation = periodic.admit_renderer_operation().unwrap();
-        sweep_message_pages(Some(&admission), &periodic, &operation, 1_000, SweepBudget::OneBatch).unwrap();
-        assert_eq!(count(&periodic, "message_page_object_marks"), (limit, limit), "a periodic sweep ran more than one batch");
+        sweep_message_pages(Some(&admission), &periodic, &operation, 1_000, spent).unwrap();
+        assert_eq!(count(&periodic, "message_page_object_marks"), (limit, limit), "a sweep past its budget took another batch");
         assert_eq!(count(&periodic, "message_page_sweep_cursor"), (1, 1));
-        sweep_message_pages(Some(&admission), &periodic, &operation, 1_000, SweepBudget::OneBatch).unwrap();
+        sweep_message_pages(Some(&admission), &periodic, &operation, 1_000, spent).unwrap();
         assert_eq!(
             count(&periodic, "message_page_object_marks"),
             (limit + 1, limit + 1),
@@ -2363,10 +3037,150 @@ mod tests {
         );
         assert_eq!(count(&periodic, "message_page_sweep_cursor"), (0, 0));
 
-        let (_cleanup_directory, cleanup) = open();
-        let operation = cleanup.admit_renderer_operation().unwrap();
-        sweep_message_pages(Some(&admission), &cleanup, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
-        assert_eq!(count(&cleanup, "message_page_object_marks"), (limit + 1, limit + 1));
+        for budget in [SweepBudget::For(std::time::Duration::from_secs(600)), SweepBudget::UntilWrapped] {
+            let (_cleanup_directory, cleanup) = open();
+            let operation = cleanup.admit_renderer_operation().unwrap();
+            sweep_message_pages(Some(&admission), &cleanup, &operation, 1_000, budget).unwrap();
+            assert_eq!(count(&cleanup, "message_page_object_marks"), (limit + 1, limit + 1), "a sweep within its budget left the pass unfinished");
+            assert_eq!(count(&cleanup, "message_page_sweep_cursor"), (0, 0));
+        }
+
+        // Marks past their grace go first, though the cursor has passed them,
+        // and count toward the same batch.
+        let grace = super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS;
+        let (_expired_directory, expired) = open();
+        let operation = expired.admit_renderer_operation().unwrap();
+        sweep_message_pages(Some(&admission), &expired, &operation, 1_000, spent).unwrap();
+        sweep_message_pages(Some(&admission), &expired, &operation, 1_000 + grace, spent).unwrap();
+        assert_eq!(count(&expired, "message_page_objects"), (1, 1), "expired marks waited for the cursor");
+        assert_eq!(count(&expired, "message_page_object_marks"), (0, 0), "the batch went past its limit");
+        sweep_message_pages(Some(&admission), &expired, &operation, 1_000 + grace, spent).unwrap();
+        assert_eq!(count(&expired, "message_page_object_marks"), (1, 1));
+        assert_eq!(count(&expired, "message_page_sweep_cursor"), (0, 0));
+    }
+
+    #[test]
+    fn a_cleanup_pass_reads_the_marks_once_however_many_batches_it_takes() {
+        use crate::native_file_jobs::admission::Admission;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let limit = super::super::MESSAGE_PAGE_SWEEP_LIMIT;
+        let admission = Arc::new(Admission::default());
+        // The first pass marks every object and none waits out its grace in the
+        // second, so reading the marks finds nothing to delete there.
+        let steps = |batches: usize| {
+            let directory = tempdir().unwrap();
+            let store = PersistentStore::open(directory.path()).unwrap();
+            let tx = store.connection.unchecked_transaction().unwrap();
+            for index in 0..batches * limit {
+                let body = format!("synthetic-orphan-object-{index}").into_bytes();
+                super::super::message_pages::put_object(&tx, &risunest_sync_wire::hash(&body), &body).unwrap();
+            }
+            tx.commit().unwrap();
+            let state = PersistentStoreState::with_test_store(store);
+            let operation = state.admit_renderer_operation().unwrap();
+            sweep_message_pages(Some(&admission), &state, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
+            let counted = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&counted);
+            let count = move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            };
+            state.store.lock().unwrap().as_ref().unwrap().connection.progress_handler(64, Some(count)).unwrap();
+            sweep_message_pages(Some(&admission), &state, &operation, 2_000, SweepBudget::UntilWrapped).unwrap();
+            state.store.lock().unwrap().as_ref().unwrap().connection.progress_handler(64, None::<fn() -> bool>).unwrap();
+            counted.load(Ordering::Relaxed)
+        };
+        // Batches of equal cost make 16 about 8 times 2; reading every mark or
+        // every object before the cursor in each batch grows faster than that.
+        let (fewer, more) = (steps(2), steps(16));
+        assert!(more <= fewer * 12, "{fewer} steps for 2 batches of marked objects, {more} for 16");
+    }
+
+    #[test]
+    fn a_requested_start_compacts_the_closed_store_files_once() {
+        use super::super::compaction::{CompactionProgress, StartCompaction};
+        use crate::native_file_jobs::admission::Admission;
+        type Lock = fn() -> std::io::Result<Option<std::sync::MutexGuard<'static, ()>>>;
+        type Space = fn(&Path) -> std::io::Result<u64>;
+        let directory = tempdir().unwrap();
+        let persistent = directory.path().join("persistent");
+        let files = [super::super::DATABASE_FILE, super::super::device_store::DEVICE_DATABASE_FILE]
+            .map(|file| persistent.join(file));
+        let lengths = || files.clone().map(|file| std::fs::metadata(file).unwrap().len());
+        let request = persistent.join("store-compaction-requested");
+        drop(PersistentStore::open(directory.path()).unwrap());
+        for file in &files {
+            crate::sqlite_open::open(file).unwrap().execute_batch("CREATE TABLE synthetic_filler(body BLOB NOT NULL);
+                INSERT INTO synthetic_filler WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1024)
+                    SELECT randomblob(4096) FROM n;
+                DROP TABLE synthetic_filler; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        }
+        let reclaimable = PersistentStore::open(directory.path()).unwrap().storage_stats().unwrap().database_reclaimable_bytes;
+        assert!(reclaimable >= 8 << 20, "{reclaimable}");
+        let grown = lengths();
+        let admission = Arc::new(Admission::default());
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let compact = |state: &PersistentStoreState, repository_lock: Lock, available_space: Space| {
+            let operation = state.admit_renderer_operation().unwrap();
+            let sink = Arc::clone(&reports);
+            compact_requested_store(state, &operation, directory.path(), RequestedCompaction {
+                admission: &admission, repository_lock, available_space, progress_interval: std::time::Duration::ZERO,
+            }, move |value: CompactionProgress| sink.lock().unwrap().push(value)).unwrap()
+        };
+        let request_compaction = |available: u64| PersistentStore::open(directory.path()).unwrap()
+            .request_compaction(|_| Ok(available)).unwrap();
+        // Other tests take the repository lock, so the start that must compact waits for it.
+        let waiting: Lock = || crate::asset_repository::coordinator::lock_repository_mutation().map(Some);
+        let room: Space = |_| Ok(u64::MAX);
+        let state = PersistentStoreState::default();
+
+        assert_eq!(compact(&state, waiting, room), None, "a start without a request compacted");
+        let shortfall = request_compaction(0);
+        assert!(shortfall.is_some_and(|bytes| bytes > 64 << 20) && !request.exists(), "{shortfall:?}");
+        assert_eq!(request_compaction(u64::MAX), None);
+        let held = admission.file(false).unwrap();
+        assert_eq!(compact(&state, waiting, room), Some(StartCompaction::Failed));
+        drop(held);
+        assert!(!request.exists(), "a start that could not compact kept the request");
+        request_compaction(u64::MAX);
+        assert_eq!(compact(&state, || Ok(None), room), Some(StartCompaction::Failed));
+        request_compaction(u64::MAX);
+        assert!(matches!(compact(&state, waiting, |_| Ok(0)), Some(StartCompaction::NoSpace { shortfall_bytes }) if shortfall_bytes > 64 << 20));
+        request_compaction(u64::MAX);
+        assert_eq!(compact(&state, waiting, |_| Err(std::io::Error::other("synthetic"))), Some(StartCompaction::Failed));
+        assert!(!request.exists());
+        assert_eq!(lengths(), grown, "a start that did not compact changed the files");
+
+        request_compaction(u64::MAX);
+        let operation = state.admit_renderer_operation().unwrap();
+        open_renderer_persistent_store_admitted(&state, &operation, directory.path()).unwrap();
+        drop(operation);
+        assert_eq!(compact(&state, waiting, room), None, "a reload within the process compacted the open store");
+        state.store.lock().unwrap().take();
+        assert_eq!(lengths(), grown, "an open other than the start compacted");
+        assert!(request.exists());
+
+        reports.lock().unwrap().clear();
+        let Some(StartCompaction::Compacted { reclaimed_bytes }) = compact(&state, waiting, room) else {
+            panic!("the requested start did not compact");
+        };
+        let compacted = lengths();
+        assert!(compacted[0] < grown[0] / 2 && compacted[1] < grown[1] / 2, "{compacted:?} of {grown:?}");
+        assert_eq!(reclaimed_bytes, grown.iter().sum::<u64>() - compacted.iter().sum::<u64>());
+        assert!(!request.exists());
+        let reports = reports.lock().unwrap().clone();
+        let total = reports[0].total_bytes;
+        assert!(reports.iter().all(|report| report.total_bytes == total)
+            && reports.windows(2).all(|pair| pair[0].done_bytes <= pair[1].done_bytes), "{reports:?}");
+        assert_eq!(reports.last().map(|report| report.done_bytes), Some(total));
+        let store = PersistentStore::open(directory.path()).unwrap();
+        assert!(store.revision().is_ok() && store.device_store().unwrap().revision().is_ok());
+        for connection in [&store.connection, store.device_store().unwrap().connection()] {
+            assert_eq!(connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)).unwrap(), "wal");
+        }
+        assert_eq!(store.storage_stats().unwrap().database_reclaimable_bytes, 0);
+        drop(store);
+        assert_eq!(compact(&state, waiting, room), None, "the next start compacted again");
     }
 
     #[test]
@@ -2541,6 +3355,89 @@ mod tests {
         drop(maintenance);
     }
 
+    /// The storage breakdown reads on a connection of its own. Maintenance ends it
+    /// before closing the store, or the reopen's truncate checkpoint finds its
+    /// snapshot still pinning the write-ahead log, as on an in-process iOS restart.
+    #[test]
+    fn maintenance_ends_a_running_storage_breakdown_before_the_store_reopens() {
+        use std::time::Duration;
+        let maintenances: [fn(&PersistentStoreState) -> StoreResult<DeviceMaintenanceGuard>; 2] = [
+            |state| state.acquire_cleanup_maintenance(Duration::from_secs(1)),
+            PersistentStoreState::acquire_device_maintenance,
+        ];
+        for maintenance in maintenances {
+            let directory = tempdir().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            crate::persistent_store::tests::asset_catalog_gc_tests::add_synthetic_character(&mut store, "reader", "");
+            let database = store.database_path.clone();
+            let state = PersistentStoreState::with_test_store(store);
+            // Maintenance in a parallel test also stops the breakdown, and a scan
+            // stopped before it reads drops the sender, so it starts again.
+            let started = (0..5).any(|_| {
+                let (reading, read) = std::sync::mpsc::channel();
+                super::super::storage_breakdown::start_for_test(vec![database.clone()], move |connection, _| {
+                    connection.execute_batch("BEGIN")?;
+                    connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))?;
+                    let _ = reading.send(());
+                    connection.query_row(
+                        "SELECT count(*) FROM (WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) SELECT x FROM n)",
+                        [],
+                        |row| row.get::<_, i64>(0).map(|count| count.to_string()),
+                    )
+                });
+                read.recv_timeout(Duration::from_secs(30)).is_ok()
+            });
+            assert!(started, "the breakdown never held a reader");
+            let root = directory.path().to_path_buf();
+            let (reopened, reopen) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = maintenance(&state).map(drop).and_then(|()| PersistentStore::open(&root).map(drop));
+                reopened.send(result).unwrap();
+            });
+            reopen.recv_timeout(Duration::from_secs(60)).expect("maintenance waits for the breakdown").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_long_store_wait_is_recorded_with_the_calling_command() {
+        use std::time::Duration;
+        let directory = tempdir().unwrap();
+        let state = PersistentStoreState::default();
+        open_renderer_persistent_store(&state, directory.path()).unwrap();
+        let recorded = |at: &str| crate::native_log::global_state().tail(None).into_iter().rev()
+            .filter(|entry| entry.message.ends_with(&format!(" at {at}"))).collect::<Vec<_>>();
+        let mut waiting = String::new();
+        // The second wait at the same place is counted toward a summary instead of written.
+        for _ in 0..2 {
+            let (held, holding) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                let holder = scope.spawn(|| with_store_mutex(&state, |_| {
+                    held.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(80));
+                    Ok(())
+                }));
+                holding.recv().unwrap();
+                waiting = crate::slow_log::with_test_threshold(Duration::from_millis(40), || {
+                    let at = format!("{}:{}", file!(), line!()); with_store_mutex(&state, |_| Ok(())).unwrap();
+                    at
+                });
+                holder.join().unwrap().unwrap();
+            });
+        }
+        let entries = recorded(&waiting);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!((entry.level.as_str(), entry.target.as_str()), ("warn", "slow-operation"));
+        let waited: u128 = entry.message.split(" after waiting ").nth(1)
+            .and_then(|rest| rest.split(' ').next()).unwrap().parse().unwrap();
+        assert!(waited >= 40, "{}", entry.message);
+        let quick = crate::slow_log::with_test_threshold(Duration::from_secs(60), || {
+            let at = format!("{}:{}", file!(), line!()); with_store_mutex(&state, |_| Ok(())).unwrap();
+            at
+        });
+        assert!(recorded(&quick).is_empty());
+    }
+
     #[test]
     fn device_maintenance_blocks_renderer_writers_and_reopens_restored_store() {
         let directory = tempdir().unwrap();
@@ -2558,9 +3455,7 @@ mod tests {
         assert!(state.store.lock().unwrap().is_none());
         assert!(state.admit_renderer_operation().is_err());
         assert!(state.acquire_device_maintenance().is_err());
-        state
-            .reset_renderer_session()
-            .expect("active maintenance already owns renderer cleanup");
+        let reset = reset_after_maintenance(state.begin_renderer_reset());
         assert!(open_renderer_persistent_store(&state, directory.path()).is_err());
         assert!(
             with_store_mutex(&state, |store| {
@@ -2578,6 +3473,7 @@ mod tests {
             .unwrap();
         drop(native);
         drop(maintenance);
+        state.finish_renderer_reset(reset.wait_for_gate(), || {}).unwrap();
         open_renderer_persistent_store(&state, directory.path()).unwrap();
         assert_eq!(
             with_store_mutex(&state, |store| store
@@ -2731,6 +3627,32 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_cancels_a_registered_long_operation_instead_of_waiting_for_it() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let state = Arc::new(PersistentStoreState::default());
+        let operation_guard = state.admit_renderer_operation().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        state.cancel_on_renderer_maintenance(&cancel).unwrap();
+        let operation = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cancel.load(Ordering::Acquire) {
+                if Instant::now() >= deadline { return false; }
+                thread::yield_now();
+            }
+            drop(operation_guard);
+            true
+        });
+        let maintenance = state.acquire_device_maintenance().unwrap();
+        assert!(operation.join().unwrap(), "maintenance waited for the operation instead of cancelling it");
+        let late = Arc::new(AtomicBool::new(false));
+        state.cancel_on_renderer_maintenance(&late).unwrap();
+        assert!(late.load(Ordering::Acquire));
+        drop(maintenance);
+    }
+
+    #[test]
     fn failed_maintenance_acquisition_reopens_renderer_admission() {
         use std::thread;
 
@@ -2770,6 +3692,181 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    fn reset_started(reset: StoreResult<RendererReset>) -> DeviceMaintenanceGuard {
+        match reset.unwrap() {
+            RendererReset::Started(maintenance) => maintenance,
+            RendererReset::Pending | RendererReset::AfterMaintenance(_) => panic!("another reset or maintenance holds the gate"),
+        }
+    }
+
+    fn reset_after_maintenance(reset: StoreResult<RendererReset>) -> ResetAfterMaintenance {
+        match reset.unwrap() {
+            RendererReset::AfterMaintenance(reset) => reset,
+            RendererReset::Pending | RendererReset::Started(_) => panic!("no other maintenance holds the gate"),
+        }
+    }
+
+    /// Spawns `operation` on a thread that reports through the returned channel
+    /// once it starts waiting out a page reset, and again with its result.
+    fn run_waiting_for_reset<T: Send + 'static>(
+        operation: impl FnOnce() -> T + Send + 'static,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Receiver<T>) {
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (sent, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            RESET_WAIT_ENTERED.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || entered.send(()).unwrap()));
+            });
+            sent.send(operation()).unwrap();
+        });
+        (waiting, result)
+    }
+
+    #[test]
+    fn a_page_start_does_not_wait_for_the_outgoing_document_and_new_operations_wait_for_its_reset() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempdir().unwrap();
+        let state = Arc::new(PersistentStoreState::default());
+        open_renderer_persistent_store(&state, directory.path()).unwrap();
+        let lease = with_store_mutex_mut(&state, |store| store.acquire_revision(0)).unwrap();
+        let outgoing = state.admit_renderer_operation().unwrap();
+
+        // A page start arrives on the main thread, so it must return while the operation runs.
+        let (started, start) = mpsc::channel();
+        let starter = Arc::clone(&state);
+        std::thread::spawn(move || started.send(starter.begin_renderer_reset()).unwrap());
+        let maintenance = reset_started(start.recv_timeout(Duration::from_secs(5)).expect("the page start waited for an admitted operation"));
+
+        let (drained, after_drain) = mpsc::channel();
+        let finisher = Arc::clone(&state);
+        let observer = Arc::clone(&state);
+        let finish = std::thread::spawn(move || {
+            finisher.finish_renderer_reset(maintenance, move || {
+                let operations = observer.renderer_gate.state.lock().unwrap().operations;
+                let leases = lock_store(&observer.store).unwrap().as_ref().unwrap().revision_leases.len();
+                drained.send((operations, leases, observer.maintenance_active())).unwrap();
+            })
+        });
+        let reader = Arc::clone(&state);
+        let (waiting, admitted) = run_waiting_for_reset(move || reader.admit_renderer_operation().map(drop));
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(admitted.recv_timeout(Duration::from_millis(100)).is_err(), "a new operation ran before the reset");
+        assert!(after_drain.try_recv().is_err(), "the reset finished before the outgoing operation");
+
+        drop(outgoing);
+        assert_eq!(
+            after_drain.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (0, 0, true),
+            "the reset releases the leases before new operations are admitted"
+        );
+        admitted.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        finish.join().unwrap().unwrap();
+        with_store_mutex(&state, |store| {
+            assert!(matches!(store.read_root(Some(&lease.lease)), Err(StoreError::SnapshotReleased)));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_page_start_during_other_maintenance_resets_when_that_maintenance_ends() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempdir().unwrap();
+        let state = Arc::new(PersistentStoreState::default());
+        open_renderer_persistent_store(&state, directory.path()).unwrap();
+        let lease = with_store_mutex_mut(&state, |store| store.acquire_revision(0)).unwrap();
+        let outgoing = state.admit_renderer_operation().unwrap();
+        let capturer = Arc::clone(&state);
+        let capture = std::thread::spawn(move || capturer.acquire_raw_capture().unwrap());
+        // The page starts while the capture waits for the outgoing document.
+        while !state.maintenance_active() {
+            std::thread::yield_now();
+        }
+        let reset = reset_after_maintenance(state.begin_renderer_reset());
+        assert!(matches!(state.begin_renderer_reset().unwrap(), RendererReset::Pending));
+
+        let (drained, after_drain) = mpsc::channel();
+        let finisher = Arc::clone(&state);
+        let observer = Arc::clone(&state);
+        let finish = std::thread::spawn(move || {
+            finisher.finish_renderer_reset(reset.wait_for_gate(), move || {
+                let operations = observer.renderer_gate.state.lock().unwrap().operations;
+                let leases = lock_store(&observer.store).unwrap().as_ref().unwrap().revision_leases.len();
+                drained.send((operations, leases, observer.maintenance_active())).unwrap();
+            })
+        });
+        drop(outgoing);
+        let capture = capture.join().unwrap();
+        assert!(after_drain.recv_timeout(Duration::from_millis(100)).is_err(), "the reset ran during the capture");
+        drop(capture);
+        assert_eq!(
+            after_drain.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (0, 0, true),
+            "the reset releases the leases before new operations are admitted"
+        );
+        finish.join().unwrap().unwrap();
+        state.admit_renderer_operation().unwrap();
+        with_store_mutex(&state, |store| {
+            assert!(matches!(store.read_root(Some(&lease.lease)), Err(StoreError::SnapshotReleased)));
+            Ok(())
+        })
+        .unwrap();
+
+        // A reset dropped before or after its maintenance ends leaves admission open.
+        let capture = state.acquire_raw_capture().unwrap();
+        drop(reset_after_maintenance(state.begin_renderer_reset()));
+        drop(capture);
+        assert!(state.try_admit_renderer_operation().unwrap().is_some());
+        let capture = state.acquire_raw_capture().unwrap();
+        let reset = reset_after_maintenance(state.begin_renderer_reset());
+        drop(capture);
+        drop(reset);
+        assert!(state.try_admit_renderer_operation().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_wait_for_a_page_reset_ends_in_refusal_after_a_later_start_or_the_wait_limit() {
+        use std::time::Duration;
+
+        let state = Arc::new(PersistentStoreState::default());
+        let maintenance = reset_started(state.begin_renderer_reset());
+        let reader = Arc::clone(&state);
+        let (waiting, earlier) = run_waiting_for_reset(move || reader.admit_renderer_operation().map(drop));
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The document that waited was replaced before the reset ended. The
+        // pending reset judges the CAS journals for both starts.
+        assert!(matches!(state.begin_renderer_reset().unwrap(), RendererReset::Pending));
+        state.finish_renderer_reset(maintenance, || {}).unwrap();
+        assert!(earlier.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+
+        let maintenance = reset_started(state.begin_renderer_reset());
+        let capturer = Arc::clone(&state);
+        let (waiting, capture) = run_waiting_for_reset(move || capturer.acquire_raw_capture().map(drop));
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        state.finish_renderer_reset(maintenance, || {}).unwrap();
+        capture
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .expect("maintenance waits for a page reset instead of failing");
+        state.admit_renderer_operation().unwrap();
+
+        let limited = PersistentStoreState {
+            renderer_gate: Arc::new(RendererGate {
+                reset_wait: Duration::from_millis(50),
+                ..RendererGate::default()
+            }),
+            ..PersistentStoreState::default()
+        };
+        let outgoing = limited.admit_renderer_operation().unwrap();
+        let _maintenance = reset_started(limited.begin_renderer_reset());
+        assert!(limited.admit_renderer_operation().is_err(), "an operation the reset waits on must not hold it forever");
+        drop(outgoing);
     }
 
     #[test]
@@ -2921,6 +4018,37 @@ mod tests {
             assert!(entry.message.contains(summary));
             assert!(!entry.message.contains("private-payload-value"));
         }
+    }
+
+    #[test]
+    fn reads_the_root_revision_without_the_root() {
+        let directory = tempdir().expect("create temporary directory");
+        let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
+        let staging = store.replace_begin().expect("begin staging");
+        store
+            .replace_put_root(&staging.staging_id, &json!({ "username": "synthetic" }))
+            .expect("stage root");
+        store.replace_commit(&staging.staging_id, Some(0)).expect("commit root");
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(PersistentStoreState::with_test_store(store));
+        let root = pds_read_root(app.state(), None).expect("read root");
+        assert_eq!(root.revision, 1);
+        assert_eq!(pds_read_revision(app.state()).expect("read revision"), root.revision);
+        let library = pds_read_library_identity(app.state()).unwrap();
+        let alias: AssetAlias = serde_json::from_value(json!({ "kind": "asset", "key": "assets/synthetic", "objectHash": null,
+            "size": 0, "mime": "", "name": "synthetic", "ext": "bin" })).unwrap();
+        pds_commit_asset_alias(app.state(), alias.clone(), 1, Some(library.clone())).unwrap();
+        assert_eq!(pds_read_library_identity(app.state()).unwrap(), library);
+        with_store_mut(app.state(), |store| {
+            let stage = store.replace_begin()?;
+            store.replace_put_root(&stage.staging_id, &json!({}))?;
+            store.replace_commit(&stage.staging_id, Some(2))
+        }).unwrap();
+        assert_ne!(pds_read_library_identity(app.state()).unwrap(), library);
+        assert!(pds_commit_asset_alias(app.state(), alias, 3, Some(library)).is_err());
+        assert_eq!(pds_read_revision(app.state()).unwrap(), 3);
     }
 
     #[test]
@@ -3369,6 +4497,177 @@ mod tests {
                 .is_none()
         }));
     }
+    /// A character purged before this cleanup existed, or before its own cleanup ran, leaves
+    /// aliases nothing references. The preview lists their files once the aliases are past the
+    /// grace, and keeps a newer one as recent; the alias delete and the execute remove them.
+    #[test]
+    fn asset_gc_commands_delete_aliases_a_purged_character_left() {
+        use crate::persistent_store::tests::asset_catalog_gc_tests::{add_synthetic_character, alias_object, backdate_alias};
+        use crate::server_sync::lww_tests::put_asset;
+
+        let directory = tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let purged = put_asset(&mut store, "assets/purged.png", b"synthetic purged body").object_hash.unwrap();
+        let recent = put_asset(&mut store, "assets/recent.png", b"synthetic recent body").object_hash.unwrap();
+        add_synthetic_character(&mut store, "purged", "assets/purged.png assets/recent.png");
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            delete_character_ids: Some(vec!["purged".into()]),
+            ..Default::default()
+        }).unwrap();
+        backdate_alias(&store, "assets/purged.png", 1_000);
+        let state = PersistentStoreState { store: Mutex::new(Some(store)), ..PersistentStoreState::default() };
+        let operation_guard = state.admit_renderer_operation().unwrap();
+
+        let preview = pds_asset_gc_preview_all(&state, &operation_guard).unwrap();
+        let states = preview.candidates.iter()
+            .map(|candidate| (candidate.object_hash.as_str(), candidate.state))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(states, [(purged.as_str(), "deletable"), (recent.as_str(), "recent")].into());
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let revision = state.store.lock().unwrap().as_ref().unwrap().revision().unwrap();
+        assert!(delete_orphaned_aliases(app.handle(), &state, revision, None).unwrap().revision > revision);
+        let executed = pds_asset_gc_execute_all(&state, &operation_guard).unwrap();
+        assert_eq!(executed.deleted_count, 1);
+
+        drop(operation_guard);
+        let store = state.store.into_inner().unwrap().unwrap();
+        assert_eq!(alias_object(&store, "assets/purged.png"), None);
+        assert!(cas.stat_object(&purged).unwrap().is_none());
+        assert_eq!(alias_object(&store, "assets/recent.png"), Some(recent.clone()));
+        assert!(cas.stat_object(&recent).unwrap().is_some());
+    }
+
+    /// What an archive from an earlier release names is recorded without holding the store: after
+    /// the store opens for a payload this device holds, and before the unused-file preview for
+    /// one only the Sync server holds, which the preview then judges by its record.
+    #[test]
+    fn archive_names_are_recorded_after_opening_and_before_the_cleanup_preview() {
+        use crate::persistent_store::archive_asset_names::recorded;
+        use crate::persistent_store::tests::asset_catalog_gc_tests::{add_synthetic_character, alias_object, as_older_archive, backdate_alias};
+        use crate::server_sync::{lww_tests::put_asset, residency::{test_remote, AssetPolicy}};
+        use std::time::{Duration, Instant};
+
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let (held, remote, orphan) = {
+            let mut store = PersistentStore::open(root).unwrap();
+            for key in ["assets/held.png", "assets/remote.png", "assets/orphan.png"] {
+                put_asset(&mut store, key, format!("synthetic body of {key}").as_bytes());
+            }
+            for name in ["held", "remote"] {
+                add_synthetic_character(&mut store, name, &format!(r#"<img src="assets/{name}.png">"#));
+                store.archive_character(name, store.revision().unwrap(), 10).unwrap();
+            }
+            let held = as_older_archive(&store, "held", &["assets/held.png"]).object_hash;
+            let remote = as_older_archive(&store, "remote", &["assets/remote.png"]).object_hash;
+            for key in ["assets/held.png", "assets/remote.png", "assets/orphan.png"] {
+                backdate_alias(&store, key, 1_000);
+            }
+            store.device_store().unwrap().set_asset_residency_policy(AssetPolicy::Remote).unwrap();
+            (held, remote, alias_object(&store, "assets/orphan.png").unwrap())
+        };
+        test_remote::keep_only_on_server(root, &remote);
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        app.manage(crate::app_paths::AppPaths {
+            data: root.to_owned(),
+            data_entry: root.to_owned(),
+            webview: None,
+            logs: root.join("logs"),
+            cache: root.join("cache"),
+            cleanup_control: root.join("cleanup"),
+            tauri_derived: Vec::new(),
+            install: None,
+            integration: None,
+        });
+        app.manage(PersistentStoreState::default());
+        open_for_renderer(app.handle(), &app.state()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !recorded(root, &held) {
+            assert!(Instant::now() < deadline, "the held archive was not recorded after the store opened");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!recorded(root, &remote));
+        assert_eq!(test_remote::fetched(root), 0);
+
+        let state = app.state::<PersistentStoreState>();
+        let operation_guard = state.admit_renderer_operation().unwrap();
+        let preview = pds_asset_gc_preview_all(&state, &operation_guard).unwrap();
+        assert_eq!(test_remote::fetched(root), 1);
+        assert!(recorded(root, &remote));
+        let deletable = preview.candidates.iter()
+            .filter(|candidate| candidate.state == "deletable")
+            .map(|candidate| candidate.object_hash.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(deletable, [orphan.as_str()]);
+    }
+
+    /// A permanent delete removes at once the aliases only the deleted owner used, once no
+    /// revision lease still reads them and only at the revision the renderer expects, then their
+    /// files in the background. A shared asset and one written after the delete started stay.
+    #[test]
+    fn deleted_owner_cleanup_deletes_only_assets_the_owner_alone_used() {
+        use crate::persistent_store::tests::asset_catalog_gc_tests::{add_synthetic_character, alias_object};
+        use crate::server_sync::lww_tests::put_asset;
+
+        let directory = tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let only = put_asset(&mut store, "assets/only.png", b"synthetic only body").object_hash.unwrap();
+        let second = put_asset(&mut store, "assets/second.png", b"synthetic second body").object_hash.unwrap();
+        let shared = put_asset(&mut store, "assets/shared.png", b"synthetic shared body").object_hash.unwrap();
+        add_synthetic_character(&mut store, "owner", "assets/only.png assets/second.png assets/shared.png");
+        add_synthetic_character(&mut store, "other", "<img src=\"assets/shared.png\">");
+        // The file was saved just now, well inside the grace a cleanup page keeps.
+        store.connection.execute("UPDATE asset_objects SET created_at_ms = ?1",
+            [super::super::device_store::now_ms().unwrap()]).unwrap();
+        let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+        let written = super::super::device_store::now_ms().unwrap();
+        while super::super::device_store::now_ms().unwrap() <= written {
+            std::thread::yield_now();
+        }
+        let started_at_ms = super::super::device_store::now_ms().unwrap();
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            delete_character_ids: Some(vec!["owner".into()]),
+            ..Default::default()
+        }).unwrap();
+        let late = put_asset(&mut store, "assets/late.png", b"synthetic late body").object_hash.unwrap();
+        let revision = store.revision().unwrap();
+        let keys = ["assets/only.png", "assets/second.png", "assets/shared.png", "assets/late.png", "sync-conflict-backups/a.risudat"]
+            .map(str::to_owned).to_vec();
+        let owner = || Some(DeletedOwnerAssets { keys: keys.clone(), started_at_ms });
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        app.manage(PersistentStoreState { store: Mutex::new(Some(store)), ..PersistentStoreState::default() });
+        let state = app.state::<PersistentStoreState>();
+
+        assert!(matches!(delete_orphaned_aliases(app.handle(), &state, revision - 1, owner()),
+            Err(StoreError::RevisionConflict { .. })));
+        assert_eq!(delete_orphaned_aliases(app.handle(), &state, revision, owner()).unwrap().revision, revision);
+        state.store.lock().unwrap().as_mut().unwrap().release_revision(&lease).unwrap();
+        assert!(delete_orphaned_aliases(app.handle(), &state, revision, owner()).unwrap().revision > revision);
+        // The background file delete holds a renderer operation until it ends.
+        let gate = state.renderer_gate.state.lock().unwrap();
+        let (gate, waited) = state.renderer_gate.drained
+            .wait_timeout_while(gate, std::time::Duration::from_secs(60), |gate| gate.operations > 0)
+            .unwrap();
+        assert!(!waited.timed_out());
+        drop(gate);
+
+        let store = state.store.lock().unwrap();
+        let store = store.as_ref().unwrap();
+        assert_eq!(alias_object(store, "assets/only.png"), None);
+        assert!(cas.stat_object(&only).unwrap().is_none());
+        assert_eq!(alias_object(store, "assets/second.png"), None);
+        assert!(cas.stat_object(&second).unwrap().is_none());
+        assert_eq!(alias_object(store, "assets/shared.png"), Some(shared.clone()));
+        assert!(cas.stat_object(&shared).unwrap().is_some());
+        assert_eq!(alias_object(store, "assets/late.png"), Some(late.clone()));
+        assert!(cas.stat_object(&late).unwrap().is_some());
+    }
+
     /// The local data screen reads the shipped defaults, then writes the one
     /// row the user changed.
     #[test]

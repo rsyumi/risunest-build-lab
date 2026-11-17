@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+vi.mock('../mobileBackgroundTask', async () => (await import('../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { AndroidSafDestinationError, type AndroidSafDestinationRequest } from './androidSafBridge'
 import { ANDROID_DOWNLOAD_PIECE_BYTES, downloadThroughAndroidSaf } from './androidSafDownload'
 import { STAGED_REQUEST_BYTES } from './nativeCommitTransport'
@@ -31,11 +33,13 @@ function harness(copyResult: (request: AndroidSafDestinationRequest) => Promise<
 
 describe('downloadThroughAndroidSaf', () => {
     it('cancels destination selection before creating or writing a download handoff', async () => {
+        vi.mocked(runWithMobileBackgroundTask).mockClear()
         const h = harness(async () => ({bytes: 1}))
         h.dependencies.reserve = async () => {throw new DOMException('cancelled', 'AbortError')}
         await expect(downloadThroughAndroidSaf('synthetic.bin', Uint8Array.of(1), h.dependencies)).resolves.toBe(false)
         expect(h.written).toEqual([])
         expect(h.invoke).not.toHaveBeenCalled()
+        expect(runWithMobileBackgroundTask).not.toHaveBeenCalled()
     })
 
     it('releases the created destination if handoff creation fails before a copy', async () => {
@@ -48,6 +52,11 @@ describe('downloadThroughAndroidSaf', () => {
     it('writes the bytes to the handoff in bounded pieces, copies it under the name and then removes it', async () => {
         const data = Uint8Array.from({ length: 2 * ANDROID_DOWNLOAD_PIECE_BYTES + 5 }, (_, index) => index % 251)
         const h = harness(async () => ({ bytes: data.length }))
+        vi.mocked(runWithMobileBackgroundTask).mockImplementationOnce(async (_kind, operation) => {
+            h.events.push('hold')
+            try { return await operation({ progress() {}, async dispose() {} }) }
+            finally { h.events.push('release') }
+        })
 
         await expect(downloadThroughAndroidSaf('Alice_chat.json', data, h.dependencies)).resolves.toBe(true)
 
@@ -59,7 +68,9 @@ describe('downloadThroughAndroidSaf', () => {
         }
         expect(Buffer.concat(h.written).equals(Buffer.from(data))).toBe(true)
         expect(h.copy).toHaveBeenCalledWith(expect.objectContaining({ sourcePath: handoff, suggestedName: 'Alice_chat.json' }))
-        expect(h.events.slice(-3)).toEqual(['copy', 'copy settled', 'native_download_handoff_cleanup'])
+        expect(h.events[0]).toBe('hold')
+        expect(h.events.slice(-4)).toEqual(['copy', 'copy settled', 'native_download_handoff_cleanup', 'release'])
+        expect(runWithMobileBackgroundTask).toHaveBeenLastCalledWith('export', expect.any(Function), undefined, true)
         expect(h.invoke).toHaveBeenLastCalledWith('native_download_handoff_cleanup', { path: handoff })
     })
 

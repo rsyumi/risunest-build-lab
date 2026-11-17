@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod text_value;
 pub(crate) mod sessions;
+pub(crate) mod structure;
 
 /// The renderer loads a whole keyspace only while it stays under this. Past it
 /// the keyspace is read one key at a time instead.
@@ -42,6 +43,10 @@ pub(crate) struct PluginDeviceListItem {
     pub(crate) space: String,
     pub(crate) key: String,
     pub(crate) byte_size: i64,
+    /// The root's type when the value is in structure form, whose `byte_size`
+    /// then includes its parts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) structure_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,20 +242,30 @@ impl DeviceStore {
     /// plugin data screen shows sizes, so the values never leave the store.
     pub(crate) fn list_plugin_device_storage(&self) -> StoreResult<Vec<PluginDeviceListItem>> {
         let mut statement = self.connection.prepare(
-            "SELECT owner,space,key,byte_size FROM plugin_device_storage
+            "SELECT owner,space,key,byte_size,rowid FROM plugin_device_storage
                 WHERE tombstone=0 ORDER BY owner,space,key",
         )?;
-        let items = statement
+        let rows = statement
             .query_map([], |row| {
-                Ok(PluginDeviceListItem {
+                Ok((PluginDeviceListItem {
                     owner: row.get(0)?,
                     space: row.get(1)?,
                     key: row.get(2)?,
                     byte_size: row.get(3)?,
-                })
+                    structure_type: None,
+                }, row.get::<_, i64>(4)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(items)
+        Ok(rows.into_iter().map(|(mut item, rowid)| {
+            if item.space == "json" && item.byte_size >= structure::MIN_TEXT_BYTES {
+                // A row that cannot be read lists as plain; reading it reports the damage.
+                if let Ok(Some((prefix, root))) = structure::row_summary(&self.connection, rowid) {
+                    item.byte_size = item.byte_size.saturating_add(prefix.bytes as i64);
+                    item.structure_type = Some(root);
+                }
+            }
+            item
+        }).collect())
     }
 
     /// Applies the batch in one transaction. A removal leaves a tombstone with
@@ -320,6 +335,7 @@ impl DeviceStore {
             PluginDeviceMutation::Staged { session_id } => self.plugin_writes.take(owner, session_id).map(Some),
             _ => Ok(None),
         }).collect::<StoreResult<Vec<_>>>()?;
+        let staged_keys = staged.iter().map(|staged| staged.as_ref().map(|staged| (staged.space.clone(), staged.key.clone()))).collect::<Vec<_>>();
         let epoch = self.plugin_read_epoch.clone();
         let transaction = self.transaction()?;
         let mut written = std::collections::BTreeSet::new();
@@ -422,6 +438,13 @@ impl DeviceStore {
                 }
             }
         }
+        for (space, key) in mutations.iter().zip(&staged_keys).filter_map(|(mutation, staged)| match mutation {
+            PluginDeviceMutation::Set { space, key, .. } => Some((space.as_str(), key.as_str())),
+            PluginDeviceMutation::Staged { .. } => staged.as_ref().map(|(space, key)| (space.as_str(), key.as_str())),
+            _ => None,
+        }).collect::<std::collections::BTreeSet<_>>() {
+            admit_structure_row(&transaction, owner, space, key, text_value::MAX_VALUE_BYTES)?;
+        }
         finish_mutation(&transaction)?;
         let observed = written.into_iter().map(|(space, key)| {
             let sequence = remote_sequence(&transaction, &epoch, owner, &space, &key)?;
@@ -430,6 +453,24 @@ impl DeviceStore {
         transaction.commit()?;
         Ok(observed)
     }
+}
+
+/// A JSON-space row that starts with the structure marker must be a whole
+/// structure text whose parts are present; the check runs in the transaction
+/// that writes the row.
+pub(crate) fn admit_structure_row(tx: &Connection, owner: &str, space: &str, key: &str, limit: u64) -> StoreResult<()> {
+    if space != "json" { return Ok(()); }
+    let row: Option<(i64, i64)> = tx.query_row(
+        "SELECT rowid,byte_size FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3 AND tombstone=0",
+        params![owner, space, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    let Some((rowid, size)) = row else { return Ok(()) };
+    if size < structure::MIN_TEXT_BYTES { return Ok(()); }
+    let open = || -> StoreResult<rusqlite::blob::Blob<'_>> {
+        Ok(tx.blob_open(rusqlite::MAIN_DB, "plugin_device_storage", "value", rowid, true)?)
+    };
+    let Some(prefix) = structure::validate_text(open)? else { return Ok(()) };
+    let encoded = text_value::encode(open()?, std::io::sink(), limit)?.encoded_length;
+    structure::admit_parts(tx, &prefix, encoded, limit)
 }
 
 pub(crate) fn write_reserved(

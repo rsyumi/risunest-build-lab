@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { authorNoteFingerprint } from './authorNotePresets'
 import { get } from 'svelte/store'
 
 const mocks = vi.hoisted(() => ({
@@ -73,7 +74,8 @@ vi.mock('./alert', () => ({
     alertStore: { set: mocks.presentAlert },
     alertWait: vi.fn(),
 }))
-vi.mock('./util', () => ({
+vi.mock('./util', async importOriginal => ({
+    ...await importOriginal<typeof import('./util')>(),
     checkNullish: (value: unknown) => value === null || value === undefined,
     findCharacterbyId: mocks.findCharacterbyId,
     findCharacterIndexbyId: vi.fn(),
@@ -102,6 +104,7 @@ vi.mock('./globalApi.svelte', () => ({
 vi.mock('./process/inlayScreen', () => ({ updateInlayScreen: (value: unknown) => value }))
 vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
 vi.mock('./translator/translator', () => ({ translateHTML: vi.fn() }))
+vi.mock('./mobileBackgroundTask', async () => (await import('./mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 vi.mock('./process/index.svelte', async () => {
     const { writable } = await import('svelte/store')
     return { doingChat: writable(false) }
@@ -156,7 +159,9 @@ import {
     selectCharImg,
     addCharEmotion,
     addingEmotion,
+    updateLorebooks,
 } from './characters'
+import { beginMobileBackgroundTask } from './mobileBackgroundTask'
 import { createMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
 import { language } from 'src/lang'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
@@ -165,6 +170,8 @@ import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
 import { doingChat } from './process/index.svelte'
 import { translateHTML } from './translator/translator'
 import { createConversationSummaryStub } from './storage/conversationResidency'
+import { installDisplayRecovery, isDisplayRecoveryMarked, type DisplayRecoveryTarget } from './displayRecovery.svelte'
+import { recoveryStore } from './displayRecovery.testSupport'
 import {
     beginNavigationActivity,
     navigationActivity,
@@ -178,7 +185,37 @@ function deferred<T>() {
     return { promise, resolve }
 }
 
+async function markForDisplayRecovery(...marked: DisplayRecoveryTarget[]) {
+    await installDisplayRecovery(recoveryStore({ working: [], marked }, { commitAtOnce: true }).store)
+    onTestFinished(() => installDisplayRecovery(null))
+}
+
+describe('lorebook format update', () => {
+    it('gives an entry without a key, name or content empty text', () => {
+        const [entry] = updateLorebooks([{
+            key: null, comment: null, content: null, secondkey: '', insertorder: 100,
+            mode: 'normal', alwaysActive: false, selective: false,
+        }])
+        expect(entry).toMatchObject({ key: '', comment: '', content: '', bookVersion: 2 })
+    })
+})
+
 describe('runtime chat identity', () => {
+    it('keeps a newer portrait when the gallery selection changed while the picker was open', async () => {
+        const character = {type: 'character', chaId: 'synthetic-gallery-owner', image: 'assets/old.png', emotionImages: [], chats: []}
+        mocks.database.characters = [character]
+        const chosen = deferred<any>()
+        mocks.selectSingleFile.mockReturnValueOnce(chosen.promise)
+        const pending = selectCharImg(0, current => {
+            if (current.image !== 'assets/old.png') throw new Error('Synthetic stale portrait')
+        })
+        character.image = 'assets/newer.png'
+        chosen.resolve({name: 'replacement.png', data: new Uint8Array([1])})
+        await expect(pending).rejects.toThrow('Synthetic stale portrait')
+        expect(character.image).toBe('assets/newer.png')
+        expect(character).not.toHaveProperty('ccAssets')
+    })
+
     it.each(['portrait', 'emotion'] as const)('applies a pending %s import to its original character after reordering', async (kind) => {
         const first = { type: 'character', chaId: 'first', image: 'assets/old.png', emotionImages: [], chats: [] }
         const second = { type: 'character', chaId: 'second', image: '', emotionImages: [], chats: [] }
@@ -202,7 +239,9 @@ describe('runtime chat identity', () => {
         mocks.database.characters = [{ type: 'character', chaId: 'first', emotionImages: [], chats: [] }]
         mocks.selectMultipleFile.mockResolvedValueOnce([{ name: 'synthetic.png', data: new Uint8Array([1]) }])
         mocks.saveImage.mockRejectedValueOnce(new Error('Synthetic save failure'))
-        await expect(addCharEmotion(0)).rejects.toThrow('Synthetic save failure')
+        await addCharEmotion(0)
+        expect(mocks.alertError).toHaveBeenCalledWith('synthetic.png: Synthetic save failure')
+        expect(mocks.database.characters[0].emotionImages).toEqual([])
         expect(get(addingEmotion)).toBe(false)
     })
 
@@ -441,6 +480,9 @@ describe('runtime chat identity', () => {
         const first = createBlankChar()
         const second = createBlankChar()
         mocks.database.characters.push(first, second)
+        const firstChat = { characterId: first.chaId, conversationId: 'first-chat' }
+        const secondChat = { characterId: second.chaId, conversationId: 'second-chat' }
+        await markForDisplayRecovery(firstChat, secondChat)
 
         await removeChar(first.chaId, first.name, 'permanentForce')
 
@@ -451,6 +493,7 @@ describe('runtime chat identity', () => {
         expect(mocks.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(mocks.database.characters.map((character: any) => character.chaId)).toEqual([second.chaId])
         expect(mocks.deactivateActiveWorkingSet).toHaveBeenCalledTimes(2)
+        expect([isDisplayRecoveryMarked(firstChat), isDisplayRecoveryMarked(secondChat)]).toEqual([false, true])
     })
 
     it.each([
@@ -1055,25 +1098,10 @@ describe('chat list operations', () => {
         const pageSlack = 8 * 1024
         const { utf8ByteLength } = await import('./storage/nativePersistenceValue')
         const { encodeNativeCommit } = await import('./storage/nativeCommitTransport')
-        let encodedRequests = 0
-        class EncodingWorker {
-            onmessage: ((event: { data: { bytes: Uint8Array } }) => void) | null = null
-            onerror: (() => void) | null = null
-            terminate() {}
-            postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
-                expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
-                expect(data.byteLength).toBeLessThan(pageBytes + pageSlack)
-                expect(data.pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
-                const received = structuredClone(data, { transfer })
-                expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
-                const bytes = new Uint8Array(received.byteLength)
-                let offset = 0
-                for (const page of received.pages) { bytes.set(page, offset); offset += page.byteLength }
-                encodedRequests++
-                Promise.resolve().then(() => this.onmessage?.({ data: { bytes } }))
-            }
-        }
-        vi.stubGlobal('Worker', EncodingWorker)
+        let largestRequest = 0
+        vi.stubGlobal('Worker', class {
+            constructor() { throw new Error('The commit encoder must not start a worker') }
+        })
         const initial = buildSelectedCharacter()
         const reactive = createPersistentSaveObserverHarness({ ...mocks.database } as any)
         mocks.database.characters = reactive.database.characters
@@ -1090,6 +1118,7 @@ describe('chat list operations', () => {
                 expect(input.expectedRevision).toBe(revision)
                 const encoded = await encodeNativeCommit({ commit: input, assetAliases: [] })
                 expect(JSON.parse(new TextDecoder().decode(encoded)).commit).toEqual(input)
+                largestRequest = Math.max(largestRequest, encoded.byteLength)
                 requests.push(input)
                 for (const mutation of input.conversations ?? []) {
                     if (mutation.type !== 'replace-range') continue
@@ -1155,7 +1184,7 @@ describe('chat list operations', () => {
             expect(requests.find((request) => request.addCharacter)?.addCharacter.chats).toEqual([])
             expect(largestEncoding).toBeLessThan(pageBytes + pageSlack)
             expect(requests.filter((request) => request.conversations?.some((mutation: any) => mutation.start > 0))).toHaveLength(4)
-            expect(encodedRequests).toBe(requests.length)
+            expect(largestRequest).toBeLessThan(pageBytes + pageSlack)
             expect(coordinator.hasPendingPersistenceWork).toBe(false)
         } finally {
             stringify.mockRestore()
@@ -1166,6 +1195,9 @@ describe('chat list operations', () => {
 
     it('keeps the selected chat when another chat is removed', async () => {
         const character = buildSelectedCharacter()
+        const removedChat = { characterId: character.chaId, conversationId: 'chat-a' }
+        const keptChat = { characterId: character.chaId, conversationId: 'chat-c' }
+        await markForDisplayRecovery(removedChat, keptChat)
 
         const removed = await removeChat(character, 'chat-a')
 
@@ -1173,6 +1205,7 @@ describe('chat list operations', () => {
         expect(character.chats.map((chat: any) => chat.id)).toEqual(['chat-b', 'chat-c'])
         expect(character.chatPage).toBe(0)
         expect(mocks.changeChatTo).not.toHaveBeenCalled()
+        expect([isDisplayRecoveryMarked(removedChat), isDisplayRecoveryMarked(keptChat)]).toEqual([false, true])
     })
 
     it('moves to a surviving chat before removing the selected chat', async () => {
@@ -1471,10 +1504,14 @@ describe('chat list operations', () => {
         const character = buildCharacter()
         character.chats[0].message = []
         mocks.database.characters.push(character)
+        Object.assign(mocks.database, { authorNotePresets: [{ id: 'preset', name: 'Preset', text: 'Shared note' }] })
+        onTestFinished(() => { Reflect.deleteProperty(mocks.database, 'authorNotePresets') })
         selectedCharID.set(0)
         mocks.readPersistentConversation.mockResolvedValue({
             ...character.chats[0],
             message: [{ role: 'user', data: 'authoritative body' }],
+            note: 'stale copy',
+            authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') },
         })
 
         await exportChat(0)
@@ -1488,6 +1525,8 @@ describe('chat list operations', () => {
         expect(exported.data.message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
+        expect(exported.data.note).toBe('Shared note')
+        expect(exported.data).not.toHaveProperty('authorNotePreset')
     })
 
     it('filters markup added by translation from an HTML export and shows names as text', async () => {
@@ -1499,9 +1538,17 @@ describe('chat list operations', () => {
         // HTML file, then the default '0' answers translate the content and keep names.
         mocks.alertSelect.mockResolvedValueOnce('2')
         vi.mocked(translateHTML).mockResolvedValue('<p>translated <img src="x" onerror="alert(1)"></p>')
+        const events: string[] = []
+        vi.mocked(beginMobileBackgroundTask).mockImplementationOnce(kind => {
+            events.push(`hold ${kind}`)
+            return { progress() {}, async dispose() { events.push('release') } }
+        })
+        mocks.downloadFile.mockImplementationOnce(async () => { events.push('download'); return true })
 
         await exportChat(0)
 
+        // Translation holds the background task, which ends before the save picker opens.
+        expect(events).toEqual(['hold export', 'release', 'download'])
         const exported = Buffer.from(mocks.downloadFile.mock.calls[0][1]).toString()
         expect(exported).toContain('<p>translated <img src="x"></p>')
         expect(exported).not.toContain('onerror')
@@ -1547,6 +1594,9 @@ describe('chat list operations', () => {
         resident.chats[0].message = []
         const complete = structuredClone(resident)
         complete.chats[0].message = [{ role: 'user', data: 'authoritative body' }]
+        Object.assign(complete.chats[0], { note: 'stale copy', authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') } })
+        Object.assign(mocks.database, { authorNotePresets: [{ id: 'preset', name: 'Preset', text: 'Shared note' }] })
+        onTestFinished(() => { Reflect.deleteProperty(mocks.database, 'authorNotePresets') })
         mocks.database.characters.push(resident)
         selectedCharID.set(0)
         mocks.readPersistentCompleteCharacter.mockResolvedValue(complete)
@@ -1561,5 +1611,7 @@ describe('chat list operations', () => {
         expect(exported.data[0].message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
+        expect(exported.data[0].note).toBe('Shared note')
+        expect(exported.data[0]).not.toHaveProperty('authorNotePreset')
     })
 })

@@ -1,4 +1,6 @@
+import type { PortraitRenditionDescriptor } from './characterPortraitRendition'
 import type { ExportExclusions } from './exportExcludedReport'
+import type { OfficialAccountAssetProgress } from './sync/officialAccountAssetOutcome'
 import { nativeRestoreDeadline, NativeRestoreControlTimeout, type NativeRestoreClock } from './nativeRestoreDeadline'
 import { exportIOSFile } from './iosFiles'
 import { MAX_CONTENT_METADATA_BYTES } from './contentImportLimits'
@@ -14,6 +16,7 @@ import {
 import type { PreparedImmutablePayload } from './payloadCas'
 import type { DataHealthResult } from './dataHealth'
 import type { PersistentDataRuntime } from './persistentDataRuntime'
+import { readCurrentRevision } from './persistentDataStore'
 import { registerCommittedWorkingSetContinuation } from './committedWorkingSetContinuation'
 import {
     copyNativeExportToAndroidSaf,
@@ -240,6 +243,10 @@ export interface NativeSnapshotBodiesStarted {
 }
 
 export type NativeFileJobStage =
+    | 'downloading-account-backup'
+    | 'checking-account-assets'
+    | 'downloading-account-assets'
+    | 'finishing-account-restore'
     | 'reading-archive'
     | 'requesting-backup-key'
     | 'decrypting-database'
@@ -315,6 +322,8 @@ export function resolveNativeFileJobStage(
         return 'assign-plugin-values'
     }
     if (status.detail) return status.detail.stage
+    // A failed or cancelled job also reports `complete`; the stage it stopped in stays current.
+    const endedEarly = status.state === 'failed' || status.state === 'cancelled'
     if (status.kind === 'official-publication-upload') {
         switch (status.phase) {
             case 'queued':
@@ -326,8 +335,9 @@ export function resolveNativeFileJobStage(
             case 'awaiting-publication-retry':
                 return 'publishing-destination'
             case 'finalizing-publication':
-            case 'complete':
                 return 'finalizing-export'
+            case 'complete':
+                return endedEarly ? null : 'finalizing-export'
             default:
                 return null
         }
@@ -343,8 +353,9 @@ export function resolveNativeFileJobStage(
             case 'publishing-destination':
                 return 'publishing-destination'
             case 'finalizing-export':
-            case 'complete':
                 return 'finalizing-export'
+            case 'complete':
+                return endedEarly ? null : 'finalizing-export'
             default:
                 return null
         }
@@ -435,6 +446,9 @@ export interface NativePortableBodyRetryRequest {
 }
 
 export interface NativeFileJobStatus {
+    officialAssets?: OfficialAccountAssetProgress
+    officialAssetRestore?: NativeOfficialAssetRestoreProgress
+    officialAssetPublication?: NativeOfficialAssetPublicationProgress
     exportCaptureRevision?: number
     portableBodyRetry?: {stagingId: string; catalogSha256: string; pending: boolean; available: boolean; sourceRequired: boolean}
     jobId: string
@@ -445,6 +459,8 @@ export interface NativeFileJobStatus {
         | 'export-character-card'
         | 'export-risu-module'
         | 'export-dataset'
+        | 'export-gallery-file'
+        | 'export-gallery-zip'
         | 'restore-legacy-local-backup'
         | 'export-compatible-local-backup'
         | 'export-portable-backup'
@@ -457,6 +473,8 @@ export interface NativeFileJobStatus {
         | 'restore-official-account-snapshot'
         | 'restore-native-snapshot'
         | 'official-publication-upload'
+        | 'restore-official-account-assets'
+        | 'publish-official-account-assets'
     expectedRevision?: number
     activationRevision?: number
     activationAuthority?: string
@@ -508,7 +526,16 @@ export interface NativeFileJobStatus {
         code: string
         message: string
         itemKind?: string
+        owner?: NativeFileJobFailureOwner
     }
+}
+
+/** The library item whose data a compatible export could not write. */
+export interface NativeFileJobFailureOwner {
+    kind: 'character' | 'chat' | 'preset' | 'module' | 'persona'
+    name: string
+    /** The character a chat belongs to. */
+    character?: string
 }
 
 export interface NativePortableSelection {
@@ -543,6 +570,8 @@ export interface NativeFileJobOptions {
     signal?: AbortSignal
     pollIntervalMs?: number
     onStatus?(status: NativeFileJobStatus): void
+    /** Called when an export's destination has been chosen, before the export work starts. */
+    onDestinationChosen?(): void
 }
 
 export interface PreparedNativeContentActivationLifecycle {
@@ -593,7 +622,7 @@ export interface NativeIncompleteRestorePreview {
     unavailableColdKeys: string[]
     characterNames: string[]
     invalidInlays: string[]
-    omissions?: Partial<Record<'data' | 'remote' | 'missing' | 'values' | 'pluginStorage' | 'inlays' | 'excludedCharacters', number>>
+    omissions?: Partial<Record<'data' | 'remote' | 'missing' | 'values' | 'pluginStorage' | 'damagedPluginStorage' | 'oversizedPluginStorage' | 'inlays' | 'excludedCharacters' | 'missingAssets', number>>
 }
 
 export interface NativeFileRestoreJobOptions extends NativeFileJobOptions {
@@ -627,6 +656,7 @@ export interface NativeFileExportJobOptions extends NativeFileJobOptions {
 }
 
 export interface NativeCharacterCharxExportInput {
+    portraitRendition?: PortraitRenditionDescriptor
     characterId: string
     destination: NativeCharacterCharxExportDestination
     expectedRevision: number
@@ -636,6 +666,7 @@ export interface NativeCharacterCharxExportInput {
 }
 
 export interface NativeCharacterCardExportInput {
+    portraitRendition?: PortraitRenditionDescriptor
     characterId: string
     destination: NativeCharacterCharxExportDestination
     expectedRevision: number
@@ -656,7 +687,8 @@ export interface NativeDatasetExportInput {
 
 export type NativeCharacterCharxExportDestination =
     | { type: 'desktopPath'; path: string }
-    | { type: 'androidSaf'; suggestedName: string }
+    /** A destination reserved by the caller stays the caller's to release. */
+    | { type: 'androidSaf'; suggestedName: string; reservation?: AndroidSafDestinationReservation }
     | { type: 'iosFiles'; suggestedName: string }
 
 export type NativeBackupDestination =
@@ -704,6 +736,7 @@ export class NativeFileJobError extends Error {
         message: string,
         readonly warningCodes: string[] = [],
         readonly itemKind?: string,
+        readonly owner?: NativeFileJobFailureOwner,
     ) {
         super(message)
         this.name = 'NativeFileJobError'
@@ -1575,7 +1608,7 @@ async function runNativeReplacementRestore(
                         if (preview?.unavailableColdKeys.length) warnings.push(language.errors.coldStorageIncompleteRestoreConfirm(preview.characterNames.join(', '), preview.unavailableColdKeys.length, 0))
                         if (preview?.invalidInlays.length) warnings.push(language.portableBackup.invalidInlaysConfirm(preview.invalidInlays.length))
                         if (preview?.omissions) {
-                            for (const key of ['data', 'remote', 'missing', 'values', 'pluginStorage', 'inlays', 'excludedCharacters'] as const) {
+                            for (const key of ['data', 'remote', 'missing', 'values', 'pluginStorage', 'damagedPluginStorage', 'oversizedPluginStorage', 'inlays', 'excludedCharacters', 'missingAssets'] as const) {
                                 const count = preview.omissions[key] ?? 0
                                 if (count > 0) warnings.push(language.portableBackup.omittedRestoreData[key](count))
                             }
@@ -1642,9 +1675,9 @@ async function runNativeReplacementRestore(
                             }
                             if ((terminal.state === 'failed' || terminal.state === 'cancelled') &&
                                 (kind !== 'restore-portable-backup' || !Number.isSafeInteger(terminal.activationRevision))) {
-                                const current = await bounded(runtime.store.readRoot(), 'activation revision check')
-                                if (current.revision !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
-                                return current.revision
+                                const current = await bounded(readCurrentRevision(runtime.store), 'activation revision check')
+                                if (current !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
+                                return current
                             }
                             if (kind === 'restore-portable-backup') {
                                 if (!Number.isSafeInteger(terminal.activationRevision)) throw new NativeFileJobError('invalid-activation-receipt','Portable activation receipt is unavailable')
@@ -1656,9 +1689,9 @@ async function runNativeReplacementRestore(
                                 if (!terminal.result) throw new Error('Native activation result is unavailable')
                                 return terminal.result.revision
                             }
-                            const current = await bounded(runtime.store.readRoot(), 'activation revision check')
-                            if (current.revision !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
-                            return current.revision
+                            const current = await bounded(readCurrentRevision(runtime.store), 'activation revision check')
+                            if (current !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
+                            return current
                         },
                         async afterRefresh() {
                             const plugins = await import('../plugins/apiV3/v3.svelte')
@@ -1890,11 +1923,13 @@ async function runNativeReplacementRestore(
         if (upstreamPause && portableAdoptedRevision === undefined) {
             if (!activationUnresolved && (!activationSubmitted || terminal?.state === 'cancelled' || terminal?.state === 'failed')) {
                 try {
-                    const unchanged = await bounded(runtime.store.readRoot(), 'unchanged library check')
-                    if (unchanged.revision !== upstreamPause.fence.revision) throw new Error('Native restore changed the library')
+                    const unchanged = await bounded(readCurrentRevision(runtime.store), 'unchanged library check')
+                    if (unchanged !== upstreamPause.fence.revision) throw new Error('Native restore changed the library')
                     const plugins = await import('../plugins/apiV3/v3.svelte')
                     await bounded(plugins.restartPluginsAfterAuthorityReplacement(), 'plugin restart')
-                    await bounded(upstreamPause.abortUnchanged(async () => { await bounded(Promise.resolve(upstreamBinding?.assertAuthority()), 'binding verification') }), 'unchanged restore recovery')
+                    // Finishing after the deadline ends the guard and the recovery that would resume the binding.
+                    await bounded(upstreamPause.abortUnchanged(async () => { await bounded(Promise.resolve(upstreamBinding?.assertAuthority()), 'binding verification') }), 'unchanged restore recovery',
+                        () => upstreamBinding?.resume())
                     await bounded(Promise.resolve(upstreamBinding?.resume()), 'binding resume')
                 } catch { await bounded(upstreamPause.finish(), 'write pause release').catch(() => {}) }
             } else await bounded(upstreamPause.finish(), 'write pause release').catch(() => {})
@@ -2005,7 +2040,7 @@ export async function runNativeOfficialAccountSnapshotRestore(
         }
         if (
             error instanceof NativeFileJobError &&
-            (error.code === 'compatibility-required' || error.code === 'cold-expansion-required')
+            error.code === 'compatibility-required'
         ) {
             return { kind: 'compatibility-fallback' }
         }
@@ -2220,13 +2255,17 @@ async function runNativeManagedExport(
         throw new Error(`${spec.operation} requires Tauri`)
     }
     if (options.signal?.aborted) throw abortError()
-    let reservation = spec.reservation
+    let reservation = spec.reservation ?? (spec.destination.type === 'androidSaf' ? spec.destination.reservation : undefined)
+    let owned = false
     if (spec.destination.type === 'androidSaf' && !reservation) {
         if (!dependencies.reserveAndroidDestination) throw new NativeFileJobError('unsupported', 'Android SAF destination reservation is unavailable')
         reservation = await dependencies.reserveAndroidDestination(spec.destination.suggestedName, spec.androidSourceKind ?? 'risuSave', options.signal)
+        owned = true
     }
-    return withAndroidSafDestination(reservation, () =>
-        runNativeManagedExportToDestination(spec, options, dependencies, reservation))
+    const run = () => runNativeManagedExportToDestination(spec, options, dependencies, reservation)
+    // The destination is chosen by now, so the picker never holds the background task.
+    options.onDestinationChosen?.()
+    return owned ? withAndroidSafDestination(reservation, run) : run()
 }
 
 async function runNativeManagedExportToDestination(
@@ -2268,7 +2307,7 @@ async function runNativeManagedExportToDestination(
             throw new NativeFileJobError(
                 terminal.error?.code ?? 'export-failed',
                 terminal.error?.message ?? `${spec.operation} failed`,
-                [], terminal.error?.itemKind,
+                [], terminal.error?.itemKind, terminal.error?.owner,
             )
         }
         if (!terminal.result) {
@@ -2428,6 +2467,7 @@ export function runNativeCharacterCharxExport(
                     : {}),
                 expectedRevision: input.expectedRevision,
                 characterId: input.characterId,
+                ...(input.portraitRendition ? { portraitRendition: input.portraitRendition } : {}),
                 ...(input.container ? { container: input.container } : {}),
                 card: input.card,
                 module: input.module,
@@ -2456,6 +2496,7 @@ export function runNativeCharacterCardExport(
                     : {}),
                 expectedRevision: input.expectedRevision,
                 characterId: input.characterId,
+                ...(input.portraitRendition ? { portraitRendition: input.portraitRendition } : {}),
                 format: input.format,
                 metadata: input.metadata,
             }),
@@ -2622,6 +2663,7 @@ export async function runNativeArchiveExport(
         ? await dependencies.reserveAndroidDestination?.(destination.suggestedName, 'risuSave', options.signal)
         : undefined
     if (destination.type === 'androidSaf' && !reservation) throw new NativeFileJobError('unsupported', 'Android SAF destination reservation is unavailable')
+    options.onDestinationChosen?.()
     return withAndroidSafDestination(reservation, () =>
         withPausedNativeExport(runtime, 'native-portable-export', options,
             (revision, observed) => runNativeArchiveExportAtRevision(runtime, revision, destination, selection, {...options, ...observed}, dependencies, reservation)))
@@ -3532,4 +3574,289 @@ export async function resumeNativeOfficialPublication(
         },
     )
     return outcome?.kind === 'completed' ? outcome.receipt : null
+}
+
+export interface NativeOfficialAssetRestoreProgress {
+    installed: number
+    missing: number
+    failed: number
+    bytes: number
+    active: number
+    limit: number
+    waitingUntil?: number
+    reason?: 'authentication' | 'reauthentication-needed' | 'local' | 'library-changed' | 'service'
+}
+
+export type NativeOfficialAssetSettled = 'installed' | 'missing' | 'failed'
+
+export interface NativeOfficialAssetRestoreRequest {
+    baseUrl: string
+    credential: { kind: 'risu-auth'; token: string }
+    accountId: string
+    expectedLibrary: string
+    keys: readonly string[]
+    concurrency?: 1 | 2 | 4
+    reauthenticated: boolean
+}
+
+export interface NativeOfficialAssetRestoreOptions {
+    signal?: AbortSignal
+    /** Runs on every poll; a failure cancels the job and is thrown once the job has stopped. */
+    guard?(): Promise<void>
+    settled?(key: string, result: NativeOfficialAssetSettled): void
+    progress?(progress: NativeOfficialAssetRestoreProgress): void
+}
+
+export interface NativeOfficialAssetRestoreResult {
+    reason?: NativeOfficialAssetRestoreProgress['reason']
+    cancelled: boolean
+    /** Keys the job never settled, in request order. */
+    unsettled: string[]
+}
+
+const officialAssetPage = 512
+
+export async function runNativeOfficialAssetRestore(
+    request: NativeOfficialAssetRestoreRequest,
+    options: NativeOfficialAssetRestoreOptions = {},
+    dependencies: NativeFileJobDependencies = productionDependencies,
+): Promise<NativeOfficialAssetRestoreResult> {
+    if (!dependencies.isTauri()) throw new Error('Native official asset restore requires Tauri')
+    if (options.signal?.aborted) throw abortError()
+    const { keys, ...start } = request
+    const started = await invokeNative(dependencies, 'native_file_job_start', {
+        request: { kind: 'restore-official-account-assets', ...start, keyCount: keys.length },
+    }) as { jobId?: unknown }
+    if (typeof started?.jobId !== 'string' || !started.jobId) {
+        throw new NativeFileJobError('invalid-result', 'Native official asset restore start returned no job ID')
+    }
+    const jobId = started.jobId
+    const settled = new Uint8Array(keys.length)
+    let read = 0
+    let ended = false
+    let cancelling = false
+    let ownership: { error: unknown } | undefined
+    const cancel = async () => {
+        if (cancelling) return
+        cancelling = true
+        await invokeNative(dependencies, 'native_file_job_cancel', { jobId })
+    }
+    const readSettled = async () => {
+        while (true) {
+            const page = await invokeNative(dependencies, 'native_official_asset_restore_settled', {
+                jobId, offset: read, limit: officialAssetPage,
+            }) as { entries: { index: number; result: NativeOfficialAssetSettled }[]; total: number }
+            for (const { index, result } of page.entries) {
+                if (!Number.isInteger(index) || index < 0 || index >= keys.length || settled[index]
+                    || (result !== 'installed' && result !== 'missing' && result !== 'failed')) {
+                    throw new NativeFileJobError('invalid-result', 'Native official asset restore settled an unknown key')
+                }
+                settled[index] = 1
+                options.settled?.(keys[index], result)
+            }
+            read += page.entries.length
+            if (page.entries.length === 0 || read >= page.total) return
+        }
+    }
+    const status = async () => await invokeNative(dependencies, 'native_file_job_status', { jobId }) as NativeFileJobStatus
+    const poll = async () => {
+        while (true) {
+            if (!ownership && !cancelling) {
+                try { await options.guard?.() }
+                catch (error) { ownership = { error } }
+            }
+            if (ownership || options.signal?.aborted) await cancel()
+            const current = await status()
+            if (current.officialAssetRestore) options.progress?.(current.officialAssetRestore)
+            await readSettled()
+            if (isTerminalJob(current)) { ended = true; return current }
+            await dependencies.wait(150)
+        }
+    }
+    let terminal: NativeFileJobStatus
+    try {
+        for (let offset = 0; offset < keys.length && !options.signal?.aborted; offset += officialAssetPage) {
+            const open = await invokeNative(dependencies, 'native_official_asset_restore_enqueue', {
+                jobId, keys: keys.slice(offset, offset + officialAssetPage),
+            })
+            if (open !== true) break
+        }
+        terminal = await poll()
+    } finally {
+        try {
+            if (!ended) {
+                await cancel()
+                while (!isTerminalJob(await status())) await dependencies.wait(150)
+            }
+            await invokeNative(dependencies, 'native_file_job_forget', { jobId })
+        } catch {}
+    }
+    if (ownership) throw ownership.error
+    if (terminal.state === 'failed') {
+        throw new NativeFileJobError(terminal.error?.code ?? 'native-job-failed',
+            terminal.error?.message ?? 'Native official asset restore failed', terminal.warningCodes ?? [])
+    }
+    return {
+        reason: terminal.officialAssetRestore?.reason,
+        cancelled: terminal.state === 'cancelled',
+        unsettled: keys.filter((_key, index) => !settled[index]),
+    }
+}
+
+export interface NativeOfficialAssetPublicationProgress {
+    written: number
+    failed: number
+    bytes: number
+    active: number
+    limit: number
+    waitingUntil?: number
+    reason?: 'authentication' | 'reauthentication-needed' | 'local' | 'service' | 'auth-warning'
+    session?: string
+    warning?: string
+    reloadSession: boolean
+}
+
+export interface NativeOfficialAssetPublicationRequest {
+    baseUrl: string
+    credential: { kind: 'risu-auth'; token: string }
+    accountId: string
+    /** The native lease of the revision being published, which keeps the bodies pinned. */
+    lease: string
+    session: string | null
+    assets: readonly { localKey: string; key: string }[]
+    concurrency?: 1 | 2 | 4
+}
+
+export interface NativeOfficialAssetPublicationOptions {
+    signal?: AbortSignal
+    /** Runs on every poll; a failure cancels the job and is thrown once the job has stopped. */
+    guard?(): Promise<void>
+    /** The account now holds the asset under `replacementKey`. */
+    written?(key: string, replacementKey: string): void
+    progress?(progress: NativeOfficialAssetPublicationProgress): void
+}
+
+export interface NativeOfficialAssetPublicationResult {
+    reason?: NativeOfficialAssetPublicationProgress['reason']
+    cancelled: boolean
+    failed: number
+    session: string | null
+    warning: string | null
+    reloadSession: boolean
+    /** Keys the account does not hold yet, in request order. */
+    unwritten: string[]
+}
+
+export async function runNativeOfficialAssetPublication(
+    request: NativeOfficialAssetPublicationRequest,
+    options: NativeOfficialAssetPublicationOptions = {},
+    dependencies: NativeFileJobDependencies = productionDependencies,
+): Promise<NativeOfficialAssetPublicationResult> {
+    if (!dependencies.isTauri()) throw new Error('Native official asset publication requires Tauri')
+    if (options.signal?.aborted) throw abortError()
+    const { assets } = request
+    const started = await invokeNative(dependencies, 'native_file_job_start', {
+        request: { kind: 'publish-official-account-assets', ...request },
+    }) as { jobId?: unknown }
+    if (typeof started?.jobId !== 'string' || !started.jobId) {
+        throw new NativeFileJobError('invalid-result', 'Native official asset publication start returned no job ID')
+    }
+    const jobId = started.jobId
+    const written = new Uint8Array(assets.length)
+    let read = 0
+    let ended = false
+    let cancelling = false
+    let ownership: { error: unknown } | undefined
+    const cancel = async () => {
+        if (cancelling) return
+        cancelling = true
+        await invokeNative(dependencies, 'native_file_job_cancel', { jobId })
+    }
+    const readSettled = async () => {
+        while (true) {
+            const page = await invokeNative(dependencies, 'native_official_asset_publication_settled', {
+                jobId, offset: read, limit: officialAssetPage,
+            }) as { entries: { index: number; replacementKey: string | null }[]; total: number }
+            for (const { index, replacementKey } of page.entries) {
+                if (!Number.isInteger(index) || index < 0 || index >= assets.length || written[index]
+                    || (replacementKey !== null && (typeof replacementKey !== 'string' || !replacementKey))) {
+                    throw new NativeFileJobError('invalid-result', 'Native official asset publication settled an unknown asset')
+                }
+                written[index] = replacementKey === null ? 2 : 1
+                if (replacementKey !== null) options.written?.(assets[index].key, replacementKey)
+            }
+            read += page.entries.length
+            if (page.entries.length === 0 || read >= page.total) return
+        }
+    }
+    const status = async () => await invokeNative(dependencies, 'native_file_job_status', { jobId }) as NativeFileJobStatus
+    const poll = async () => {
+        while (true) {
+            if (!ownership && !cancelling) {
+                try { await options.guard?.() }
+                catch (error) { ownership = { error } }
+            }
+            if (ownership || options.signal?.aborted) await cancel()
+            const current = await status()
+            if (current.officialAssetPublication) options.progress?.(current.officialAssetPublication)
+            await readSettled()
+            if (isTerminalJob(current)) { ended = true; return current }
+            await dependencies.wait(150)
+        }
+    }
+    let terminal: NativeFileJobStatus
+    try {
+        terminal = await poll()
+    } finally {
+        try {
+            if (!ended) {
+                await cancel()
+                while (!isTerminalJob(await status())) await dependencies.wait(150)
+            }
+            await invokeNative(dependencies, 'native_file_job_forget', { jobId })
+        } catch {}
+    }
+    if (ownership) throw ownership.error
+    if (terminal.state === 'failed') {
+        throw new NativeFileJobError(terminal.error?.code ?? 'native-job-failed',
+            terminal.error?.message ?? 'Native official asset publication failed', terminal.warningCodes ?? [])
+    }
+    const progress = terminal.officialAssetPublication
+    return {
+        reason: progress?.reason,
+        cancelled: terminal.state === 'cancelled',
+        failed: progress?.failed ?? 0,
+        session: progress?.session ?? null,
+        warning: progress?.warning ?? null,
+        reloadSession: progress?.reloadSession ?? false,
+        unwritten: assets.filter((_asset, index) => written[index] !== 1).map(asset => asset.key),
+    }
+}
+
+export interface NativeGalleryExportInput {
+    destination: NativeCharacterCharxExportDestination
+    expectedRevision: number
+    archive: boolean
+    selection: {kind: 'asset'; entries: {key: string; name: string; section: string}[]}
+        | {kind: 'inlay'; keys: string[]}
+}
+
+export function runNativeGalleryExport(
+    input: NativeGalleryExportInput,
+    options: NativeFileJobOptions = {},
+    dependencies: NativeBackupExportDependencies = productionBackupExportDependencies,
+): Promise<NativeFileJobResult> {
+    return runNativeManagedExport({
+        operation: 'Native gallery export',
+        safLengthMismatchLabel: 'gallery download',
+        handoffCleanupCommand: 'native_download_handoff_cleanup',
+        androidSourceKind: 'download',
+        destination: input.destination,
+        prepareRequest: () => ({
+            kind: input.archive ? 'export-gallery-zip' : 'export-gallery-file',
+            ...(input.destination.type === 'desktopPath' ? {destination: input.destination.path} : {}),
+            expectedRevision: input.expectedRevision,
+            selection: input.selection,
+        }),
+    }, options, dependencies)
 }

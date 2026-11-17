@@ -32,9 +32,20 @@ fn retained_cleanup_uses_one_page_and_no_payload_hashing() {
     requests.1.store(0, Ordering::Relaxed);
     crate::persistent_store::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.set(0));
     crate::persistent_store::hash_work::reset_hash_work();
+    // Media requests take the repository lock, so the deletion takes it again for each page.
+    let deleting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_deleting = deleting.clone();
+    let mut progress = Progress::new(move |snapshot| observed_deleting.store(snapshot.stage == Stage::Deleting, Ordering::Relaxed));
+    let acquisitions = std::cell::RefCell::new(std::collections::BTreeSet::new());
     let started = std::time::Instant::now();
-    let result = store.asset_residency_evict(|| Ok(())).unwrap();
+    let result = store.asset_residency_evict_observed(None, || {
+        if deleting.load(Ordering::Relaxed) {
+            acquisitions.borrow_mut().insert(crate::asset_repository::coordinator::REPOSITORY_MUTATION_ACQUISITIONS.with(|count| count.get()));
+        }
+        Ok(())
+    }, &mut progress).unwrap();
     let elapsed = started.elapsed().as_millis();
+    assert!(acquisitions.borrow().len() > 1, "the deletion held the repository lock across every page");
     let work = crate::persistent_store::hash_work::take_hash_work();
     assert!(work.incomplete.is_empty());
     let hashed = work.domains.get("cas_existing_verify").map_or(0, |work| work.bytes);

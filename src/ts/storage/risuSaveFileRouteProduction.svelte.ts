@@ -175,7 +175,7 @@ export const exportRisuSaveFromSystemPicker = (
     runSharedNativeFileOperation(
         'export',
         'risu-save-export',
-        ({ signal, onStatus }) =>
+        ({ signal, onStatus, protect }) =>
             exportRisuSaveFromPicker(
                 {
                     ...options,
@@ -184,8 +184,12 @@ export const exportRisuSaveFromSystemPicker = (
                         onStatus(status)
                         options.onStatus?.(status)
                     },
+                    onDestinationChosen: () => {
+                        protect()
+                        options.onDestinationChosen?.()
+                    },
                 },
                 productionDependencies,
             ),
-        { presentation: 'dialog', format: 'risu-save' },
+        { presentation: 'dialog', format: 'risu-save', protectAfterPicker: true },
     )

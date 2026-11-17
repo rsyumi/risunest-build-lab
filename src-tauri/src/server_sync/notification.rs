@@ -53,6 +53,10 @@ pub(crate) async fn run(
             .map_err(|_| SyncError::new("invalid-device-token", 400))?,
     );
     request.headers_mut().insert(
+        risunest_sync_wire::library_format::HEADER,
+        super::library_format::LEVEL.into(),
+    );
+    request.headers_mut().insert(
         "x-risu-library",
         config
             .library_id
@@ -238,6 +242,7 @@ mod tests {
                         request.headers()["x-risu-library"],
                         "00000000-0000-4000-8000-000000000001"
                     );
+                    assert_eq!(request.headers()["x-risunest-library-format"], "2");
                     Ok(response)
                 },
             )

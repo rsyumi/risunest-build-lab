@@ -19,7 +19,7 @@ vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: async () => t
 vi.mock('./bindingLocalData', () => ({ hasLocalSharedBindingData: async () => false }))
 vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: async () => false }))
 vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingSetContinuation: vi.fn() }))
-vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: (_kind: string, operation: (task: object) => Promise<unknown>) => operation({ progress() {}, async dispose() {} }) }))
+vi.mock('../../mobileBackgroundTask', async () => (await import('../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthorityReplacement: async () => {}, invalidatePluginCachesAfterAuthorityReplacement: async () => {}, restartPluginsAfterAuthorityReplacement: async () => {} }))
 // The production wrapper is replaced by a runtime over a real store; LWW receives reach native code through the real SQLite store methods.
 vi.mock('../persistentDataRuntime.svelte', () => ({

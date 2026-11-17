@@ -134,6 +134,12 @@ export function deviceSettingsModule(startup: BootstrapTestState) {
     } satisfies Partial<DeviceSettings>
 }
 
+export function storeCompactionModule() {
+    return {
+        compactRequestedStoreAtStart: vi.fn(async () => null), showStoreCompactionNotice: vi.fn(async () => {}),
+    } satisfies Partial<typeof import('./storage/storeCompaction')>
+}
+
 export function persistentStorageRuntimeModule() {
     return {
         initializePersistentStorage: vi.fn(),
@@ -152,7 +158,7 @@ export function nativeFileJobRecoveryModule() {
 }
 
 export function persistentBootstrapModule(startup: BootstrapTestState) {
-    return { bootstrapPersistentDatabase: async () => ({ database: startup.database, revision: 1, source: 'persistent' }) } satisfies Partial<typeof import('./storage/persistentBootstrap')>
+    return { bootstrapPersistentDatabase: vi.fn(async () => ({ database: startup.database, revision: 1, source: 'persistent' })) } satisfies Partial<typeof import('./storage/persistentBootstrap')>
 }
 
 export function databaseModule(startup: BootstrapTestState) {
@@ -242,6 +248,7 @@ export function officialAccountBootstrapModule() {
 export function officialAssetLedgerModule() {
     return {
         createAccountScopedOfficialAssetLedger: () => stub<ReturnType<typeof import('./storage/sync/officialAssetLedger')['createAccountScopedOfficialAssetLedger']>>({ reset: vi.fn() }),
+        createNativeOfficialAssetLedger: async () => stub<Awaited<ReturnType<typeof import('./storage/sync/officialAssetLedger')['createNativeOfficialAssetLedger']>>>({ reset: vi.fn(), flush: vi.fn(async () => {}), clearAll: vi.fn(async () => {}) }),
     } satisfies Partial<typeof import('./storage/sync/officialAssetLedger')>
 }
 
@@ -265,6 +272,7 @@ export function nativeOfficialAccountFlowModule() {
 export function nativeOfficialPublicationJobModule() {
     return {
         createNativeOfficialPublicationJobPublisher: vi.fn(() => stub<ReturnType<typeof import('./storage/sync/nativeOfficialPublicationJob')['createNativeOfficialPublicationJobPublisher']>>({})),
+        createNativeOfficialAssetPublisher: vi.fn(() => stub<ReturnType<typeof import('./storage/sync/nativeOfficialPublicationJob')['createNativeOfficialAssetPublisher']>>({})),
     } satisfies Partial<typeof import('./storage/sync/nativeOfficialPublicationJob')>
 }
 

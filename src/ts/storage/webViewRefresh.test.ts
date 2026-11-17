@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { writable } from 'svelte/store'
 
 const mocks = vi.hoisted(() => ({
@@ -21,7 +21,10 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
 }))
 vi.mock('./deviceMarkers', () => ({ getDeviceMarkers: () => ({ flush: mocks.flushMarkers }) }))
 vi.mock('./libraryFileOperation', () => ({ reserveLibraryFileOperation: mocks.reserve }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: 'tauri', os: 'android' })))
+vi.mock('../androidNativeControl', () => ({}))
 
+import { beginDeferredMobileBackgroundTask } from '../mobileBackgroundTask'
 import { doingChat } from '../process/generationState'
 import { nativeFileOperation } from './nativeFileJobManager'
 import { persistentWorkingSetInputBlocked } from './persistentDataRuntime.svelte'
@@ -29,6 +32,7 @@ import { refreshWebView } from './webViewRefresh'
 
 describe('WebView refresh save protection', () => {
     const blocked = persistentWorkingSetInputBlocked as ReturnType<typeof writable<boolean>>
+    afterEach(() => { delete window.RisuBackgroundTasks })
 
     beforeEach(() => {
         vi.restoreAllMocks()
@@ -41,6 +45,7 @@ describe('WebView refresh save protection', () => {
         mocks.flushMarkers.mockResolvedValue(undefined)
         mocks.reserve.mockReturnValue(mocks.releaseReservation)
         vi.spyOn(window.location, 'reload').mockImplementation(() => {})
+        window.RisuBackgroundTasks = { begin: async () => 'deferred', progress: async () => {}, end: async () => {} }
     })
 
     it('waits for local data and device settings, retaining the edit fence through navigation', async () => {
@@ -102,6 +107,22 @@ describe('WebView refresh save protection', () => {
         expect(window.location.reload).not.toHaveBeenCalled()
         expect(mocks.releaseFence).toHaveBeenCalledOnce()
         expect(mocks.releaseReservation).toHaveBeenCalledOnce()
+    })
+
+    it.each(['before-save', 'during-save'] as const)('keeps a deferred mobile owner alive when refresh is requested %s', async timing => {
+        let task: Awaited<ReturnType<typeof beginDeferredMobileBackgroundTask>> | undefined
+        if (timing === 'before-save') task = await beginDeferredMobileBackgroundTask('sync')
+        else mocks.flushMarkers.mockImplementationOnce(async () => { task = await beginDeferredMobileBackgroundTask('sync') })
+        try {
+            await expect(refreshWebView()).rejects.toThrow('webview-refresh-busy')
+            expect(window.location.reload).not.toHaveBeenCalled()
+            if (timing === 'during-save') {
+                expect(mocks.releaseFence).toHaveBeenCalledOnce()
+                expect(mocks.releaseReservation).toHaveBeenCalledOnce()
+            }
+        } finally { await task?.dispose() }
+        await refreshWebView()
+        expect(window.location.reload).toHaveBeenCalledOnce()
     })
 
     it('releases protection if the WebView rejects navigation', async () => {

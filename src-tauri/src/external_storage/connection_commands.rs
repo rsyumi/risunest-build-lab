@@ -47,6 +47,8 @@ struct PendingPreparation {
     account_label: Option<String>,
     transferred: bool,
     renewal: Option<String>,
+    /// The account a renewal has to sign in with, so the sign-in page selects it.
+    login_hint: Option<String>,
 }
 
 #[derive(Clone)]
@@ -492,6 +494,7 @@ fn insert_preparation(
             account_label: None,
             transferred,
             renewal: None,
+            login_hint: None,
         },
     );
     Ok(result)
@@ -609,19 +612,25 @@ fn validate_authenticated_account(
 }
 
 async fn exchange_oauth_credential(
+    root: &std::path::Path,
     dependencies: &Dependencies,
     exchange_config: &super::contract::ConnectionConfig,
     grant: &super::auth::AuthorizationCode,
     client_secret: Option<Zeroizing<String>>,
+    renewal: Option<&str>,
     cancel: &Cancellation,
 ) -> Result<BoundCredential> {
     match exchange_config.provider.as_str() {
         "google_drive" => {
+            let replaced = renewal
+                .and_then(|connection_id| ConnectionStore::open(root).and_then(|store| store.read(connection_id)).ok())
+                .map(|stored| SecretRef(stored.credential_ref));
             let authorized = providers::google_drive::auth::exchange_authorization_code(
                 dependencies,
                 exchange_config,
                 grant,
                 client_secret,
+                replaced.as_ref(),
                 cancel,
             )
             .await?;
@@ -662,10 +671,12 @@ async fn finish_oauth_connection(
     let root = connection_root(app)?;
     let dependencies = connection::dependencies(&root)?;
     let credential = match exchange_oauth_credential(
+        &root,
         &dependencies,
         &exchange_config,
         &grant,
         client_secret,
+        pending.renewal.as_deref(),
         cancel,
     )
     .await
@@ -943,25 +954,34 @@ pub(crate) fn external_storage_prepare_renewal(
     logged("external_storage_prepare_renewal", (|| {
         let _cleanup_guard = state.admit()?;
         let stored = ConnectionStore::open(&connection_root(&app)?)?.read(&connection_id)?;
-        let preparation_id = uuid::Uuid::new_v4().to_string();
-        let expires_at_ms = now_ms().saturating_add(PREPARATION_LIFETIME_MS);
-        let prepared = PreparedConnection {
-            preparation_id: preparation_id.clone(), expires_at_ms: expires_at_ms.to_string(),
-            endpoint: connection::stored_endpoint(&stored)?, capabilities: Some(stored.capabilities.clone()),
-            requires_o_auth: stored.config.oauth_profile.is_some(), requires_recovery_key: false,
-            requires_platform_o_auth_client: false, requires_folder_selection: false, oauth_project_hint: None,
-        };
-        let purpose = if stored.descriptor.publication_strategy.is_none() { ConnectionPurpose::Backup } else { ConnectionPurpose::Sync };
-        lock(&state.preparations)?.insert(preparation_id, PendingPreparation {
-            request: PrepareConnectionRequest { config: stored.config, mode: ConnectionOpenMode::Existing,
-                purpose, recovery_key: None, acknowledgements: vec![] },
-            expires_at_ms, recovery_key: None, expected_repository_id: Some(stored.descriptor.repository_id),
-            imported_credential: None, bound_credential: None, selected_folder_name: None,
-            imported_folder_name: None, account_label: None, transferred: false,
-            renewal: Some(connection_id),
-        });
-        Ok(prepared)
+        insert_renewal(&state, stored, connection_id)
     })())
+}
+
+fn insert_renewal(state: &ConnectionCommandState, stored: StoredConnection, connection_id: String) -> Result<PreparedConnection> {
+    let preparation_id = uuid::Uuid::new_v4().to_string();
+    let expires_at_ms = now_ms().saturating_add(PREPARATION_LIFETIME_MS);
+    let prepared = PreparedConnection {
+        preparation_id: preparation_id.clone(), expires_at_ms: expires_at_ms.to_string(),
+        endpoint: connection::stored_endpoint(&stored)?, capabilities: Some(stored.capabilities.clone()),
+        requires_o_auth: stored.config.oauth_profile.is_some(), requires_recovery_key: false,
+        requires_platform_o_auth_client: false, requires_folder_selection: false, oauth_project_hint: None,
+    };
+    let purpose = if stored.descriptor.publication_strategy.is_none() { ConnectionPurpose::Backup } else { ConnectionPurpose::Sync };
+    lock(&state.preparations)?.insert(preparation_id, PendingPreparation {
+        request: PrepareConnectionRequest { config: stored.config, mode: ConnectionOpenMode::Existing,
+            purpose, recovery_key: None, acknowledgements: vec![] },
+        expires_at_ms, recovery_key: None, expected_repository_id: Some(stored.descriptor.repository_id),
+        imported_credential: None, bound_credential: None, selected_folder_name: None,
+        imported_folder_name: None, account_label: None, transferred: false,
+        renewal: Some(connection_id), login_hint: stored.labels.account,
+    });
+    Ok(prepared)
+}
+
+/// The account the provider's sign-in page selects for a renewal; a new connection has none.
+fn authorization_login_hint(state: &ConnectionCommandState, preparation_id: &str) -> Result<Option<String>> {
+    Ok(lock(&state.preparations)?.get(preparation_id).and_then(|preparation| preparation.login_hint.clone()))
 }
 
 #[tauri::command]
@@ -1178,6 +1198,7 @@ pub(crate) async fn external_storage_begin_authorization(
         } = request;
         let mut exchange_config =
             { authorization_config(&state, &preparation_id, current_platform_client_id)? };
+        let login_hint = authorization_login_hint(&state, &preparation_id)?;
         let provider = exchange_config.provider.clone();
         let (flow, authorization_url) = match provider.as_str() {
             "google_drive" => {
@@ -1186,6 +1207,7 @@ pub(crate) async fn external_storage_begin_authorization(
                         &exchange_config,
                         redirect,
                     )
+                    .map(|policy| policy.with_login_hint(login_hint))
                 })
                 .await?
             }
@@ -1195,6 +1217,7 @@ pub(crate) async fn external_storage_begin_authorization(
                         .location
                         .insert("redirectUri".into(), redirect.to_string());
                     providers::onedrive::authorization_policy(&exchange_config, platform_key())
+                        .map(|policy| policy.with_login_hint(login_hint))
                 })
                 .await?
             }
@@ -1236,11 +1259,13 @@ pub(crate) async fn external_storage_begin_authorization(
             current_platform_client_id,
         } = request;
         let config = { authorization_config(&state, &preparation_id, current_platform_client_id)? };
+        let login_hint = authorization_login_hint(&state, &preparation_id)?;
         let mut exchange_config = config;
         let flow = match exchange_config.provider.as_str() {
             "google_drive" => {
                 let (policy, callback_scheme) =
                     providers::google_drive::auth::ios_authorization_policy(&exchange_config)?;
+                let policy = policy.with_login_hint(login_hint);
                 super::oauth::IosWebAuthenticationAuthorization::start(policy, callback_scheme, true)?
             }
             "onedrive" => {
@@ -1248,7 +1273,8 @@ pub(crate) async fn external_storage_begin_authorization(
                     "redirectUri".into(),
                     providers::onedrive::IOS_REDIRECT_URI.into(),
                 );
-                let policy = providers::onedrive::authorization_policy(&exchange_config, "ios")?;
+                let policy = providers::onedrive::authorization_policy(&exchange_config, "ios")?
+                    .with_login_hint(login_hint);
                 let callback_scheme = policy.redirect_url.scheme().to_owned();
                 super::oauth::IosWebAuthenticationAuthorization::start(policy, callback_scheme, false)?
             }
@@ -1291,6 +1317,7 @@ pub(crate) async fn external_storage_begin_authorization(
             current_platform_client_id,
         } = request;
         let config = { authorization_config(&state, &preparation_id, current_platform_client_id)? };
+        let login_hint = authorization_login_hint(&state, &preparation_id)?;
         let authorization_id = uuid::Uuid::new_v4().to_string();
         let expires_at_ms = now_ms().saturating_add(PREPARATION_LIFETIME_MS);
         let on_ready: Box<dyn FnOnce() + Send> = Box::new({
@@ -1301,7 +1328,8 @@ pub(crate) async fn external_storage_begin_authorization(
         });
         let (authorization, authorization_url, authorization_state) = match config.provider.as_str() {
             "google_drive" => {
-                let policy = providers::google_drive::auth::android_web_authorization_policy(&config)?;
+                let policy = providers::google_drive::auth::android_web_authorization_policy(&config)?
+                    .with_login_hint(login_hint);
                 let (flow, url) = super::oauth::android_google_web_authorization(policy, on_ready)?;
                 (
                     PendingAuthorization::Google {
@@ -1320,7 +1348,8 @@ pub(crate) async fn external_storage_begin_authorization(
                     "redirectUri".into(),
                     super::oauth::ANDROID_ONEDRIVE_REDIRECT_URI.into(),
                 );
-                let policy = providers::onedrive::authorization_policy(&exchange_config, "android")?;
+                let policy = providers::onedrive::authorization_policy(&exchange_config, "android")?
+                    .with_login_hint(login_hint);
                 let (flow, url) = super::oauth::android_redirect_authorization(policy, on_ready)?;
                 (
                     PendingAuthorization::OneDrive {
@@ -1778,15 +1807,19 @@ enum CredentialInput {
     },
 }
 
+/// Creates the descriptor of a new repository, at this app's format level
+/// when the repository syncs, and returns the descriptor the repository holds.
+#[allow(clippy::too_many_arguments)]
 async fn ensure_create_descriptor(
     root: &std::path::Path,
+    provider_id: &str,
     provider: &dyn Provider,
     handle: &RepositoryHandle,
     descriptor: &Descriptor,
     root_key: &[u8; 32],
     resuming: bool,
     cancel: &Cancellation,
-) -> Result<super::contract::RemoteLocator> {
+) -> Result<(super::contract::RemoteLocator, Descriptor)> {
     let resumed = if resuming {
         descriptor::resume_existing(root, provider, handle, descriptor, root_key, cancel).await?
     } else {
@@ -1794,13 +1827,18 @@ async fn ensure_create_descriptor(
     };
     let locator = match resumed {
         Some(locator) => locator,
+        None if descriptor.publication_strategy.is_some() && super::lww_commands::syncs_through(provider_id) => {
+            let leveled = descriptor.clone().with_format_level(crate::server_sync::library_format::LEVEL)
+                .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+            descriptor::upload(root, provider, handle, &leveled, root_key, cancel).await?
+        }
         None => descriptor::upload(root, provider, handle, descriptor, root_key, cancel).await?,
     };
-    descriptor::read(
+    let created = descriptor::read(
         root, provider, handle, &locator, descriptor, root_key, cancel,
     )
     .await?;
-    Ok(locator)
+    Ok((locator, created))
 }
 
 fn occupied_location_error(creating: bool, error: ProviderError) -> ProviderError {
@@ -2107,10 +2145,11 @@ async fn commit_new_connection(
     require_repository_strategy(&capabilities, descriptor.publication_strategy)?;
     let root_key = read_root_key(key_vault.as_ref(), &updated.root_key_ref).await?;
     let recovery_key = read_recovery_key(key_vault.as_ref(), &updated.recovery_key_ref).await?;
-    let descriptor_locator = match preparation.request.mode {
+    let (descriptor_locator, format_level) = match preparation.request.mode {
         ConnectionOpenMode::Create => {
-            let locator = ensure_create_descriptor(
+            let (locator, created) = ensure_create_descriptor(
                 &root,
+                &config.provider,
                 provider.as_ref(),
                 &handle,
                 descriptor,
@@ -2132,7 +2171,7 @@ async fn commit_new_connection(
                 cancel,
             )
             .await?;
-            locator
+            (locator, created.level())
         }
         ConnectionOpenMode::Existing => {
             let recovered =
@@ -2141,7 +2180,7 @@ async fn commit_new_connection(
             if recovered.metadata.descriptor != *descriptor || *recovered.key != *root_key {
                 return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
             }
-            descriptor::read(
+            let current = descriptor::read(
                 &root,
                 provider.as_ref(),
                 &handle,
@@ -2151,11 +2190,12 @@ async fn commit_new_connection(
                 cancel,
             )
             .await?;
-            recovered.metadata.descriptor_locator
+            (recovered.metadata.descriptor_locator, current.level())
         }
     };
     cancel.check()?;
     let stored = store.promote_pending(connection_id, descriptor_locator, capabilities)?;
+    store.record_format_level(connection_id, format_level)?;
     let recovery = if preparation.request.mode == ConnectionOpenMode::Create {
         Some(RecoveryKeyMaterial {
             key: recovery_key.to_string(),
@@ -2275,7 +2315,7 @@ pub(crate) async fn open_connected_with_cancel<R: tauri::Runtime>(
         .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
     require_repository_strategy(&capabilities, stored.descriptor.publication_strategy)?;
     stored.capabilities = capabilities;
-    descriptor::read(
+    let current = descriptor::read(
         &root,
         provider.as_ref(),
         &handle,
@@ -2285,6 +2325,7 @@ pub(crate) async fn open_connected_with_cancel<R: tauri::Runtime>(
         cancel,
     )
     .await?;
+    ConnectionStore::open(&root)?.record_format_level(connection_id, current.level())?;
     Ok(ConnectedRepository {
         stored,
         provider,
@@ -2669,39 +2710,45 @@ mod tests {
     fn restarted_create_reuses_the_authenticated_descriptor_without_uploading_again() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let first_root = tempfile::tempdir().unwrap();
-            let restarted_root = tempfile::tempdir().unwrap();
-            let provider = super::super::fake::FakeProvider::new(true);
-            let handle = super::super::fake::repository();
-            let descriptor = Descriptor::new(handle.repository_id.clone(), None).unwrap();
-            let cancel = Cancellation::default();
+            // A repository for sync is created at this app's format level, a backup repository without one.
+            for (strategy, level) in [(None, 1), (Some(super::super::contract::PublicationStrategy::Cas), 2)] {
+                let first_root = tempfile::tempdir().unwrap();
+                let restarted_root = tempfile::tempdir().unwrap();
+                let provider = super::super::fake::FakeProvider::new(true);
+                let handle = super::super::fake::repository();
+                let descriptor = Descriptor::new(handle.repository_id.clone(), strategy).unwrap();
+                let cancel = Cancellation::default();
 
-            let first = ensure_create_descriptor(
-                first_root.path(),
-                &provider,
-                &handle,
-                &descriptor,
-                &[7; 32],
-                false,
-                &cancel,
-            )
-            .await
-            .unwrap();
-            assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
+                let first = ensure_create_descriptor(
+                    first_root.path(),
+                    "webdav",
+                    &provider,
+                    &handle,
+                    &descriptor,
+                    &[7; 32],
+                    false,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+                assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
+                assert_eq!(first.1.level(), level);
 
-            let resumed = ensure_create_descriptor(
-                restarted_root.path(),
-                &provider,
-                &handle,
-                &descriptor,
-                &[7; 32],
-                true,
-                &cancel,
-            )
-            .await
-            .unwrap();
-            assert_eq!(resumed, first);
-            assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
+                let resumed = ensure_create_descriptor(
+                    restarted_root.path(),
+                    "webdav",
+                    &provider,
+                    &handle,
+                    &descriptor,
+                    &[7; 32],
+                    true,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+                assert_eq!(resumed, first);
+                assert_eq!(provider.upload_attempts(&descriptor.repository_id), 1);
+            }
         });
     }
 
@@ -2828,6 +2875,61 @@ mod tests {
         assert!(summary(&stored).is_err());
         stored.config.endpoint = "https://open-api.mybox.naver.com/v1".into();
         assert!(summary(&stored).is_ok());
+    }
+
+    /// Renewal accepts only the account the connection holds, so its sign-in page opens on that account.
+    #[test]
+    fn a_renewal_sign_in_selects_the_account_the_connection_holds() {
+        let state = ConnectionCommandState::default();
+        let stored = StoredConnection {
+            id: "renewed".into(),
+            config: super::super::contract::ConnectionConfig {
+                provider: "webdav".into(),
+                profile: None,
+                endpoint: "https://dav.example.invalid/remote".into(),
+                account_id: "synthetic".into(),
+                location: BTreeMap::from([("root".into(), "RisuNest".into())]),
+                oauth_profile: None,
+            },
+            descriptor: Descriptor::new("synthetic-repository".into(), None).unwrap(),
+            descriptor_locator: super::super::fake::locator(),
+            provider_repository_id: "synthetic-provider-root".into(),
+            credential_ref: "credential".into(),
+            root_key_ref: "root-key".into(),
+            recovery_key_ref: "recovery-key".into(),
+            retention_policy: None, transfer_concurrency: None,
+            labels: ConnectionLabels::new(Some("synthetic@example.invalid".into()), None),
+            capabilities: super::super::fake::capabilities(false),
+            created_at_ms: 1,
+            verified_at_ms: 1,
+            last_sync_at_ms: None,
+            last_backup_at_ms: None,
+        };
+        let sign_in = |preparation_id: &str| {
+            let policy = super::super::auth::AuthorizationPolicy {
+                authorize_url: url::Url::parse("https://accounts.example.invalid/authorize").unwrap(),
+                client_id: "synthetic-public-client".into(),
+                redirect_url: url::Url::parse("http://127.0.0.1:52001/oauth").unwrap(),
+                scopes: vec!["synthetic.scope".into()],
+                picker: false,
+                login_hint: None,
+            }
+            .with_login_hint(authorization_login_hint(&state, preparation_id).unwrap());
+            let (_, url) = super::super::auth::PendingAuthorization::start(policy).unwrap();
+            url.query_pairs().filter(|(name, _)| name == "login_hint").map(|(_, value)| value.into_owned()).collect::<Vec<_>>()
+        };
+
+        let renewal = insert_renewal(&state, stored.clone(), "renewed".into()).unwrap();
+        assert_eq!(sign_in(&renewal.preparation_id), vec!["synthetic@example.invalid".to_owned()]);
+
+        let created = insert_preparation(&state, PrepareConnectionRequest {
+            config: stored.config,
+            mode: ConnectionOpenMode::Create,
+            purpose: ConnectionPurpose::Backup,
+            recovery_key: None,
+            acknowledgements: Vec::new(),
+        }, None, None, None, false).unwrap();
+        assert!(sign_in(&created.preparation_id).is_empty());
     }
 
     /// The form sends S3 settings without an account, which the access key
@@ -3151,6 +3253,7 @@ mod tests {
             account_label: None,
             transferred: true,
             renewal: None,
+            login_hint: None,
         };
 
         assert!(apply_recovery_platform_client(
@@ -3305,6 +3408,50 @@ mod tests {
             assert!(success.recovery.is_none());
             assert!(vault.contents("old").is_none());
             assert_eq!(vault.contents(&replacement.0).unwrap(), b"replacement");
+        });
+    }
+
+    #[test]
+    fn a_google_renewal_reuses_the_client_secret_saved_with_the_renewed_connection() {
+        use super::super::{auth::AuthorizationCode, fake::{loopback_dependencies, MemoryVault}, wire_fixture::{Reply, WireServer}};
+        let json = |body: serde_json::Value| Reply::Http {
+            status: 200, headers: vec![("Content-Type".into(), "application/json".into())], body: serde_json::to_vec(&body).unwrap(),
+        };
+        let client = "123-current.apps.googleusercontent.com";
+        let mut replies = vec![json(serde_json::json!({"access_token": "granted-access", "refresh_token": "granted-refresh", "expires_in": 3599}))];
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            replies.push(json(serde_json::json!({"aud": client, "azp": client, "scope": "https://www.googleapis.com/auth/drive.file"})));
+        }
+        replies.push(json(serde_json::json!({"user": {"permissionId": "permission-1"}})));
+        let server = WireServer::start(replies);
+        let root = tempfile::tempdir().unwrap();
+        let mut stored = renewal_fixture();
+        stored.config = super::super::contract::ConnectionConfig {
+            provider: "google_drive".into(), profile: None, endpoint: server.url.to_string(), account_id: "permission-1".into(),
+            location: BTreeMap::from([("folderId".into(), "folder-root".into())]),
+            oauth_profile: Some(super::super::contract::OAuthProfile {
+                project_id: "project".into(), platform_client_ids: BTreeMap::from([(platform_key().into(), client.into())]),
+            }),
+        };
+        ConnectionStore::open(root.path()).unwrap().insert(&stored).unwrap();
+        let dependencies = loopback_dependencies(
+            MemoryVault::with(&stored.credential_ref, br#"{"refreshToken":"expired-refresh","clientSecret":"saved-client-secret"}"#),
+            1_700_000_000_000,
+        ).dependencies;
+        let grant = AuthorizationCode {
+            code: SecretBytes(Zeroizing::new(b"synthetic-code".to_vec())),
+            verifier: SecretBytes(Zeroizing::new(b"synthetic-verifier".to_vec())),
+            client_id: client.into(),
+            redirect_url: url::Url::parse("http://127.0.0.1:52001/oauth").unwrap(),
+            picked_file_id: None,
+        };
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let credential = exchange_oauth_credential(root.path(), &dependencies, &stored.config, &grant, None,
+                Some(&stored.id), &Cancellation::default()).await.unwrap();
+            let body = String::from_utf8(server.requests.lock().unwrap()[0].body.clone()).unwrap();
+            assert!(body.contains("client_secret=saved-client-secret"), "{body}");
+            let saved = dependencies.vault.read(&credential.reference).await.unwrap();
+            assert!(String::from_utf8(saved.0.to_vec()).unwrap().contains("\"clientSecret\":\"saved-client-secret\""));
         });
     }
 

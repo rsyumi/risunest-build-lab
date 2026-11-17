@@ -8,27 +8,40 @@
     import { alertConfirm, alertSelect } from "src/ts/alert";
     import { getCharImage } from "src/ts/characters";
     import { changeUserPersona, exportUserPersona, importUserPersona, saveUserPersona, selectUserImg } from "src/ts/persona";
-    import Sortable from 'sortablejs/modular/sortable.core.esm.js';
+    import Sortable from 'sortablejs';
     import { onDestroy, onMount } from "svelte";
     import { sleep, sortableOptions } from "src/ts/util";
+    import { destroySortableOnClose, watchSortDrag } from "src/ts/sortableOptions";
     import { DBState } from 'src/ts/stores.svelte';
+    import { collectOwnedAssetKeys, scheduleDeletedOwnerAssetCleanup } from 'src/ts/storage/deletedOwnerAssetCleanup';
+    import { assetAliasCleanupTarget } from 'src/ts/storage/persistentDataRuntime.svelte';
     import { v4 } from "uuid"
 
     let stb: Sortable = null
     let ele: HTMLDivElement = $state()
     let sorted = $state(0)
     let selectedId:string = null
+    let dragWatch: ReturnType<typeof watchSortDrag> | null = null
     const createStb = () => {
+        // The page can close while the drag that ended waits to rebuild the list.
+        if (!ele) return
         stb = Sortable.create(ele, {
+            draggable: '> [data-risu-idx]',
             onStart: async () => {
+                dragWatch = watchSortDrag()
                 selectedId = DBState.db.personas[DBState.db.selectedPersona].id
                 saveUserPersona()
             },
-            onEnd: async () => {
+            onEnd: async (event) => {
+                const cancelled = dragWatch?.cancelled(event)
+                dragWatch?.stop()
+                dragWatch = null
                 let idx:number[] = []
                 ele.querySelectorAll('[data-risu-idx]').forEach((e, i) => {
                     idx.push(parseInt(e.getAttribute('data-risu-idx')))
                 })
+                // An abandoned drag keeps the order the personas had.
+                if (cancelled) idx.sort((a, b) => a - b)
                 let newValue:{
                     personaPrompt:string
                     name:string
@@ -59,7 +72,7 @@
     onDestroy(() => {
         if(stb){
             try {
-                stb.destroy()
+                destroySortableOnClose(stb)
             } catch (error) {}
         }
     })
@@ -136,12 +149,10 @@
             saveUserPersona()
         }}/>
         <span class="text-sm text-textcolor2">{language.note}</span>
-        {#if DBState.db.personaNote}
-            <TextInput marginBottom size="lg" bind:value={() => DBState.db.userNote, (value) => {
-                DBState.db.userNote = value
-                saveUserPersona()
-            }} placeholder={`Put a unique identifier for this persona here.\nExample: [Alternate Hunters persona]`} />
-        {/if}
+        <TextInput marginBottom size="lg" bind:value={() => DBState.db.userNote, (value) => {
+            DBState.db.userNote = value
+            saveUserPersona()
+        }} placeholder={language.personaNotePlaceholder} />
         <span class="text-sm text-textcolor2">{language.description}</span>
         <TextAreaInput autocomplete="off" bind:value={() => DBState.db.personaPrompt, (value) => {
             DBState.db.personaPrompt = value
@@ -161,12 +172,15 @@
                 if(d){
                     const index = DBState.db.personas.findIndex(persona => persona.id === personaId)
                     if (index < 0 || DBState.db.personas.length <= 1) return
+                    const startedAtMs = Date.now()
                     saveUserPersona()
+                    const assetKeys = collectOwnedAssetKeys(DBState.db.personas[index])
                     const selectedId = DBState.db.personas[DBState.db.selectedPersona]?.id
                     let personas = DBState.db.personas
                     personas.splice(index, 1)
                     DBState.db.personas = personas
                     changeUserPersona(Math.max(0, personas.findIndex(persona => persona.id === selectedId)), 'noSave')
+                    scheduleDeletedOwnerAssetCleanup(assetKeys, startedAtMs, 'persona-delete', assetAliasCleanupTarget)
                 }
             }}>{language.remove}</Button>
             <Check bind:check={DBState.db.personas[DBState.db.selectedPersona].largePortrait}>{language.largePortrait}</Check>

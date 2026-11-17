@@ -8,6 +8,7 @@ import {
     type ConversationContextInput,
 } from './conversationContext'
 import { conversationContextDatabase } from './conversationContext.testUtils'
+import { authorNoteFingerprint } from '../authorNotePresets'
 
 let sequence = 0
 
@@ -207,6 +208,32 @@ describe('conversation context read', () => {
         })
         expect(after.context!.conversation.name).toBe('Renamed')
         expect(after.context!.messages!.messages.map((message) => message.chatId)).toEqual(['late'])
+    })
+
+    it('reads the author note of a linked conversation from its preset even without other root parts', async () => {
+        const { store, revision } = await createStore()
+        const metadata = (await store.readConversationMetadata('char-plain', 'conv-plain'))!.value
+        await store.commit({
+            expectedRevision: revision,
+            rootMutations: [{ type: 'set', key: 'authorNotePresets', value: [{ id: 'shared', name: 'Shared', text: 'Shared note' }] }],
+            conversations: [{
+                type: 'replace-range',
+                characterId: 'char-plain',
+                conversationId: 'conv-plain',
+                start: 3,
+                deleteCount: 0,
+                messages: [],
+                conversation: {
+                    ...metadata.conversation,
+                    note: 'stale copy',
+                    authorNotePreset: { id: 'shared', fingerprint: authorNoteFingerprint('stale copy') },
+                },
+            }],
+        })
+
+        const { context } = await read(store, { characterId: 'char-plain', conversationId: 'conv-plain' })
+        expect(context!.conversation.note).toBe('Shared note')
+        expect(context!.conversation).not.toHaveProperty('authorNotePreset')
     })
 
     it('reads a missing target, or no selection without a target, as null', async () => {

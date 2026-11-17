@@ -10,16 +10,19 @@
         parserProjection,
         parserAbortSignal,
         onDisplaySettled,
+        displayRequestOrder,
     }: any = $props()
     let translated = $state(false)
     let translating = $state(false)
     let retranslate = $state(false)
     let refreshRevision = $state(0)
+    let bodyRoot = $state<HTMLElement | null>(null)
     export function refreshMessageDisplay(state: ChatDisplayRefresh) {
         message = state.message
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
         onDisplaySettled = state.onDisplaySettled
+        if (state.displayRequestOrder !== undefined) displayRequestOrder = state.displayRequestOrder
         refreshRevision += 1
     }
     export function updateViewportBinding(state: any) {
@@ -28,8 +31,9 @@
 
 </script>
 
-<div data-lua-body data-index={idx}>
+<div data-lua-body data-index={idx} bind:this={bodyRoot}>
     <ChatBody
+        {bodyRoot}
         msgDisplay={message}
         {character}
         {idx}
@@ -38,6 +42,7 @@
         {parserProjection}
         {parserAbortSignal}
         {onDisplaySettled}
+        {displayRequestOrder}
         reloadRevision={String(refreshRevision)}
         bind:translated
         bind:translating

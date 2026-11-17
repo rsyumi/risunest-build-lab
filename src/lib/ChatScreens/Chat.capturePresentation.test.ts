@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { fromStore, writable } from 'svelte/store'
+import { fromStore, get, writable } from 'svelte/store'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { ReloadChatPointer, ReloadGUIPointer } from 'src/ts/stores.svelte'
@@ -12,6 +12,7 @@ import { createSelectedConversationOperations } from 'src/ts/selectedConversatio
 import { SynchronousSessionConversationViewportSource } from 'src/ts/conversationViewportSource'
 import type { SelectedConversationTarget } from 'src/ts/storage/activeWorkingSet.svelte'
 import { cancelTextEditorPopup, textEditorPopup } from 'src/ts/gui/textEditorPopup.svelte'
+import { touchHoldMs } from 'src/ts/gui/touchHold'
 import { discardEditorDraftsExcept, keepEditorDraft, pendingEditorDrafts, type ChatEditorDraft } from 'src/ts/chatEditorDrafts'
 import { chatScreenState } from 'src/ts/ui/chatScreenState.svelte'
 import { language } from 'src/lang'
@@ -24,10 +25,18 @@ const runtime = vi.hoisted(() => ({
     activeSession: null as unknown,
     persistent: {} as Record<string, unknown>,
 }))
-const actionMocks = vi.hoisted(() => ({
-    runTrigger: vi.fn(),
-    runLuaButtonTrigger: vi.fn(),
-}))
+const actionMocks = vi.hoisted(() => {
+    const hold = { held: false }
+    return {
+        hold,
+        runTrigger: vi.fn(),
+        runLuaInteractionTrigger: vi.fn(),
+        holdScriptRun: vi.fn(async <T>(operation: () => Promise<T>): Promise<T> => {
+            hold.held = true
+            try { return await operation() } finally { hold.held = false }
+        }),
+    }
+})
 const parserCalls = vi.hoisted(() => [] as Array<{
     chara?: unknown
     role?: string
@@ -125,9 +134,13 @@ vi.mock('src/ts/model/modellist', () => ({
     getModelInfo: (model: string) => ({ shortName: model || 'model' }),
 }))
 vi.mock('src/ts/process/scriptings', () => ({
-    runLuaButtonTrigger: actionMocks.runLuaButtonTrigger,
-}))
+    runLuaInteractionTrigger: actionMocks.runLuaInteractionTrigger,
+}) satisfies Partial<typeof import('src/ts/process/scriptings')>)
 vi.mock('src/ts/process/triggers', () => ({ runTrigger: actionMocks.runTrigger }))
+vi.mock('src/ts/process/generationBackground', async importOriginal => ({
+    ...await importOriginal<typeof import('src/ts/process/generationBackground')>(),
+    holdScriptRun: actionMocks.holdScriptRun,
+}))
 vi.mock('src/ts/process/tts', () => ({ sayTTS: vi.fn() }))
 vi.mock('src/ts/util', () => ({
     capitalize: (value: string) => value,
@@ -157,6 +170,7 @@ import Chats from './Chats.svelte'
 import { alertToast } from 'src/ts/alert'
 import ChatCaptureBatchHarness from './ChatCaptureBatchHarness.test.svelte'
 import ChatsHarness from './ChatsHarness.test.svelte'
+import { probedDisplayRows } from './ChatBodyCaptureProbe.test.svelte'
 import { chatViewEvents } from 'src/ts/plugins/chatViewHost.svelte'
 import { requestScriptDisplayRefresh } from 'src/ts/process/scriptDisplayRefresh'
 import type { ChatViewEvent } from 'src/ts/plugins/chatViewEvents'
@@ -356,7 +370,7 @@ describe('Chat frozen capture presentation', () => {
         live.reactive = false
         parserCalls.length = 0
         actionMocks.runTrigger.mockReset()
-        actionMocks.runLuaButtonTrigger.mockReset()
+        actionMocks.runLuaInteractionTrigger.mockReset()
         live.db = {
             theme: 'cardboard',
             iconsize: 25,
@@ -656,7 +670,7 @@ describe('Chat frozen capture presentation', () => {
     test('renders frozen custom HTML with the normal text box slot', async () => {
         const frozen = context({
             theme: 'customHTML',
-            guiHTML: '<div class="capture-custom"><span>Frozen layout</span><RISUTEXTBOX></RISUTEXTBOX></div>',
+            guiHTML: '<div class="capture-custom"><span>Frozen layout</span><a href="#top">Top</a><a href="https://synthetic.invalid/">Web</a><RISUTEXTBOX></RISUTEXTBOX></div>',
         })
         live.db.theme = 'mobilechat'
         const message = { role: 'char' as const, data: 'Frozen custom body' }
@@ -677,6 +691,8 @@ describe('Chat frozen capture presentation', () => {
 
         await vi.waitFor(() => expect(target.querySelector('.capture-custom')).not.toBeNull())
         expect(target.textContent).toContain('Frozen layout')
+        const links = [...target.querySelectorAll('.capture-custom a')]
+        expect(links.map((link) => [link.textContent, link.getAttribute('href')])).toEqual([['Top', null], ['Web', 'https://synthetic.invalid/']])
         expect(target.querySelector('[data-chat-body-probe]')?.textContent).toBe('Frozen custom body')
     })
 
@@ -767,13 +783,14 @@ describe('Chat frozen capture presentation', () => {
         ReloadChatPointer.update((value) => ({ ...value, 3: (value[3] ?? 0) + 1 }))
         await tick()
         expect(target.querySelector('[data-chat-body-probe]')).toBe(body)
-        ;(
+        const refresh = (
             mounted as {
                 refreshMessageDisplay(
                     state: import('src/ts/chatDisplayRefresh').ChatDisplayRefresh,
                 ): void
             }
-        ).refreshMessageDisplay({
+        ).refreshMessageDisplay
+        const update = {
             message: 'Updated viewport body',
             totalMessages: 10,
             parserAbortSignal: new AbortController().signal,
@@ -787,8 +804,15 @@ describe('Chat frozen capture presentation', () => {
                 viewportSourceToken: 'updated-source',
                 captureViewportTarget: () => null,
             },
-        })
+        }
+        parserCalls.length = 0
+        refresh(update)
         await vi.waitFor(() => expect(body?.textContent).toBe('Updated viewport body'))
+        // Each explicit refresh parses the message once, also when nothing it reads changed.
+        expect(parserCalls).toHaveLength(1)
+        refresh(update)
+        await tick()
+        expect(parserCalls).toHaveLength(2)
         expect(target.querySelector('[data-chat-body-probe]')).toBe(body)
 
         expect(target.querySelector('[data-chat-id="viewport-message"]')).not.toBeNull()
@@ -1469,21 +1493,30 @@ describe('Chat frozen capture presentation', () => {
         expect((mounted as { hasActiveEditor(): boolean }).hasActiveEditor()).toBe(false)
     })
 
-    test.each(['saved', 'refused'] as const)(
-        'keeps the draft when a long press closes the original editor and the save is %s',
-        async (outcome) => {
+    test.each([
+        { pointerType: 'mouse', layout: 'default', db: { theme: '' }, outcome: 'saved' },
+        { pointerType: 'mouse', layout: 'default', db: { theme: '' }, outcome: 'refused' },
+        // Without the message buttons a finger hold is the only way to finish the edit.
+        { pointerType: 'touch', layout: 'mobilechat', db: { theme: 'mobilechat' }, outcome: 'saved' },
+        { pointerType: 'touch', layout: 'custom HTML without buttons', db: { theme: 'customHTML', guiHTML: '<risutextbox></risutextbox>' }, outcome: 'saved' },
+        // With them a finger hold on the editor is left to text selection.
+        { pointerType: 'touch', layout: 'default', db: { theme: '' }, outcome: 'left open' },
+        { pointerType: 'touch', layout: 'custom HTML with buttons', db: { theme: 'customHTML', guiHTML: '<risubuttons></risubuttons><risutextbox></risutextbox>' }, outcome: 'left open' },
+    ] as const)(
+        'keeps the draft when a $pointerType long press on the original editor in the $layout layout is $outcome',
+        async ({ pointerType, db, outcome }) => {
             const harness = makeWindowedEditHarness()
             if (outcome === 'refused') {
                 harness.acquireCompleteMessageTargetForIntent.mockResolvedValueOnce(null as never)
             }
             live.db = {
                 ...live.db,
-                theme: '',
+                ...db,
                 characters: [harness.metadataCharacter],
                 translator: '',
                 useChatCopy: false,
                 enableBookmark: false,
-                clickToEdit: false,
+                clickToEdit: true,
                 risunestChatEditPopup: false,
             }
             mounted = mount(Chat, {
@@ -1507,30 +1540,40 @@ describe('Chat frozen capture presentation', () => {
                 },
             })
 
-            const editButton = await vi.waitFor(() => {
-                const button = target.querySelector<HTMLButtonElement>('.button-icon-edit')
-                expect(button).not.toBeNull()
-                return button!
+            const body = await vi.waitFor(() => {
+                const text = target.querySelector<HTMLElement>('.chattext')
+                expect(text).not.toBeNull()
+                return text!
             })
-            editButton.click()
+            body.click()
             const editor = await vi.waitFor(() => {
                 const textarea = target.querySelector<HTMLTextAreaElement>('.message-edit-area')
                 expect(textarea).not.toBeNull()
                 return textarea!
             })
+            // A finger hold saves exactly in the layouts that show no edit button.
+            expect(target.querySelector('.button-icon-edit') === null).toBe(pointerType === 'touch' && outcome === 'saved')
             editor.value = 'Kept after long press'
             editor.dispatchEvent(new Event('input', { bubbles: true }))
 
             vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-            editor.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-            await vi.advanceTimersByTimeAsync(500)
+            editor.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType, isPrimary: true, button: 0 }))
+            await vi.advanceTimersByTimeAsync(touchHoldMs)
             vi.useRealTimers()
 
+            const hasActiveEditor = () =>
+                (mounted as { hasActiveEditor(): boolean }).hasActiveEditor()
+            if (outcome === 'left open') {
+                await tick()
+                expect(harness.acquireCompleteMessageTargetForIntent).not.toHaveBeenCalled()
+                expect(hasActiveEditor()).toBe(true)
+                expect(target.querySelector<HTMLTextAreaElement>('.message-edit-area')?.value)
+                    .toBe('Kept after long press')
+                return
+            }
             await vi.waitFor(() => expect(
                 harness.acquireCompleteMessageTargetForIntent,
             ).toHaveBeenCalledWith(expect.objectContaining({ rowKey: 'row-1' }), 'edit-message'))
-            const hasActiveEditor = () =>
-                (mounted as { hasActiveEditor(): boolean }).hasActiveEditor()
             if (outcome === 'saved') {
                 await vi.waitFor(() => {
                     expect(harness.completeConversation.message[1].data).toBe('Kept after long press')
@@ -2141,7 +2184,7 @@ describe('Chat frozen capture presentation', () => {
         })
     })
 
-    test('runs a manual windowed trigger only inside the complete conversation gateway', async () => {
+    async function mountWindowedTriggerRow() {
         const harness = makeWindowedEditHarness()
         live.db = {
             ...live.db,
@@ -2165,7 +2208,6 @@ describe('Chat frozen capture presentation', () => {
         harness.withCompleteSelectedConversation.mockImplementation(
             async (_reason, operation) => operation({ requireCurrent }),
         )
-        actionMocks.runTrigger.mockResolvedValue(null)
         mounted = mount(Chat, {
             target,
             props: {
@@ -2192,6 +2234,14 @@ describe('Chat frozen capture presentation', () => {
             expect(element).not.toBeNull()
             return element!
         })
+        return { harness, requireCurrent, body }
+    }
+
+    test('runs a manual windowed trigger only inside the complete conversation gateway and a background hold', async () => {
+        const heldDuringTrigger: boolean[] = []
+        actionMocks.runTrigger.mockImplementation(async () => { heldDuringTrigger.push(actionMocks.hold.held); return null })
+        probedDisplayRows.length = 0
+        const { harness, requireCurrent, body } = await mountWindowedTriggerRow()
         const trigger = document.createElement('button')
         trigger.setAttribute('risu-trigger', 'manual-test')
         body.append(trigger)
@@ -2209,5 +2259,61 @@ describe('Chat frozen capture presentation', () => {
             )
             expect(requireCurrent).toHaveBeenCalledTimes(2)
         })
+        // Script work a message starts keeps running after Home.
+        expect(heldDuringTrigger).toEqual([true])
+        expect(actionMocks.hold.held).toBe(false)
+        const row = probedDisplayRows.at(-1)!
+        const revision = row.rebuildRevision
+        const pointer = get(ReloadChatPointer)[1] ?? 0
+
+        // A trigger that returns a result rebuilds the clicked message.
+        actionMocks.runTrigger.mockResolvedValue({ chat: harness.completeConversation })
+        trigger.click()
+        await vi.waitFor(() => expect(requireCurrent).toHaveBeenCalledTimes(4))
+        expect(row.rebuildRevision).not.toBe(revision)
+        expect(get(ReloadChatPointer)[1]).toBe(pointer + 1)
+    })
+
+    test('submits form values captured at submit time through the complete conversation gateway', async () => {
+        let heldDuringForm: boolean | undefined
+        actionMocks.runLuaInteractionTrigger.mockImplementation(async () => { heldDuringForm = actionMocks.hold.held; return null })
+        const { harness, requireCurrent, body } = await mountWindowedTriggerRow()
+        // The gateway runs the trigger later, after the row may have changed the form.
+        harness.withCompleteSelectedConversation.mockImplementation(async (_reason, operation) => {
+            await Promise.resolve()
+            return operation({ requireCurrent })
+        })
+        body.innerHTML = `<form risu-form="survey">
+            <input name="choice" value="a"><input name="choice" value="b"><input name="__proto__" value="kept">
+            <button name="go" value="yes">Go</button><button name="go" value="no">Stop</button>
+        </form>`
+        const form = body.querySelector('form')!
+        const submitter = form.querySelector<HTMLButtonElement>('button[value="yes"]')!
+
+        const submit = new SubmitEvent('submit', { bubbles: true, cancelable: true, submitter })
+        form.dispatchEvent(submit)
+        form.querySelector('input')!.value = 'changed'
+        form.remove()
+
+        expect(submit.defaultPrevented).toBe(true)
+        await vi.waitFor(() => expect(actionMocks.runLuaInteractionTrigger).toHaveBeenCalledOnce())
+        const [type, character, formName, meta] = actionMocks.runLuaInteractionTrigger.mock.calls[0]
+        expect([type, character, formName]).toEqual(['form', harness.completeCharacter, 'survey'])
+        expect(Object.entries(meta.data)).toEqual([['choice', ['a', 'b']], ['__proto__', 'kept'], ['go', 'yes']])
+        expect(harness.withCompleteSelectedConversation).toHaveBeenCalledWith('manual-chat-trigger', expect.any(Function))
+        expect(heldDuringForm).toBe(true)
+    })
+
+    test('prevents the submit of a message form without risu-form and runs no trigger', async () => {
+        const { harness, body } = await mountWindowedTriggerRow()
+        body.innerHTML = '<form action="/elsewhere"><input name="field" value="value"></form>'
+
+        const submit = new SubmitEvent('submit', { bubbles: true, cancelable: true })
+        body.querySelector('form')!.dispatchEvent(submit)
+        await Promise.resolve()
+
+        expect(submit.defaultPrevented).toBe(true)
+        expect(actionMocks.runLuaInteractionTrigger).not.toHaveBeenCalled()
+        expect(harness.withCompleteSelectedConversation).not.toHaveBeenCalled()
     })
 })

@@ -188,6 +188,8 @@ pub(crate) struct ServerClient {
     config: RwLock<ServerConfig>,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     retry_budget: Arc<RetryBudget>,
+    // Initial receives leave retries to the scheduler so plugins can start offline.
+    pub(crate) retry_transient: bool,
     pub(crate) verified_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     pub(crate) retryable_failure: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
     /// The cycle's activity slot. The transfer layer raises it while object
@@ -308,15 +310,30 @@ pub(crate) struct Reply {
     pub object_range: Option<String>,
     pub retry_after: Option<Duration>,
     pub attempt_duration: Duration,
+    /// The level headers, absent from a server that predates format levels.
+    pub library_format: Option<super::library_format::LibraryFormat>,
 }
 /// A request body ready to send: `wire` is what travels, encoded when the
-/// marker is set.
+/// marker is set. Every attempt reads the same bytes.
 pub(crate) struct PreparedBody {
-    wire: Vec<u8>,
+    wire: Arc<Vec<u8>>,
     log_body: Option<Vec<u8>>,
     encoded: bool,
     #[cfg(test)]
     raw_len: usize,
+}
+impl PreparedBody {
+    /// What one attempt sends. Attempts share the prepared bytes instead of
+    /// copying them.
+    fn reader(&self) -> std::io::Cursor<SharedWire> {
+        std::io::Cursor::new(SharedWire(self.wire.clone()))
+    }
+}
+struct SharedWire(Arc<Vec<u8>>);
+impl AsRef<[u8]> for SharedWire {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 pub(crate) enum RequestAttempt {
     Response(Reply),
@@ -404,6 +421,7 @@ impl ServerClient {
         let mut candidate = Self::with_cancellation(config, self.cancelled.clone())?;
         candidate.http = self.http.clone();
         candidate.retry_budget = self.retry_budget.clone();
+        candidate.retry_transient = self.retry_transient;
         candidate.verified_bytes = self.verified_bytes.clone();
         candidate.retryable_failure = self.retryable_failure.clone();
         candidate.activity = self.activity.clone();
@@ -483,20 +501,7 @@ impl ServerClient {
         retry_budget: Arc<RetryBudget>,
     ) -> Result<Self> {
         let url = config.validate()?;
-        // New clients must pick up system proxy changes. Keep the connection
-        // pool scoped to this client and its transfer workers.
-        // Other crates enable reqwest's decoders, which would strip a
-        // Content-Encoding this client has to see and refuse.
-        let http = crate::platform_tls::blocking_client_builder()
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| SyncError::new("http-client-unavailable", 503))?;
+        let http = shared_http()?;
         Ok(Self {
             body_download_observer: None,
             #[cfg(test)]
@@ -506,6 +511,7 @@ impl ServerClient {
             config: RwLock::new(config),
             cancelled,
             retry_budget,
+            retry_transient: true,
             verified_bytes: None,
             retryable_failure: None,
             activity: None,
@@ -661,7 +667,7 @@ impl ServerClient {
                     let maintenance =
                         reply.status == 503 && code.as_deref() == Some("server-updating");
                     let transient = retryable_response(&reply);
-                    if maintenance || (retry_generic && replay_safe && transient) {
+                    if self.retry_transient && (maintenance || (retry_generic && replay_safe && transient)) {
                         self.report_retryable_failure(if maintenance {
                             Some("server-updating")
                         } else {
@@ -682,7 +688,7 @@ impl ServerClient {
                     }
                     return Ok(reply);
                 }
-                Err(error) if retry_generic && replay_safe && is_ambiguous_transient(&error) => {
+                Err(error) if self.retry_transient && retry_generic && replay_safe && is_ambiguous_transient(&error) => {
                     self.report_retryable_failure(Some(&error.code));
                     let _ = self.resolve_identity();
                     recovering = true;
@@ -726,7 +732,7 @@ impl ServerClient {
         };
         Ok(Some(match encoded {
             Some(wire) => PreparedBody {
-                wire,
+                wire: Arc::new(wire),
                 encoded: true,
                 #[cfg(test)]
                 raw_len: raw.len(),
@@ -735,7 +741,7 @@ impl ServerClient {
             None => PreparedBody {
                 #[cfg(test)]
                 raw_len: raw.len(),
-                wire: raw,
+                wire: Arc::new(raw),
                 log_body: None,
                 encoded: false,
             },
@@ -798,6 +804,7 @@ impl ServerClient {
             .query(query)
             .bearer_auth(&config.token)
             .header("x-risu-library", &config.library_id)
+            .header(risunest_sync_wire::library_format::HEADER, super::library_format::LEVEL.to_string())
             .header("accept-encoding", "identity")
             .timeout(timeout);
         if self.codec_enabled() {
@@ -811,7 +818,7 @@ impl ServerClient {
                 request = request.header(body_codec::ENCODING_HEADER, body_codec::ZSTD);
             }
             let length = body.wire.len() as u64;
-            let reader = super::progress::WireReader::new(std::io::Cursor::new(body.wire.clone()), self.lane.clone(), true, Some(length));
+            let reader = super::progress::WireReader::new(body.reader(), self.lane.clone(), true, Some(length));
             request = request.body(reqwest::blocking::Body::sized(reader, length));
         }
         let request = request.build().map_err(|_| SyncError::new("server-unreachable", 503))?;
@@ -838,6 +845,8 @@ impl ServerClient {
         })?;
         capture.response(response.status().as_u16(), response.url().as_str(), response.headers());
         let status = response.status().as_u16();
+        let library_format = super::library_format::read(response.headers())?;
+        super::lww_client::observe_library_format(&config.endpoint, &config.library_id, status, library_format);
         let object_range = response
             .headers()
             .get("x-risu-object-range")
@@ -868,7 +877,9 @@ impl ServerClient {
         if response.content_length().is_some_and(|v| v > limit as u64) {
             return Err(SyncError::new("response-too-large", 502));
         }
-        let mut bytes = Vec::new();
+        // The declared length, already within the limit, sizes the buffer so a
+        // large reply is not read into one grown by doubling.
+        let mut bytes = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
         let wire = super::progress::WireReader::new(response.take(limit as u64 + 1), self.lane.clone(), false, None);
         let observer = if (200..300).contains(&status) && (path == "objects/transfer" || (path.starts_with("objects/") && path.ends_with("/part"))) {
             self.body_download_observer.as_deref()
@@ -909,6 +920,7 @@ impl ServerClient {
             object_range,
             retry_after,
             attempt_duration: Duration::ZERO,
+            library_format,
         })
     }
 
@@ -962,12 +974,20 @@ impl ServerClient {
         ))
     }
     pub fn head(&self) -> Result<RemoteHead> {
-        let (_, head): (u16, RemoteHead) = self.json(Method::GET, "head", &[], None::<&()>, &[])?;
+        Ok(self.head_with_format()?.0)
+    }
+    /// The library head and the format level its reply reports.
+    pub(crate) fn head_with_format(&self) -> Result<(RemoteHead, Option<super::library_format::LibraryFormat>)> {
+        let reply = self.request(Method::GET, "head", &[], None, &[], MAX_METADATA_BYTES)?;
+        if !(200..300).contains(&reply.status) {
+            return Err(response_error(reply));
+        }
+        let head: RemoteHead = canonical::decode(&reply.body, MAX_METADATA_BYTES)?;
         head.validate()?;
         if head.library_id != self.config().library_id {
             return Err(SyncError::new("library-mismatch", 409));
         }
-        Ok(head)
+        Ok((head, reply.library_format))
     }
 }
 
@@ -1018,7 +1038,7 @@ fn replay_safe(method: &Method, path: &str) -> bool {
                 | "uploads/frames"
                 | "objects/pins"
                 | "objects/retention/release"
-                | "acks"
+                | "ack"
         ) || (path.starts_with("uploads/") && path.ends_with("/complete"))
             || (path.starts_with("staged-changes/") && path.ends_with("/seal")))
 }
@@ -1026,6 +1046,46 @@ fn replay_safe(method: &Method, path: &str) -> bool {
 pub(crate) fn retryable_response(reply: &Reply) -> bool {
     matches!(reply.status, 502 | 503 | 504)
         || (reply.status == 408 && response_code(reply).as_deref() == Some("request-timeout"))
+}
+
+/// How long sync clients share one HTTP client.
+const SHARED_HTTP_LIFETIME: Duration = Duration::from_secs(60);
+
+type SharedHttp = Option<(reqwest::blocking::Client, Instant)>;
+
+/// The HTTP client of every sync client built within a minute of it. Commands
+/// that follow one another reuse its open connections; the next one built
+/// after that minute picks up system proxy changes. Idle connections close
+/// well before a server or proxy would close them under a request.
+fn shared_http() -> Result<reqwest::blocking::Client> {
+    #[cfg(test)]
+    if let Some(http) = tests::private_shared_http() {
+        return http;
+    }
+    static SHARED: std::sync::Mutex<SharedHttp> = std::sync::Mutex::new(None);
+    reuse_or_build_http(&mut SHARED.lock().unwrap_or_else(|error| error.into_inner()), Instant::now())
+}
+fn reuse_or_build_http(shared: &mut SharedHttp, now: Instant) -> Result<reqwest::blocking::Client> {
+    if let Some((http, built)) = shared.as_ref() {
+        if now.saturating_duration_since(*built) < SHARED_HTTP_LIFETIME {
+            return Ok(http.clone());
+        }
+    }
+    // Other crates enable reqwest's decoders, which would strip a
+    // Content-Encoding this client has to see and refuse.
+    let http = crate::platform_tls::blocking_client_builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .pool_idle_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| SyncError::new("http-client-unavailable", 503))?;
+    *shared = Some((http.clone(), now));
+    Ok(http)
 }
 
 pub(crate) fn is_ambiguous_transient(error: &SyncError) -> bool {
@@ -1088,7 +1148,7 @@ mod progress_tests {
         let worker = std::thread::spawn(move || super::super::progress::within(&worker_lane, || {
             let mut client = ServerClient::new(super::tests::config(&endpoint)).unwrap();
             client.body_download_observer = Some(Arc::new(move |bytes| { observed.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed); }));
-            let body = PreparedBody { wire: vec![7; UPLOAD], log_body: None, encoded: false, raw_len: UPLOAD };
+            let body = PreparedBody { wire: Arc::new(vec![7; UPLOAD]), log_body: None, encoded: false, raw_len: UPLOAD };
             client.request_once(Method::POST, "objects/transfer", &[], Some(&body), &[], 8192, uuid::Uuid::new_v4(), &std::sync::atomic::AtomicU64::new(0)).unwrap().body
         }));
         noticed.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1112,6 +1172,43 @@ mod progress_tests {
         assert_eq!((done.sent_bytes, done.received_bytes), (UPLOAD as u64, 8192));
         assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed), 8192);
         assert!(!done.sending && !done.receiving);
+    }
+
+    #[test]
+    fn an_attempt_reads_the_prepared_body_without_copying_it() {
+        use super::*;
+        let body = PreparedBody { wire: Arc::new(vec![7; 4096]), log_body: None, encoded: false, raw_len: 4096 };
+        let mut first = body.reader();
+        assert_eq!(Arc::strong_count(&body.wire), 2);
+        let mut sent = Vec::new();
+        first.read_to_end(&mut sent).unwrap();
+        drop(first);
+        // A retry starts again from the first byte of the same body.
+        let mut retried = Vec::new();
+        body.reader().read_to_end(&mut retried).unwrap();
+        assert_eq!((sent, retried), (vec![7; 4096], vec![7; 4096]));
+    }
+
+    #[test]
+    fn a_reply_is_read_into_a_buffer_of_its_declared_length() {
+        use super::*;
+        use std::{io::Write, net::TcpListener};
+        const LENGTH: usize = 600_000;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") { let mut byte = [0]; socket.read_exact(&mut byte).unwrap(); header.push(byte[0]); }
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {LENGTH}\r\nConnection: close\r\n\r\n").unwrap();
+            socket.write_all(&vec![5; LENGTH]).unwrap();
+        });
+        let client = ServerClient::new(super::tests::config(&endpoint)).unwrap();
+        let reply = client.request_once(Method::GET, "objects/synthetic/part", &[], None, &[], LENGTH, uuid::Uuid::new_v4(), &std::sync::atomic::AtomicU64::new(0)).unwrap();
+        server.join().unwrap();
+        assert_eq!(reply.body, vec![5; LENGTH]);
+        assert!(reply.body.capacity() < LENGTH + LENGTH / 8);
     }
 
     #[test]
@@ -1244,16 +1341,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn successive_clients_refresh_transport_without_sharing_credentials_or_cancellation() {
+    thread_local! {
+        /// The shared HTTP client of a `PrivateSharedHttp` scope, and how far its
+        /// clock was moved ahead.
+        static PRIVATE_SHARED_HTTP: std::cell::RefCell<Option<(SharedHttp, Duration)>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn private_shared_http() -> Option<Result<reqwest::blocking::Client>> {
+        PRIVATE_SHARED_HTTP.with(|private| {
+            let mut private = private.borrow_mut();
+            let (shared, ahead) = private.as_mut()?;
+            Some(reuse_or_build_http(shared, Instant::now() + *ahead))
+        })
+    }
+    /// Gives clients built on this thread a shared HTTP client of their own,
+    /// which no other test reuses or ages, until dropped. Dropping it drops that
+    /// client here rather than in the thread-local's destructor, where joining
+    /// the client's runtime thread deadlocks on Windows.
+    struct PrivateSharedHttp;
+    impl PrivateSharedHttp {
+        fn new() -> Self {
+            PRIVATE_SHARED_HTTP.with(|private| *private.borrow_mut() = Some((None, Duration::ZERO)));
+            Self
+        }
+        fn move_clock_ahead(&self, by: Duration) {
+            PRIVATE_SHARED_HTTP.with(|private| {
+                if let Some((_, ahead)) = private.borrow_mut().as_mut() {
+                    *ahead += by;
+                }
+            });
+        }
+    }
+    impl Drop for PrivateSharedHttp {
+        fn drop(&mut self) {
+            let private = PRIVATE_SHARED_HTTP.with(|private| private.borrow_mut().take());
+            drop(private);
+        }
+    }
+
+    /// A server that records each request's connection and credentials, and a
+    /// call that stops it.
+    fn recording_server() -> (String, Arc<Mutex<Vec<(std::net::SocketAddr, String)>>>, impl FnOnce()) {
         use axum::{extract::ConnectInfo, http::{HeaderMap, StatusCode}, Router};
-        use std::sync::atomic::{AtomicBool, Ordering};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let captured = seen.clone();
-        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let server = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
                 let router = Router::new().fallback(move |ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>, headers: HeaderMap| {
@@ -1267,6 +1401,32 @@ mod tests {
                     .with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
             });
         });
+        (endpoint, seen, move || { stop.send(()).unwrap(); server.join().unwrap(); })
+    }
+
+    /// Clients built one after another share the process-wide transport.
+    #[test]
+    fn clients_built_one_after_another_share_the_process_transport() {
+        let (endpoint, seen, stop) = recording_server();
+        for _ in 0..3 {
+            let client = ServerClient::new(config(&endpoint)).unwrap();
+            assert_eq!(client.request(Method::GET, "head", &[], None, &[], 1024).unwrap().status, 204);
+        }
+        stop();
+        let seen = seen.lock().unwrap();
+        let connections = seen.iter().map(|(peer, _)| *peer).collect::<std::collections::BTreeSet<_>>();
+        // The shared client may reach the end of its lifetime between two of them.
+        assert!(seen.len() == 3 && connections.len() <= 2, "{} requests on {} connections", seen.len(), connections.len());
+    }
+
+    /// Clients built within the shared lifetime reuse its connection, one built
+    /// after it refreshes transport configuration, and none shares another's
+    /// credentials or cancellation.
+    #[test]
+    fn clients_share_transport_for_a_minute_without_sharing_credentials_or_cancellation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (endpoint, seen, stop) = recording_server();
+        let shared = PrivateSharedHttp::new();
         let cancelled = Arc::new(AtomicBool::new(false));
         let first = ServerClient::with_cancellation(config(&endpoint), Some(cancelled.clone())).unwrap();
         assert_eq!(first.request(Method::GET, "head", &[], None, &[], 1024).unwrap().status, 204);
@@ -1277,13 +1437,17 @@ mod tests {
         next.token = "b".repeat(64);
         let second = ServerClient::new(next).unwrap();
         assert_eq!(second.request(Method::GET, "head", &[], None, &[], 1024).unwrap().status, 204);
-        stop.send(()).unwrap();
-        server.join().unwrap();
+        shared.move_clock_ahead(SHARED_HTTP_LIFETIME);
+        let third = ServerClient::new(config(&endpoint)).unwrap();
+        assert_eq!(third.request(Method::GET, "head", &[], None, &[], 1024).unwrap().status, 204);
+        stop();
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 2);
-        assert_ne!(seen[0].0, seen[1].0, "a new client must refresh transport configuration");
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0].0, seen[1].0, "a client within the lifetime reuses the connection");
+        assert_ne!(seen[1].0, seen[2].0, "a client after the lifetime refreshes transport configuration");
         assert_eq!(seen[0].1, format!("Bearer {}", "a".repeat(64)));
         assert_eq!(seen[1].1, format!("Bearer {}", "b".repeat(64)));
+        assert_eq!(seen[2].1, format!("Bearer {}", "a".repeat(64)));
     }
     #[test]
     fn verified_progress_renews_more_than_five_minutes_of_transient_failures() {
@@ -1674,8 +1838,51 @@ mod tests {
     }
 
     #[test]
+    fn initial_receive_returns_the_first_failure_without_spending_the_retry_budget() {
+        for identity in [false, true] {
+            for (status, body, code) in [
+                (503, "", "server-response-error"),
+                (521, "<html>origin unavailable</html>", "server-response-error"),
+                (530, "<html>error 1033</html>", "server-response-error"),
+                (408, r#"{"error":"request-timeout"}"#, "request-timeout"),
+                (503, r#"{"error":"server-updating"}"#, "server-updating"),
+                (401, r#"{"error":"unauthorized"}"#, "unauthorized"),
+            ] {
+                let (endpoint, task) = respond_in_order(vec![(status, body)]);
+                let mut client = ServerClient::new(config(&endpoint)).unwrap();
+                client.retry_budget = no_sleep_budget();
+                client.retry_transient = false;
+                let error = if identity { client.resolve_identity().unwrap_err() }
+                    else { client.json::<serde_json::Value>(Method::GET, "changes", &[], None::<&()>, &[]).unwrap_err() };
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, status);
+                assert_eq!(client.retry_budget.remaining().unwrap(), RETRY_BUDGET);
+                assert_eq!(task.join().unwrap(), 1);
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let mut client = ServerClient::new(config(&endpoint)).unwrap();
+        client.retry_budget = no_sleep_budget();
+        client.retry_transient = false;
+        let error = client.json::<serde_json::Value>(Method::GET, "changes", &[], None::<&()>, &[]).unwrap_err();
+        assert_eq!(error.code, "server-unreachable");
+        assert_eq!(client.retry_budget.remaining().unwrap(), RETRY_BUDGET);
+
+        let silent = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let mut client = ServerClient::new(config(&format!("http://{}", silent.server_addr()))).unwrap();
+        client.retry_transient = false;
+        *client.retry_budget.spent.lock().unwrap() = RETRY_BUDGET - Duration::from_millis(50);
+        let error = client.resolve_identity().unwrap_err();
+        assert_eq!(error.code, "server-timeout");
+        assert_eq!(client.retry_budget.remaining().unwrap(), Duration::from_millis(50));
+    }
+
+    #[test]
     fn request_timeout_replays_only_recognized_identity_bound_requests() {
         for (path, code, replay) in [
+            ("ack", "request-timeout", true),
             ("objects/missing", "request-timeout", true),
             ("objects/missing", "unknown-timeout", false),
             ("uploads", "request-timeout", false),

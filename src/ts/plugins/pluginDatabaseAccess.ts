@@ -22,6 +22,7 @@ import type {
     PluginStorageValue,
     ConversationMutation,
 } from '../storage/persistentDataStore'
+import { readCurrentRevision } from '../storage/persistentDataStore'
 import {
     acquireCurrentRevisionWithRetry,
     assertPinnedRevision,
@@ -85,11 +86,17 @@ export interface PluginConversationWindow extends ConversationWindow {
 
 export type PluginCompleteCharacter = Database['characters'][number]
 
+/** `current` omits the `message` property of every conversation in `char.chats`. */
+export type PluginChatOutputHistory = 'full' | 'current'
+
 export interface PluginChatOutputProjectionInput {
     characterId: string
     conversationId: string
     liveCharacter: PluginCompleteCharacter
     liveConversation: Chat
+    /** Absolute index of `liveConversation.message[0]`. */
+    windowStart: number
+    history: PluginChatOutputHistory
 }
 
 export interface PluginChatOutputProjection {
@@ -319,6 +326,7 @@ const SYNCHRONOUS_CHARACTER_SET_ERROR =
     'Synchronous plugin character updates are unavailable. Use async setDatabase().'
 const STALE_DATABASE_SET_ERROR =
     'Plugin database update became stale because navigation state changed.'
+class PluginApprovalOvertakenError extends Error {}
 const DANGEROUS_DATABASE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 
 export function linkPluginQueryAbortSignals(
@@ -747,7 +755,7 @@ export function createPluginDatabaseAccess(
     const acquireCurrentRevisionReader = (): Promise<PersistentRevisionLease> =>
         acquireCurrentRevisionWithRetry(
             (revision) => dependencies.store.acquireRevision(revision),
-            async () => (await dependencies.store.readRoot()).revision,
+            () => readCurrentRevision(dependencies.store),
         )
     const prepareQuery = async (signal?: AbortSignal) => {
         throwIfQueryAborted(signal)
@@ -1376,6 +1384,13 @@ export function createPluginDatabaseAccess(
             }
             const changedKeys = new Set(intents.map(intent => String(intent.path[0])))
             const detachedUpdate = Object.fromEntries(Object.entries(detachedSubmission).filter(([key]) => changedKeys.has(key)))
+            const isPluginRecordSet = (intent: (typeof intents)[number]) =>
+                intent.path[0] === 'plugins' && intent.path.length === 2 && intent.path[1] !== '$order' && intent.type === 'set'
+            // Only records the plugin changed are requested: omissions, reordering and unchanged copies are ignored.
+            const requestedPlugins = intents.filter(isPluginRecordSet).map(intent => intent.value as RisuPlugin)
+            if (requestedPlugins.length) detachedUpdate.plugins = requestedPlugins
+            else delete detachedUpdate.plugins
+            const scriptsBeforeConfirmation = new Map((dependencies.getCompatibilityDatabase().plugins ?? []).map(plugin => [plugin.name, plugin.script]))
             const preparedUpdate = dependencies.prepareAuthoritativeDatabaseUpdate
                 ? await dependencies.prepareAuthoritativeDatabaseUpdate(detachedUpdate)
                 : detachedUpdate
@@ -1388,22 +1403,52 @@ export function createPluginDatabaseAccess(
             if (hasCharacterUpdate(preparedUpdate)) {
                 validateCompleteCharacters(preparedUpdate.characters)
             }
-            let acceptedIntents = intents
-            if (Object.hasOwn(detachedUpdate, 'plugins')) {
-                const installed = dependencies.getCompatibilityDatabase().plugins ?? []
-                const installedNames = new Set(installed.map(plugin => plugin.name))
-                const approved = new Map((preparedUpdate.plugins as RisuPlugin[] | undefined ?? []).map(plugin => [plugin.name, plugin]))
-                const additions = intents.filter(intent => intent.path[0] === 'plugins' && intent.path.length === 2 && intent.path[1] !== '$order' && intent.type === 'set' && !installedNames.has(String(intent.path[1])) && approved.has(String(intent.path[1])))
-                    .map(intent => ({ ...intent, value: approved.get(String(intent.path[1]))! }))
-                // Whole-list API submissions request installation, while addressed storage deletes remain independent.
-                acceptedIntents = [...intents.filter(intent => intent.path[0] !== 'plugins'), ...additions]
-                if (additions.length) {
-                    const addedNames = new Set(additions.map(intent => String(intent.path[1])))
-                    acceptedIntents.push({ path: ['plugins', '$order'], type: 'set', value: [...installed.map(plugin => plugin.name), ...[...approved.keys()].filter(name => addedNames.has(name))] })
+            const approved = new Map((preparedUpdate.plugins as RisuPlugin[] | undefined ?? []).map(plugin => [plugin.name, plugin]))
+            const installedPlugins = () => dependencies.getCompatibilityDatabase().plugins ?? []
+            // An approval applies only to the list it was asked about: an install while the name is
+            // still free, a replacement while the installed script is still the one it replaces.
+            const approvalHolds = (name: string, installed: readonly RisuPlugin[]) => {
+                const current = installed.find(plugin => plugin.name === name)
+                return scriptsBeforeConfirmation.has(name)
+                    ? !!current && current.script === scriptsBeforeConfirmation.get(name)
+                    : !current
+            }
+            while (true) {
+                let acceptedIntents = intents
+                let acceptedNames: string[] = []
+                if (changedKeys.has('plugins')) {
+                    const installed = installedPlugins()
+                    acceptedNames = intents
+                        .filter(intent => isPluginRecordSet(intent) && approved.has(String(intent.path[1])))
+                        .map(intent => String(intent.path[1]))
+                        .filter(name => approvalHolds(name, installed))
+                    const accepted = intents.filter(intent => isPluginRecordSet(intent) && acceptedNames.includes(String(intent.path[1])))
+                        .map(intent => ({ ...intent, value: approved.get(String(intent.path[1]))! }))
+                    // Whole-list API submissions request installation or replacement, while addressed storage deletes remain independent.
+                    acceptedIntents = [...intents.filter(intent => intent.path[0] !== 'plugins'), ...accepted]
+                    const addedNames = new Set(acceptedNames.filter(name => !installed.some(plugin => plugin.name === name)))
+                    if (addedNames.size) {
+                        acceptedIntents.push({ path: ['plugins', '$order'], type: 'set', value: [...installed.map(plugin => plugin.name), ...[...approved.keys()].filter(name => addedNames.has(name))] })
+                    }
+                }
+                const changes = databaseUnitChanges(acceptedIntents, preparedUpdate, allowedKeys)
+                const storageCheck = storageWriteCheck(prepareStorageWrite, changes.units)
+                try {
+                    await dependencies.commitPersistentUnitIntent('plugin-setDatabase', changes.units, [], changes.wholeMessages, undefined, {
+                        // The write can wait behind other saves, so every attempt checks the approvals again.
+                        validate: () => {
+                            const installed = installedPlugins()
+                            if (!acceptedNames.every(name => approvalHolds(name, installed))) throw new PluginApprovalOvertakenError()
+                            storageCheck.validate()
+                        },
+                        committed: storageCheck.committed,
+                    })
+                    break
+                } catch (error) {
+                    // Nothing was written; commit again without the approvals the plugin list overtook.
+                    if (!(error instanceof PluginApprovalOvertakenError)) throw error
                 }
             }
-            const changes = databaseUnitChanges(acceptedIntents, preparedUpdate, allowedKeys)
-            await dependencies.commitPersistentUnitIntent('plugin-setDatabase', changes.units, [], changes.wholeMessages, undefined, storageWriteCheck(prepareStorageWrite, changes.units))
             dependencies.assertPersistentMutationAllowed(authorityEpoch)
 
         },
@@ -1419,60 +1464,99 @@ export function createProductionPluginDatabaseAccess(
     })
 }
 
+function withoutMessages(chat: Chat): Chat {
+    const { message: _message, ...metadata } = chat
+    return metadata as Chat
+}
+
+/** Stored messages before a history window, read through the listener's lease. */
+async function readListenerMessagePrefix(
+    reader: PersistentRevisionLease,
+    input: PluginChatOutputProjectionInput,
+): Promise<Chat['message']> {
+    const messages: Chat['message'] = []
+    for (let startIndex = 0; startIndex < input.windowStart; startIndex += PLUGIN_MESSAGE_QUERY_MAX_LIMIT) {
+        const limit = Math.min(PLUGIN_MESSAGE_QUERY_MAX_LIMIT, input.windowStart - startIndex)
+        const page = await reader.readConversationWindow({
+            characterId: input.characterId, conversationId: input.conversationId, startIndex, limit,
+        })
+        if (!page) throw new Error(`Missing listener conversation ${input.conversationId}`)
+        assertPinnedRevision(reader.revision, page.revision, 'Listener messages')
+        if (page.value.startIndex !== startIndex || page.value.messages.length !== limit) {
+            throw new Error('Incomplete listener message page')
+        }
+        for (const message of page.value.messages) messages.push(message)
+    }
+    return messages
+}
+
 export function createProductionPluginChatOutputProjector(
     snapshot: <T>(value: T) => T,
 ): PluginChatOutputProjector {
-    let store: ReturnType<typeof getPersistentDataStore> | undefined
     let openPromise: Promise<void> | undefined
     return async (input) => {
-        const persistentStore = store ??= getPersistentDataStore()
+        const persistentStore = getPersistentDataStore()
         await (openPromise ??= persistentStore.open().finally(() => {
             openPromise = undefined
         }))
         const lease = await acquireCurrentRevisionWithRetry(
             (revision) => persistentStore.acquireRevision(revision),
-            async () => (await persistentStore.readRoot()).revision,
+            () => readCurrentRevision(persistentStore),
         )
         return withPersistentRevisionLease(lease, async (reader) => {
             const detail = await reader.readCharacter(input.characterId)
             if (!detail) throw new Error(`Missing listener character ${input.characterId}`)
             assertPinnedRevision(reader.revision, detail.revision, 'Listener character')
 
-            const liveCompleteChats = new Map(
-                input.liveCharacter.chats
-                    .filter((chat) => !isConversationSummaryStub(chat) && chat.id)
-                    .map((chat) => [chat.id!, snapshot(chat)]),
+            // Store reads are already detached values; only live state is copied.
+            const chat = snapshot(input.liveConversation)
+            if (input.windowStart > 0) {
+                chat.message = (await readListenerMessagePrefix(reader, input)).concat(chat.message)
+            }
+            const { chats: liveChats, ...liveFields } = input.liveCharacter
+            const hydrated = new Map(
+                liveChats
+                    .filter((candidate) => !isConversationSummaryStub(candidate) && candidate.id && candidate.id !== input.conversationId)
+                    .map((candidate) => [candidate.id!, candidate]),
             )
-            liveCompleteChats.set(input.conversationId, snapshot(input.liveConversation))
-
+            const full = input.history === 'full'
             const chats: Chat[] = []
+            let foundCurrent = false
             let cursor: string | undefined
             do {
                 const page = await reader.queryConversations({ characterId: input.characterId, order: 'configured', limit: 100, cursor })
                 assertPinnedRevision(reader.revision, page.revision, 'Listener conversations')
                 for (const summary of page.items) {
-                    const live = liveCompleteChats.get(summary.id)
-                    if (live) chats.push(live)
-                    else {
+                    if (summary.id === input.conversationId) {
+                        foundCurrent = true
+                        // A separate copy, so the event's `chat` never aliases `char.chats`.
+                        chats.push(snapshot(full ? chat : withoutMessages(chat)))
+                        continue
+                    }
+                    const live = hydrated.get(summary.id)
+                    if (live) {
+                        chats.push(full ? snapshot(live) : snapshot(withoutMessages(live)))
+                    } else if (full) {
                         const conversation = await reader.readConversation(input.characterId, summary.id)
                         if (!conversation) throw new Error(`Missing listener conversation ${summary.id}`)
                         assertPinnedRevision(reader.revision, conversation.revision, 'Listener conversation')
                         chats.push(conversation.value as Chat)
+                    } else {
+                        const metadata = await reader.readConversationMetadata(input.characterId, summary.id)
+                        if (!metadata) throw new Error(`Missing listener conversation ${summary.id}`)
+                        assertPinnedRevision(reader.revision, metadata.revision, 'Listener conversation')
+                        chats.push(metadata.value.conversation as Chat)
                     }
                 }
                 cursor = page.nextCursor
             } while (cursor !== undefined)
-            const { chats: _liveChats, ...liveDetail } = snapshot(input.liveCharacter)
+            if (!foundCurrent) throw new Error(`Missing listener conversation ${input.conversationId}`)
             const char = {
                 ...detail.value,
-                ...liveDetail,
+                ...snapshot(liveFields),
                 chats,
             } as PluginCompleteCharacter
-            const chat = char.chats.find(
-                (candidate) => candidate.id === input.conversationId,
-            )
-            if (!chat) throw new Error(`Missing listener conversation ${input.conversationId}`)
-            return { char: snapshot(char), chat: snapshot(chat) }
+            return { char, chat }
         })
     }
 }

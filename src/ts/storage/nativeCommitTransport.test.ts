@@ -11,39 +11,27 @@ import {
 } from './nativeCommitTransport'
 import { PayloadTooLargeError } from './nativePersistenceValue'
 
-it('transfers encoded pages instead of structured-cloning the commit or callable hooks to its worker', async () => {
-    vi.useFakeTimers()
-    const sent: { pages: Uint8Array[]; byteLength: number }[] = []
-    class EncodingWorker {
-        onmessage: ((event: { data: { bytes: Uint8Array } }) => void) | null = null
-        onerror: (() => void) | null = null
-        terminate() {}
-        postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
-            expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
-            expect(transfer).toEqual(data.pages.map((page) => page.buffer))
-            const received = structuredClone(data, { transfer })
-            expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
-            sent.push(received)
-            const bytes = new Uint8Array(received.byteLength)
-            let offset = 0
-            for (const page of received.pages) { bytes.set(page, offset); offset += page.byteLength }
-            Promise.resolve().then(() => this.onmessage?.({ data: { bytes } }))
-        }
-    }
-    vi.stubGlobal('Worker', EncodingWorker)
+it('encodes a large commit into exact UTF-8 bytes without a worker or structured clone of callable hooks', async () => {
+    vi.stubGlobal('Worker', class {
+        constructor() { throw new Error('The commit encoder must not start a worker') }
+    })
     try {
         const value = '한글🐿️é'.repeat(50_000)
         const input = fixture()
         input.commit.rootMutations![0] = { type: 'set', key: 'payload', value: { toJSON: () => value } }
+        input.commit.rootMutations!.push({ type: 'set', key: 'lone', value: 'a\uD800b' })
         const bytes = await encodeNativeCommit(input)
-        expect(JSON.parse(new TextDecoder().decode(bytes)).commit.rootMutations[0].value).toBe(value)
-        expect(sent).toHaveLength(1)
-        expect(sent[0].pages.length).toBeGreaterThan(1)
-        expect(sent[0].pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
-        await vi.advanceTimersByTimeAsync(30_000)
+        const expected = JSON.stringify({ ...input, commit: { ...input.commit, rootMutations: [
+            { type: 'set', key: 'payload', value },
+            { type: 'set', key: 'lone', value: 'a�b' },
+        ] } })
+        // toEqual walks the megabyte array element by element and takes seconds; Buffer.compare checks the same bytes.
+        const expectedBytes = new TextEncoder().encode(expected)
+        expect(bytes.byteLength).toBe(expectedBytes.byteLength)
+        expect(Buffer.compare(bytes, expectedBytes)).toBe(0)
+        expect(bytes.byteLength).toBe(bytes.buffer.byteLength)
     } finally {
         vi.unstubAllGlobals()
-        vi.useRealTimers()
     }
 })
 
@@ -188,7 +176,7 @@ describe('native commit transport', () => {
     )
 
     it.each(['linux', 'ios', 'macos'] as const)(
-        'keeps small %s saves on JSON and only falls back before raw submission',
+        'keeps small %s saves on JSON',
         async (os) => {
             const h = harness({ windows: false, [os]: true })
             await h.transport.commit(fixture(false))
@@ -196,15 +184,6 @@ describe('native commit transport', () => {
             expect(h.invoke).toHaveBeenCalledExactlyOnceWith(
                 'pds_commit',
                 fixture(false),
-            )
-            h.invoke.mockClear()
-            h.encode.mockRejectedValueOnce(
-                new DOMException('Cannot clone', 'DataCloneError'),
-            )
-            await h.transport.commit(fixture())
-            expect(h.invoke).toHaveBeenCalledExactlyOnceWith(
-                'pds_commit',
-                fixture(),
             )
         },
     )
@@ -252,12 +231,8 @@ describe('native commit transport', () => {
         expect(h.invoke.mock.calls[0][1]).toBe(bytes)
     })
 
-    it('falls back before submission for non-cloneable values, but propagates encoding failures', async () => {
+    it('propagates encoding failures without sending anything', async () => {
         const h = harness()
-        h.encode.mockRejectedValueOnce(new DOMException('Cannot clone', 'DataCloneError'))
-        await h.transport.commit(fixture())
-        expect(h.invoke).toHaveBeenCalledExactlyOnceWith('pds_commit', fixture())
-        h.invoke.mockClear()
         h.encode.mockRejectedValueOnce(new Error('Invalid JSON value'))
         await expect(h.transport.commit(fixture())).rejects.toThrow('Invalid JSON value')
         expect(h.invoke).not.toHaveBeenCalled()
@@ -299,7 +274,7 @@ describe('native commit transport', () => {
             expect(h.encode).not.toHaveBeenCalled()
         }
     })
-    it('routes large Android commits through the Worker and strings, retaining small JSON saves', async () => {
+    it('routes large Android commits through the encoder and strings, retaining small JSON saves', async () => {
         const h = harness({ windows: false, android: true })
         await h.transport.commit(fixture(false))
         expect(h.encode).not.toHaveBeenCalled()
@@ -314,18 +289,16 @@ describe('native commit transport', () => {
         ])
         expect(h.webview.addEventListener).not.toHaveBeenCalled()
     })
-    it('preserves Android clone fallback, errors and queue recovery', async () => {
+    it('preserves Android errors and queue recovery', async () => {
         const h = harness({
             windows: false,
             android: true,
             fail: 'pds_commit_android_finish',
         })
-        h.encode.mockRejectedValueOnce(new DOMException('Cannot clone', 'DataCloneError'))
-        await h.transport.commit(fixture())
         h.encode.mockResolvedValueOnce(new TextEncoder().encode('{}'))
         await expect(h.transport.commit(fixture())).rejects.toThrow('native failed')
         await h.transport.commit(fixture(false))
-        expect(h.invoke.mock.calls.filter(([cmd]) => cmd === 'pds_commit')).toHaveLength(2)
+        expect(h.invoke.mock.calls.filter(([cmd]) => cmd === 'pds_commit')).toHaveLength(1)
     })
     it('copies every byte once in ordered acknowledged chunks and releases both sides', async () => {
         const h = harness()
@@ -341,7 +314,7 @@ describe('native commit transport', () => {
         expect(h.webview.releaseBuffer).toHaveBeenCalledOnce()
         expect(h.webview.removeEventListener).toHaveBeenCalledOnce()
     })
-    it('falls back to Worker raw only when shared support is unavailable before commit', async () => {
+    it('falls back to encoded raw only when shared support is unavailable before commit', async () => {
         const h = harness({ unsupported: true })
         await h.transport.commit(fixture())
         expect(h.invoke.mock.calls.map(([command]) => command)).toEqual([
@@ -400,7 +373,7 @@ describe('native commit transport', () => {
             'pds_commit_shared_finish',
         )
     })
-    it('serializes overlapping requests even while Worker encoding is pending', async () => {
+    it('serializes overlapping requests even while encoding is pending', async () => {
         const h = harness()
         let release!: (bytes: Uint8Array<ArrayBuffer>) => void
         h.encode.mockImplementationOnce(

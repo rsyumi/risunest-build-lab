@@ -20,6 +20,8 @@ use std::{
 use uuid::Uuid;
 
 const MIN_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
+/// The most snapshots kept, and the keep count when a caller names none.
+const MAX_SNAPSHOTS: usize = 8;
 const UNSCANNABLE_BLOCKER: &str = "record-unscannable";
 const CAS_PHYSICAL_PREFIX: &str = "assets/objects/";
 const URL_SCHEMES: [&str; 3] = ["risuasset:", "http:", "https:"];
@@ -82,9 +84,7 @@ impl ActiveReaderRegistry {
 
     pub(crate) fn detached_asset_roots(&self) -> StoreResult<Vec<AssetRootSet>> {
         if self.deferred_asset_inventories.load(Ordering::SeqCst) > 0 {
-            return Err(StoreError::Validation {
-                message: "Asset inventory is being pinned by a local capture".into(),
-            });
+            return Err(StoreError::AssetInventoryBusy);
         }
         Ok(self
             .detached_asset_roots
@@ -129,6 +129,16 @@ impl RevisionReadLease {
         let roots = collect_asset_roots(&self.connection)?;
         self.active_readers
             .publish_detached_asset_roots(&self.lease, roots)
+    }
+
+    pub(crate) fn publish_detached_gallery_file_root(&self, kind: &str, key: &str) -> StoreResult<()> {
+        let mut roots = AssetRootSet::default();
+        if let Some(alias) = super::query::read_asset_alias(&self.connection, kind, key, &self.target)? {
+            if let Some(hash) = alias.value.object_hash {
+                roots.object_hashes.insert(hash);
+            }
+        }
+        self.active_readers.publish_detached_asset_roots(&self.lease, roots)
     }
 
     #[cfg(feature = "native-official-publication")]
@@ -405,66 +415,144 @@ pub(super) fn checkpoint(connection: &Connection, mode: CheckpointMode) -> Store
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn create(
     store: &mut super::PersistentStore,
     reason: &str,
+    keep: KeepCount,
 ) -> StoreResult<SnapshotCreated> {
     let mut archive = Archive::open(&store.snapshots_dir)?;
-    create_in_archive(store, &mut archive, reason)
+    create_in_archive(store, &mut archive, reason, keep)
 }
 
-fn create_in_archive(
+pub(super) fn create_in_archive(
     store: &mut super::PersistentStore,
     archive: &mut Archive,
     reason: &str,
+    keep: KeepCount,
 ) -> StoreResult<SnapshotCreated> {
     let started = Instant::now();
-    let (scratch, current_bytes) = capture_scratch(store, archive)?;
-    archive_scratch(archive, scratch, current_bytes, reason, started)
+    let (scratch, retention) = capture_scratch(store, archive, keep)?;
+    archive_scratch(archive, scratch, retention, reason, started)
+}
+
+/// How many snapshots the rotation after a capture keeps, from 1 to
+/// `MAX_SNAPSHOTS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeepCount(usize);
+
+impl KeepCount {
+    pub(crate) const MAX: Self = Self(MAX_SNAPSHOTS);
+
+    /// The count the renderer sends with a snapshot request, which is the one
+    /// the user sees. A request without one keeps the full count, and a count
+    /// out of range is refused before anything is captured.
+    pub(crate) fn requested(count: Option<u32>) -> StoreResult<Self> {
+        let Some(count) = count else { return Ok(Self::MAX) };
+        usize::try_from(count)
+            .ok()
+            .filter(|count| (1..=MAX_SNAPSHOTS).contains(count))
+            .map(Self)
+            .ok_or_else(|| validation(format!("snapshot keep count {count} is outside 1 to {MAX_SNAPSHOTS}")))
+    }
+}
+
+/// What the rotation after a capture keeps: the requested snapshot count, and
+/// archive bytes within `byte_budget` of the retention basis.
+pub(super) struct Retention {
+    pub(super) keep_count: usize,
+    pub(super) basis_bytes: u64,
 }
 
 pub(super) fn capture_scratch(
     store: &mut super::PersistentStore,
     archive: &Archive,
-) -> StoreResult<(super::snapshot_archive::Scratch, u64)> {
+    keep: KeepCount,
+) -> StoreResult<(super::snapshot_archive::Scratch, Retention)> {
+    begin_capture(store, archive, keep)?.copy()
+}
+
+/// A capture's leased revision, taken out of the store so that copying it, which
+/// takes minutes for a large library, runs while other commands use the store.
+pub(super) struct CaptureSource {
+    scratch: super::snapshot_archive::Scratch,
+    reader: RevisionReadLease,
+    repository_root: PathBuf,
+    database_path: PathBuf,
+    keep: KeepCount,
+}
+
+/// Leases the current revision for a capture. The lease's reader leaves the store
+/// with the returned source, and the capture's asset inventory deferral keeps
+/// what it references.
+pub(super) fn begin_capture(
+    store: &mut super::PersistentStore,
+    archive: &Archive,
+    keep: KeepCount,
+) -> StoreResult<CaptureSource> {
     let scratch = archive.scratch()?;
     let revision = store.revision()?;
     let lease = store.lww_acquire_library_backup_capture(revision)?;
-    let result = (|| {
-        let units = store.lww_backup_unit_values(&lease.lease)?;
-        let (connection, target) = store.read_view(Some(&lease.lease))?;
-        let current_bytes = snapshot_retention_basis_bytes(connection)?;
-        let mut output = crate::sqlite_open::open(&scratch.path)?;
-        {
-            let backup = rusqlite::backup::Backup::new(connection, &mut output)?;
-            loop {
-                match backup.step(128)? {
-                    rusqlite::backup::StepResult::Done => break,
-                    rusqlite::backup::StepResult::More => (),
-                    _ => return Err(validation("snapshot source is busy")),
+    let reader = store
+        .revision_leases
+        .remove(&lease.lease)
+        .ok_or(StoreError::SnapshotReleased)?;
+    Ok(CaptureSource {
+        scratch,
+        reader,
+        repository_root: store.repository_root.clone(),
+        database_path: store.database_path.clone(),
+        keep,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static CAPTURE_COPYING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+impl CaptureSource {
+    pub(super) fn copy(self) -> StoreResult<(super::snapshot_archive::Scratch, Retention)> {
+        let Self { scratch, reader, repository_root, database_path, keep } = self;
+        let active_readers = reader.active_readers();
+        let result = (|| {
+            let current_bytes = snapshot_retention_basis_bytes(&reader.connection)?;
+            let mut output = crate::sqlite_open::open(&scratch.path)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&reader.connection, &mut output)?;
+                #[cfg(test)]
+                CAPTURE_COPYING.with(|hook| { if let Some(hook) = hook.borrow_mut().take() { hook(); } });
+                loop {
+                    match backup.step(128)? {
+                        rusqlite::backup::StepResult::Done => break,
+                        rusqlite::backup::StepResult::More => (),
+                        _ => return Err(validation("snapshot source is busy")),
+                    }
                 }
             }
-        }
-        let tx = output.transaction()?;
-        tx.execute("DELETE FROM snapshot_original_meta", [])?;
-        tx.execute("DELETE FROM snapshot_original_units", [])?;
-        tx.execute("INSERT INTO snapshot_original_meta VALUES(1,?1,?2)", rusqlite::params![target.revision,target.generation])?;
-        for (key,value) in units {
-            tx.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)", rusqlite::params![key.as_str(),serde_json::to_string(&value)?])?;
-        }
-        tx.commit()?;
-        Ok(current_bytes)
-    })();
-    let release = store.release_revision(&lease.lease);
-    let current_bytes = result?;
-    release?;
-    Ok((scratch, current_bytes))
+            let tx = output.transaction()?;
+            tx.execute("DELETE FROM snapshot_original_meta", [])?;
+            tx.execute("DELETE FROM snapshot_original_units", [])?;
+            tx.execute("INSERT INTO snapshot_original_meta VALUES(1,?1,?2)", rusqlite::params![reader.target.revision,reader.target.generation])?;
+            super::lww::visit_backup_units(&reader, &repository_root, &crate::local_backup::NeverCancelled, &mut |key,value| {
+                tx.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)", rusqlite::params![key.as_str(),serde_json::to_string(&value)?])?;
+                Ok(())
+            })?;
+            tx.commit()?;
+            Ok(current_bytes)
+        })();
+        let release = close_revision(reader)
+            .and_then(|()| super::checkpoint_after_detached_release(&database_path, &active_readers));
+        let basis_bytes = result?;
+        release?;
+        Ok((scratch, Retention { keep_count: keep.0, basis_bytes }))
+    }
 }
 
 pub(super) fn archive_scratch(
     archive: &mut Archive,
     scratch: super::snapshot_archive::Scratch,
-    current_bytes: u64,
+    retention: Retention,
     reason: &str,
     started: Instant,
 ) -> StoreResult<SnapshotCreated> {
@@ -473,7 +561,7 @@ pub(super) fn archive_scratch(
     let roots = collect_asset_roots(&captured)?;
     drop(captured);
     let metadata = archive.insert(&scratch.path, revision, reason, roots)?;
-    archive.rotate(byte_budget(current_bytes), &metadata.id)?;
+    archive.rotate(retention.keep_count, byte_budget(retention.basis_bytes), &metadata.id)?;
     Ok(SnapshotCreated {
         id: metadata.id,
         revision,
@@ -587,7 +675,18 @@ pub(super) fn collect_asset_roots(
 ) -> StoreResult<AssetRootSet> {
     #[cfg(test)]
     ASSET_ROOT_SCANS.with(|count| count.set(count.get() + 1));
-    collect_library_asset_roots(connection, None)
+    collect_library_asset_roots(connection, None, None)
+}
+
+/// The library's roots without the active generation's `asset` aliases named in `excluded` and
+/// their units, so what else holds their objects can be told apart from the aliases themselves.
+pub(super) fn collect_asset_roots_without_aliases(
+    connection: &Connection,
+    excluded: &BTreeSet<String>,
+) -> StoreResult<AssetRootSet> {
+    #[cfg(test)]
+    ASSET_ROOT_SCANS.with(|count| count.set(count.get() + 1));
+    collect_library_asset_roots(connection, None, Some(excluded))
 }
 
 pub(super) fn collect_plugin_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
@@ -659,7 +758,7 @@ pub(super) fn merge_asset_roots(target: &mut AssetRootSet, source: AssetRootSet)
 }
 
 pub(super) fn collect_asset_roots_with_plugin_cache(connection: &Connection, plugins: &AssetRootSet) -> StoreResult<AssetRootSet> {
-    collect_library_asset_roots(connection, Some(plugins))
+    collect_library_asset_roots(connection, Some(plugins), None)
 }
 
 pub(super) fn collect_preserved_source_roots(repository:&Path)->AssetRootSet {
@@ -696,7 +795,7 @@ fn collect_asset_roots_for_generation(
     connection: &Connection,
     generation: &str,
 ) -> StoreResult<AssetRootSet> {
-    collect_generation_asset_roots(connection, generation, None)
+    collect_generation_asset_roots(connection, generation, None, None)
 }
 
 /// Generation tables whose rows can reference a CAS object. The other
@@ -718,6 +817,7 @@ pub(super) const ROOT_GENERATION_TABLES: [&str; 8] = [
 fn collect_library_asset_roots(
     connection: &Connection,
     plugins: Option<&AssetRootSet>,
+    excluded: Option<&BTreeSet<String>>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
     let query = ROOT_GENERATION_TABLES
@@ -726,14 +826,16 @@ fn collect_library_asset_roots(
     let mut statement = connection.prepare(&query)?;
     let generations = statement.query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    let active = excluded.map(|_| active_generation(connection)).transpose()?;
     for generation in generations {
-        merge_asset_roots(&mut roots, collect_generation_asset_roots(connection, &generation, plugins)?);
+        let excluded = excluded.filter(|_| active.as_deref() == Some(generation.as_str()));
+        merge_asset_roots(&mut roots, collect_generation_asset_roots(connection, &generation, plugins, excluded)?);
     }
     if table_exists(connection, "server_sync_objects")? {
         scan_optional_hash_column(connection, "SELECT hash FROM server_sync_objects", [],
             HashTarget::Object, &mut roots)?;
     }
-    merge_asset_roots(&mut roots, collect_lww_asset_roots(connection)?);
+    merge_asset_roots(&mut roots, collect_lww_asset_roots(connection, excluded)?);
     Ok(roots)
 }
 
@@ -743,6 +845,7 @@ fn collect_generation_asset_roots(
     connection: &Connection,
     generation: &str,
     plugins: Option<&AssetRootSet>,
+    excluded: Option<&BTreeSet<String>>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
     let scope_params: &[&dyn rusqlite::ToSql] = &[&generation];
@@ -757,8 +860,9 @@ fn collect_generation_asset_roots(
     )?;
     scan_asset_alias_roots(
         connection,
-        "SELECT logical_key, object_hash FROM asset_aliases WHERE generation = ?1",
+        "SELECT logical_key, object_hash, kind FROM asset_aliases WHERE generation = ?1",
         scope_params,
+        excluded,
         &mut roots,
     )?;
     // An archived character keeps no scannable detail, so its payload object and
@@ -815,7 +919,7 @@ fn collect_generation_asset_roots(
     Ok(roots)
 }
 
-fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
+fn collect_lww_asset_roots(connection: &Connection, excluded: Option<&BTreeSet<String>>) -> StoreResult<AssetRootSet> {
     use risunest_sync_wire::unit::{UnitKey, UnitValue};
     let mut roots = AssetRootSet::default();
     let mut object_units = Vec::new();
@@ -826,6 +930,10 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
         while let Some(row) = rows.next()? {
             let result = (|| -> StoreResult<()> {
                 let key:UnitKey=row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
+                if table == "lww_units" && excluded.is_some_and(|excluded| key.as_str().starts_with("[\"asset\",")
+                    && matches!(key.components().as_slice(), [_, logical_key] if excluded.contains(logical_key))) {
+                    return Ok(());
+                }
                 let value:UnitValue=serde_json::from_str(&row.get::<_,String>(1)?)?;
                 if let Some((decoded,json))=value.validated_inline().map_err(|error|validation(error.to_string()))? {
                     observe_json_value(&inline_root_json(&decoded,json)?,None,&mut roots);
@@ -902,14 +1010,44 @@ fn collect_character_asset_hashes_inner(
     shared: bool,
 ) -> StoreResult<Vec<String>> {
     let mut roots = AssetRootSet::default();
+    // The unused-file cleanup cannot read an archived character's text, so a key inside longer
+    // text, such as an `<img src>` in a chat, is recorded too, as a permanent delete finds it.
+    let mut candidates = BTreeSet::new();
     let scope: [&dyn rusqlite::ToSql; 2] = [&generation, &character_id];
     for query in [
         "SELECT detail FROM characters WHERE generation = ?1 AND character_id = ?2",
         "SELECT detail FROM conversations WHERE generation = ?1 AND character_id = ?2",
         "SELECT value FROM messages WHERE generation = ?1 AND character_id = ?2",
     ] {
-        if shared {let mut statement=connection.prepare(query)?;let mut rows=statement.query(scope.as_slice())?;while let Some(row)=rows.next()?{let raw:String=row.get(0)?;let value=serde_json::from_str(&raw)?;let value=if query.contains("FROM characters"){super::lww::shared_archive_character(value)}else if query.contains("FROM conversations"){super::lww::shared_archive_conversation(value)}else{value};observe_json_value(&value,None,&mut roots);}}else{scan_json_column(connection, query, scope.as_slice(), &mut roots)?;}
-
+        let mut statement = connection.prepare(query)?;
+        let mut rows = statement.query(scope.as_slice())?;
+        while let Some(row) = rows.next()? {
+            let value = if shared {
+                let raw: String = row.get(0)?;
+                let value = serde_json::from_str(&raw)?;
+                if query.contains("FROM characters") {
+                    super::lww::shared_archive_character(value)
+                } else if query.contains("FROM conversations") {
+                    super::lww::shared_archive_conversation(value)
+                } else {
+                    value
+                }
+            } else {
+                let ScannedText::Text(encoded) = scanned_text(row, 0)? else {
+                    retain_unscannable_record(&mut roots);
+                    continue;
+                };
+                match serde_json::from_str(&encoded) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        retain_unscannable_record(&mut roots);
+                        continue;
+                    }
+                }
+            };
+            observe_json_value(&value, None, &mut roots);
+            super::asset_alias_orphans::collect_value_owned_keys(&value, &mut candidates);
+        }
     }
     scan_text_column(
         connection,
@@ -947,12 +1085,7 @@ fn collect_character_asset_hashes_inner(
         hashes.insert(manifest_hash);
     }
 
-    let mut candidates: BTreeSet<String> = roots
-        .legacy_asset_keys
-        .iter()
-        .chain(&roots.inlay_ids)
-        .cloned()
-        .collect();
+    candidates.extend(roots.legacy_asset_keys.iter().chain(&roots.inlay_ids).cloned());
     collect_alias_key_candidates(connection, generation, character_id, &mut candidates,shared)?;
     for candidate in candidates {
         let mut statement = connection.prepare_cached(
@@ -1091,11 +1224,17 @@ fn scan_asset_alias_roots<P: rusqlite::Params>(
     connection: &Connection,
     query: &str,
     params: P,
+    excluded: Option<&BTreeSet<String>>,
     roots: &mut AssetRootSet,
 ) -> StoreResult<()> {
     let mut statement = connection.prepare(query)?;
     let mut rows = statement.query(params)?;
     while let Some(row) = rows.next()? {
+        if let (Some(excluded), ScannedText::Text(key), ScannedText::Text(kind)) = (excluded, scanned_text(row, 0)?, scanned_text(row, 2)?) {
+            if kind == "asset" && excluded.contains(&key) {
+                continue;
+            }
+        }
         match scanned_text(row, 1)? {
             ScannedText::Text(object_hash) => {
                 roots.object_hashes.insert(object_hash);
@@ -1489,8 +1628,7 @@ impl super::PersistentStore {
                     Ok((key,value))
                 });
                 let inventory=super::external_capture::streamed_unit_dependency_inventory(original_units,&|hash| {
-                    let length:Option<i64>=source.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
-                    if length.is_some_and(|length|length<0 || length as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(validation("snapshot control exceeds its byte limit"));}
+                    // Content bodies may exceed the Sync reference-page bound; the inventory validates each format.
                     Ok(source.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
                 },&|hash| {
                     let size:Option<i64>=source.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1 UNION ALL SELECT length(body) FROM message_page_objects WHERE hash=?1 LIMIT 1",[hash],|row|row.get(0)).optional()?;
@@ -1524,11 +1662,20 @@ impl super::PersistentStore {
                     super::lww::insert_replacement_source(&tx,&stage.staging_id,super::lww::STAGED_SOURCE,&key,&value)?;
                 }
                 drop(cursor);
+                // Inventory validation includes controls that do not receive message-page verification marks.
+                let mut controls=source.prepare("SELECT body FROM message_page_objects WHERE hash=?1")?;
+                for hash in inventory.controls.keys() {
+                    cancelled(probe)?;
+                    let body:Option<Vec<u8>>=controls.query_row([hash],|row|row.get(0)).optional()?;
+                    if let Some(body)=body {super::message_pages::put_object(&tx,hash,&body)?;}
+                }
                 let mut statement = source.prepare("SELECT o.hash,o.body FROM message_page_objects o JOIN message_page_verified_objects v ON v.hash=o.hash")?;
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
                     cancelled(probe)?;
-                    super::message_pages::put_object(&tx,&row.get::<_,String>(0)?,&row.get::<_,Vec<u8>>(1)?)?;
+                    let hash:String=row.get(0)?;
+                    if inventory.controls.contains_key(&hash) {continue;}
+                    super::message_pages::put_object(&tx,&hash,&row.get::<_,Vec<u8>>(1)?)?;
                 }
                 cancelled(probe)?;
                 tx.commit()?;
@@ -1737,7 +1884,7 @@ mod lww_inline_root_tests {
             let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let observed = steps.clone();
             connection.progress_handler(1, Some(move || { observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); false })).unwrap();
-            let roots = collect_lww_asset_roots(&connection).unwrap();
+            let roots = collect_lww_asset_roots(&connection, None).unwrap();
             connection.progress_handler(0, None::<fn() -> bool>).unwrap();
             assert!(!roots.retain_all_objects);
             assert_eq!(roots.object_hashes, [body, dependency].into_iter().collect());
@@ -1776,7 +1923,7 @@ mod lww_inline_root_tests {
             let expected = decoded_value_roots(&value);
             reached.0 += usize::from(!expected.legacy_asset_keys.is_empty());
             reached.1 += usize::from(expected.retain_all_objects);
-            assert_eq!(collect_lww_asset_roots(&connection).unwrap(), expected, "{value:?}");
+            assert_eq!(collect_lww_asset_roots(&connection, None).unwrap(), expected, "{value:?}");
         }
         assert_eq!(reached, (4, 2), "the cases must reach both outcomes");
     }

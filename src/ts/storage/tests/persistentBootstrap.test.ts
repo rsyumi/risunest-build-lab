@@ -66,9 +66,11 @@ describe('bootstrapPersistentDatabase', () => {
         persistent.plugins = [plugin('2.1', true)]
         persistent.streamingDisplayOptimizationMode = 'off'
         const harness = await createPersistentStoreHarness(persistent)
+        const readRoot = harness.spy('readRoot')
+        const readRevision = vi.fn(async () => harness.revision)
 
         const result = await bootstrapPersistentDatabase({
-            store: harness.store,
+            store: Object.assign(harness.store, { readRevision }),
             prepareDatabase: async (database) =>
                 preparedResult(database, database),
         })
@@ -77,6 +79,9 @@ describe('bootstrapPersistentDatabase', () => {
             database: persistent,
             revision: harness.revision,
         })
+        // The revision check after preparation does not read the whole root again.
+        expect(readRoot).toHaveBeenCalledOnce()
+        expect(readRevision).toHaveBeenCalledOnce()
         expect((await harness.store.readRoot()).revision).toBe(harness.revision)
     })
 

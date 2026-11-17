@@ -15,11 +15,13 @@
     let historyLimitEnabled = $state(initialSettings.generationHistoryLimitEnabled)
     let storedHistoryLimitMultiplier = initialSettings.generationHistoryLimitMultiplier
     let historyLimitMultiplier = $state(initialSettings.generationHistoryLimitMultiplier)
+    let pluginOutputCurrentChatOnly = $state(initialSettings.pluginOutputCurrentChatOnly)
     const unsubscribe = subscribeDeviceSettings((settings) => {
         profile = settings.performanceProfile
         historyLimitEnabled = settings.generationHistoryLimitEnabled
         storedHistoryLimitMultiplier = settings.generationHistoryLimitMultiplier
         historyLimitMultiplier = settings.generationHistoryLimitMultiplier
+        pluginOutputCurrentChatOnly = settings.pluginOutputCurrentChatOnly
     })
 
     onDestroy(unsubscribe)
@@ -41,6 +43,12 @@
         if (next === historyLimitEnabled) return
         historyLimitEnabled = next
         updateDeviceSettings({ generationHistoryLimitEnabled: next })
+    }
+
+    function setPluginOutputCurrentChatOnly(next: boolean) {
+        if (next === pluginOutputCurrentChatOnly) return
+        pluginOutputCurrentChatOnly = next
+        updateDeviceSettings({ pluginOutputCurrentChatOnly: next })
     }
 
     function commitHistoryLimitMultiplier() {
@@ -76,4 +84,7 @@
             />
         </SettingRow>
     {/if}
+    <SettingRow inline label={language.risuNest.perf.pluginOutputCurrentChatOnly} help={language.risuNest.perf.pluginOutputCurrentChatOnlyHelp}>
+        <SettingToggle checked={pluginOutputCurrentChatOnly} onchange={setPluginOutputCurrentChatOnly} label={language.risuNest.perf.pluginOutputCurrentChatOnly} />
+    </SettingRow>
 </SettingGroup>

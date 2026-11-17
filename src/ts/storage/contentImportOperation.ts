@@ -1,3 +1,4 @@
+import { joinAbortSignals } from '../abortSignals'
 import { runSharedNativeFileOperation } from './nativeFileJobManager'
 import {
     syntheticNativeFileJobStatus,
@@ -17,10 +18,13 @@ export function runContentImport<T>(
         `content:${name}`,
         async (context) => {
             context.setSource({ name })
-            const signal = options.signal
-                ? AbortSignal.any([options.signal, context.signal])
-                : context.signal
-            return operation({ ...options, signal, onStatus: context.onStatus })
+            if (!options.signal) return operation({ ...options, signal: context.signal, onStatus: context.onStatus })
+            const joined = joinAbortSignals([options.signal, context.signal])
+            try {
+                return await operation({ ...options, signal: joined.signal, onStatus: context.onStatus })
+            } finally {
+                joined.dispose()
+            }
         },
         { presentation: 'dialog', format: 'content' },
     )

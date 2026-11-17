@@ -1,6 +1,6 @@
 import { runSharedNativeFileOperation } from '../nativeFileJobManager'
 import { invoke } from '@tauri-apps/api/core'
-import { runWithMobileBackgroundTask, measuredTaskPercent } from '../../mobileBackgroundTask'
+import { runWithDeferredMobileBackgroundTask, measuredTaskPercent } from '../../mobileBackgroundTask'
 import type { AccountStorage } from '../accountStorage'
 import { listNativeOfficialPublicationJobs } from '../nativeFileJobRecovery'
 import {
@@ -118,7 +118,7 @@ export function createNativeOfficialPublicationRecovery(
                     reconcileOnce(false, { signal: context.signal, onStatus: context.onStatus }),
                     { presentation: 'dialog', format: 'library-backup', userInitiated: false },
                 )
-                : runWithMobileBackgroundTask('sync', task => reconcileOnce(false, {
+                : runWithDeferredMobileBackgroundTask('sync', task => reconcileOnce(false, {
                     signal: task.signal,
                     onStatus: status => task.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes)),
                 }))

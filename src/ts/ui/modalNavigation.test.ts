@@ -4,6 +4,7 @@ vi.mock('../stores.svelte', async () => ({ alertStore: (await import('../alertQu
 import { alertStore } from '../stores.svelte'
 import { get } from 'svelte/store'
 import { modalNavigation, backNavigationLayer, handleRootBack } from './modalNavigation'
+import { installAppLockInput, registerAppLockSurface, setAppLockInputBlocked } from '../appLock/input'
 
 const rootBack = () => {
     const event = new Event('risunest-root-back', { cancelable: true })
@@ -12,6 +13,8 @@ const rootBack = () => {
 }
 
 afterEach(async () => {
+    setAppLockInputBlocked(false)
+    registerAppLockSurface(null)
     alertStore.set({ type: "none", msg: "" })
     await Promise.resolve()
     history.replaceState(null, '')
@@ -314,4 +317,43 @@ it('lets a Back-only layer close on Back while Escape stays with its content', a
     await Promise.resolve()
     expect(go).not.toHaveBeenCalled()
     action.destroy()
+})
+
+it('keeps retained dialogs unchanged when keyboard input originates inside the lock screen', async () => {
+    const uninstall = installAppLockInput()
+    const modal = document.createElement('div')
+    const gate = document.createElement('div')
+    gate.tabIndex = -1
+    const button = document.createElement('button')
+    gate.append(button)
+    document.body.append(modal, gate)
+    let closed = false
+    let digits = ''
+    const action = modalNavigation(modal, { close: () => { closed = true } })
+    await Promise.resolve()
+    const confirmation = alertStore.open({ type: 'ask', msg: 'synthetic retained confirmation' })
+    registerAppLockSurface({ element: gate, keydown: event => {
+        if (/^[0-9]$/.test(event.key)) { digits += event.key; event.preventDefault() }
+    } })
+    setAppLockInputBlocked(true)
+    button.focus()
+    for (const key of ['1', '2', 'Escape']) button.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    expect(digits).toBe('12')
+    expect(closed).toBe(false)
+    expect(get(alertStore).type).toBe('ask')
+    expect(rootBack()).toBe(true)
+    const retainedHistory = history.state
+    history.replaceState(null, '')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(closed).toBe(false)
+    expect(get(alertStore).type).toBe('ask')
+    history.replaceState(retainedHistory, '')
+    setAppLockInputBlocked(false)
+    button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await expect(confirmation).resolves.toBe('')
+    button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    expect(closed).toBe(true)
+    history.replaceState(null, '')
+    action.destroy()
+    uninstall()
 })

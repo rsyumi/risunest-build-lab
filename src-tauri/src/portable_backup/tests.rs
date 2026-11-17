@@ -161,6 +161,47 @@ fn independent_backup_reads_server_held_body_without_source_promotion_or_outbox_
     assert_eq!(copied,body);
 }
 
+#[test]
+fn capture_pins_an_owner_manifest_so_the_objects_it_lists_stay_protected() {
+    use crate::asset_repository::job_pins::{CasJobKind, CasJobOwner, CasObjectRole, CasReleaseOutcome, DurableCasJob};
+    use crate::asset_repository::owner_manifest_codec::{encode_owner_manifest, OwnerManifestEntry};
+    use crate::persistent_store::{AssetOwnerHead, AssetOwnerLocator, WorkingSetCommit};
+    let (root, mut store) = crate::server_sync::lww_tests::local();
+    let cas = crate::asset_repository::PayloadCas::new(root.path()).unwrap();
+    let mut import = DurableCasJob::begin(root.path(), "synthetic-owner-import", CasJobKind::CardOrModuleContentImport, CasJobOwner::for_test(), 1).unwrap();
+    let asset = import.prepare_reader(&cas, &mut &b"synthetic owned asset"[..], CasObjectRole::DirectObject).unwrap().content_hash;
+    let manifest_bytes = encode_owner_manifest(&[OwnerManifestEntry {
+        tuple: ["extra".into(), "assets/synthetic-owned.png".into(), "png".into()],
+        payload_hash: Some(hex::decode(&asset).unwrap().try_into().unwrap()),
+    }]).unwrap();
+    let manifest = import.prepare_reader(&cas, &mut manifest_bytes.as_slice(), CasObjectRole::OwnerManifest).unwrap().content_hash;
+    import.seal(&mut store, 2).unwrap();
+    store.commit(&WorkingSetCommit {
+        expected_revision: store.revision().unwrap(),
+        add_character: Some(serde_json::json!({"chaId":"synthetic-owner","type":"character","name":"Synthetic owner",
+            "additionalAssets":[["extra","assets/synthetic-owned.png","png"]],
+            "chats":[{"id":"owner-chat","name":"Chat","message":[{"role":"user","data":"synthetic","chatId":"owner-message"}]}]})),
+        asset_owner_heads: Some(vec![AssetOwnerHead::present(
+            AssetOwnerLocator::CharacterAdditionalAssets { character_id: "synthetic-owner".into() },
+            manifest.clone(),
+            1,
+        )]),
+        ..Default::default()
+    }).unwrap();
+    import.release(CasReleaseOutcome::Committed).unwrap();
+
+    let revision = store.revision().unwrap();
+    let job = tempfile::tempdir_in(root.path()).unwrap();
+    let mut pins = DurableCasJob::begin(root.path(), "synthetic-owner-backup", CasJobKind::OfficialPublicationOrExportPreparation, CasJobOwner::for_test(), 0).unwrap();
+    drop(capture_library(&mut store, revision, job.path(), &mut pins, false, &Never, "synthetic").unwrap());
+    pins.seal(&mut store, 3).unwrap();
+    let roots = pins.root_set().unwrap();
+    assert!(roots.manifest_hashes.contains(&manifest), "the manifest pin must also protect what it lists");
+    assert!(roots.object_hashes.contains(&asset));
+    assert!(!roots.object_hashes.contains(&manifest));
+    pins.release(CasReleaseOutcome::Aborted).unwrap();
+}
+
 /// A store with one asset alias whose body was removed from this device.
 fn store_without_local_body() -> (tempfile::TempDir, crate::persistent_store::PersistentStore, String, u64) {
     use crate::server_sync::lww_tests::{local, put_asset};

@@ -25,6 +25,9 @@ copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Tests/PortableSource
 const fileState = join(sources, 'NativeFileState.swift')
 copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Sources/NativeFileState.swift', import.meta.url), fileState)
 copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Tests/NativeFileStateTests.swift', import.meta.url), join(tests, 'NativeFileStateTests.swift'))
+const appLockState = join(sources, 'AppLockState.swift')
+copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Sources/AppLockState.swift', import.meta.url), appLockState)
+copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Tests/AppLockStateTests.swift', import.meta.url), join(tests, 'AppLockStateTests.swift'))
 writeFileSync(join(root, 'Package.swift'), `// swift-tools-version:5.3
 import PackageDescription
 let package = Package(
@@ -58,6 +61,39 @@ function run(filter, fails = false, cleanupInvariant = false) {
 try {
     run('PortableSourceCustodyTests')
     run('NativeFileStateTests')
+    run('AppLockStateTests')
+    const originalAppLockState = readFileSync(appLockState, 'utf8')
+    for (const [before, after, test] of [
+        ['setHidden(content, true)', 'setHidden(content, false)', 'testNativeCoverHidesContentUntilRestoringItsPreviousAccessibility'],
+        ['restoreContent = { setHidden($0, previous) }', 'restoreContent = { setHidden($0, false) }', 'testNativeCoverHidesContentUntilRestoringItsPreviousAccessibility'],
+        ['guard self.content !== content else { return }', '', 'testNativeCoverHidesContentUntilRestoringItsPreviousAccessibility'],
+        ['deinit { restore() }', 'deinit {}', 'testReplacingAndReleasingNativeCoverRestoresTheCoveredContent'],
+    ]) {
+        assert.equal(originalAppLockState.split(before).length, 2)
+        writeFileSync(appLockState, originalAppLockState.replace(before, after))
+        try { run(`AppLockStateTests/${test}`, true) }
+        finally { writeFileSync(appLockState, originalAppLockState) }
+    }
+    const epochGuard = 'guard active && epoch == renderedEpoch && (locked || !policy.gateRequired) else { return false }'
+    assert.equal(originalAppLockState.split(epochGuard).length, 2)
+    writeFileSync(appLockState, originalAppLockState.replace(epochGuard, 'guard active && (locked || !policy.gateRequired) else { return false }'))
+    try { run('AppLockStateTests/testDepartureAndReturnKeepCoverUntilCurrentFrameIsReady', true) }
+    finally { writeFileSync(appLockState, originalAppLockState) }
+    writeFileSync(appLockState, originalAppLockState.replace(' && (locked || !policy.gateRequired)', ''))
+    try { run('AppLockStateTests/testUnlockedFrameCannotReplaceARequiredGateInTheSameEpoch', true) }
+    finally { writeFileSync(appLockState, originalAppLockState) }
+    for (const [before, after] of [
+        ['guard active, epoch == coveredEpoch, awaitingReady,', 'guard epoch == coveredEpoch, awaitingReady,'],
+        ['guard active, epoch == coveredEpoch, awaitingReady,', 'guard active, awaitingReady,'],
+        ['guard active, epoch == coveredEpoch, awaitingReady,', 'guard active, epoch == coveredEpoch,'],
+        ['!policy.installsReturnCover, !policy.gateRequired else { return false }', '!policy.gateRequired else { return false }'],
+        ['!policy.installsReturnCover, !policy.gateRequired else { return false }', '!policy.installsReturnCover else { return false }'],
+    ]) {
+        assert.equal(originalAppLockState.split(before).length, 2)
+        writeFileSync(appLockState, originalAppLockState.replace(before, after))
+        try { run('AppLockStateTests/testUnconfirmedReleaseEndsOnlyCoversWithoutALockDecision', true) }
+        finally { writeFileSync(appLockState, originalAppLockState) }
+    }
     const original = readFileSync(source, 'utf8')
     for (const [before, after, test, occurrence = 0, count = 1] of [
         ['source.copyCancelled = true', 'source.copyCancelled = false', 'testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles', 0, 2],

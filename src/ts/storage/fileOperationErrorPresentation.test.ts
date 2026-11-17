@@ -8,7 +8,7 @@ vi.mock('./nativeFileJobs', () => ({ NativeFileJobActivationCommittedError: clas
 vi.mock('./risuSaveFileRoute', () => ({ alertPartialDestinationWarning: mocks.partial, hasPartialDestinationWarning: () => false }))
 import { nativeFileOperationOutcome, NativeFileOperationBusyError } from './nativeFileJobManager'
 import { NativeFileJobActivationCommittedError } from './nativeFileJobs'
-import { presentFileOperationError } from './fileOperationErrorPresentation'
+import { presentContentExportError, presentFileOperationError } from './fileOperationErrorPresentation'
 beforeEach(() => { nativeFileOperationOutcome.set(null); vi.clearAllMocks() })
 it.each(['cancelled', 'failed', 'succeeded'] as const)('leaves a fresh managed %s outcome to its dialog', state => {
     nativeFileOperationOutcome.set({ kind: 'import', startedAt: 20, state } as any)
@@ -39,4 +39,24 @@ it('distinguishes committed activation from revision refusal', () => {
     expect(mocks.alert).toHaveBeenLastCalledWith(language.risuSaveImportCommittedRefreshFailed)
     presentFileOperationError('import', { code: 'revision-conflict' }, 0)
     expect(mocks.alert).toHaveBeenLastCalledWith(language.risuSaveRevisionConflict)
+})
+it.each([
+    ['library-operation-busy', 'reasonBusy'], ['server-sync-busy', 'reasonBusy'], ['library-file-operation-busy', 'reasonBusy'],
+] as const)('presents a content export refused with %s without backup and restore copy', (code, key) => {
+    presentContentExportError(Object.assign(new Error('Another library operation is running'), { code }), 0)
+    expect(mocks.alert).toHaveBeenCalledExactlyOnceWith(language.risuNest.importDialog[key])
+})
+it('presents content export admission refusals and keeps other failures as they are', () => {
+    presentContentExportError(new Error('library-file-operation-busy'), 0)
+    expect(mocks.alert).toHaveBeenLastCalledWith(language.risuNest.importDialog.reasonBusy)
+    presentContentExportError(new NativeFileOperationBusyError(), 0)
+    expect(mocks.alert).toHaveBeenLastCalledWith(language.risuNest.backup.fileBusy)
+    const failure = Object.assign(new Error('synthetic'), { code: 'asset-missing' })
+    presentContentExportError(failure, 0)
+    expect(mocks.alert).toHaveBeenLastCalledWith(failure)
+    mocks.alert.mockClear()
+    presentContentExportError(new DOMException('cancel', 'AbortError'), 0)
+    nativeFileOperationOutcome.set({ kind: 'export', startedAt: 20, state: 'failed' } as any)
+    presentContentExportError(failure, 10)
+    expect(mocks.alert).not.toHaveBeenCalled()
 })

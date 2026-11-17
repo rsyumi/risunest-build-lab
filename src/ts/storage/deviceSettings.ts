@@ -18,7 +18,14 @@ export interface RisuNestDeviceSettings {
     generationHistoryLimitEnabled: boolean
     generationHistoryLimitMultiplier: number
     messageSendKey: MessageSendKey
+    pluginOutputCurrentChatOnly: boolean
+    automaticSnapshotsEnabled: boolean
+    /** Sent with every snapshot request; see `KeepCount` in Rust. */
+    snapshotKeepCount: number
 }
+
+/** The most snapshots this device keeps, matching the native rotation limit. */
+export const MAX_SNAPSHOT_KEEP_COUNT = 8
 
 const storageKey = 'risuNestDeviceSettings'
 const exclusionsKey = 'risuNestStartupExclusions'
@@ -31,7 +38,12 @@ const defaults: RisuNestDeviceSettings = {
     generationHistoryLimitEnabled: false,
     generationHistoryLimitMultiplier: 2,
     messageSendKey: 'enter',
+    pluginOutputCurrentChatOnly: false,
+    automaticSnapshotsEnabled: true,
+    snapshotKeepCount: MAX_SNAPSHOT_KEEP_COUNT,
 }
+
+const addedFields = ['pluginOutputCurrentChatOnly', 'automaticSnapshotsEnabled', 'snapshotKeepCount'] as const
 
 function snapshot(settings: RisuNestDeviceSettings): RisuNestDeviceSettings {
     return { ...settings }
@@ -50,7 +62,7 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
     if (!value || typeof value !== 'object') return false
     const settings = value as Record<string, unknown>
     return (
-        Object.keys(settings).length === 7 &&
+        Object.keys(settings).length === 10 &&
         settings.schema === defaults.schema &&
         (settings.performanceProfile === 'normal' ||
             settings.performanceProfile === 'low-spec') &&
@@ -62,8 +74,22 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
         settings.generationHistoryLimitMultiplier >= 1 &&
         (settings.messageSendKey === 'enter' ||
             settings.messageSendKey === 'ctrl-shift-enter' ||
-            settings.messageSendKey === 'button')
+            settings.messageSendKey === 'button') &&
+        typeof settings.pluginOutputCurrentChatOnly === 'boolean' &&
+        typeof settings.automaticSnapshotsEnabled === 'boolean' &&
+        Number.isInteger(settings.snapshotKeepCount) &&
+        (settings.snapshotKeepCount as number) >= 1 &&
+        (settings.snapshotKeepCount as number) <= MAX_SNAPSHOT_KEEP_COUNT
     )
+}
+
+// Settings stored before a field existed keep their values and take the
+// field's default.
+function withAddedDefaults(value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+    const missing = addedFields.filter((field) => !(field in value))
+    if (missing.length === 0) return value
+    return { ...value, ...Object.fromEntries(missing.map((field) => [field, defaults[field]])) }
 }
 
 function readSettings(markers: DeviceMarkerStorage): RisuNestDeviceSettings {
@@ -83,8 +109,9 @@ function readSettings(markers: DeviceMarkerStorage): RisuNestDeviceSettings {
         return snapshot(defaults)
     }
 
-    return isValidSettings(parsed)
-        ? snapshot(parsed)
+    const normalized = withAddedDefaults(parsed)
+    return isValidSettings(normalized)
+        ? snapshot(normalized)
         : snapshot(defaults)
 }
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onDestroy, onMount } from 'svelte'
+    import { onDestroy, onMount, tick, untrack } from 'svelte'
     import ConnectionSettingsDialog from './ConnectionSettingsDialog.svelte'
     import { runWithMobileBackgroundTask, measuredTaskPercent } from 'src/ts/mobileBackgroundTask'
     import TextInput from 'src/lib/UI/GUI/TextInput.svelte'
@@ -19,18 +19,20 @@
     import { hasLibraryCharacters } from 'src/ts/storage/libraryCharacters'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
-    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
-    import { externalErrorLabel, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
+    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwCatchUp, subscribeExternalLwwFailures, supportsExternalLwwNewDevice, switchExternalLwwLibraryFormat } from 'src/ts/storage/sync/external/lwwProduction'
+    import { externalErrorLabel, externalFormatCode, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { language } from 'src/lang'
-    import { externalJobIsActive, externalJobIsPaused, externalJobProgress, mergeExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
+    import { externalJobFixedOn, externalJobIsActive, externalJobIsPaused, externalJobProgress, externalNeedsUnlock, externalRemedyConnection, externalRenewalConnection, mergeExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
+    import { externalRenewalOpen, externalRenewalRequest } from 'src/ts/setting/externalRenewalRequest'
     import {
         refreshExternalStorageProductionState,
         requestExternalStorageNow,
         resumeExternalStorageJob,
         requestExternalStorageRestore,
         requestExternalStorageDeleteHistory,
+        startExternalStorageMaintenanceJob,
         stopExternalStorageRestore,
     } from 'src/ts/storage/sync/external/production'
     import type {
@@ -62,14 +64,18 @@
     let adding = $state(false)
     let addressConnection = $state<ExternalConnectionSummary | undefined>()
     let renewalConnection = $state<ExternalConnectionSummary | undefined>()
+    /** A finished renewal until the state read after it, so a notice for the stop it cleared does not flash back. */
+    let renewalSettling = $state(false)
     let unlockConnection = $state<ExternalConnectionSummary | undefined>()
     let unlockKey = $state('')
     let destroyed = false
     let stopJobEvents: (() => void) | undefined
     let stopSyncFailures: (() => void) | undefined
+    let stopSyncCatchUp: (() => void) | undefined
     let stopProgress: (() => void) | undefined
     let progress = $state<ReadonlyMap<string, ExternalOperationProgress>>(new Map())
     let syncFailures = $state<ReadonlyMap<string, unknown>>(new Map())
+    let syncCatchingUp = $state<ReadonlySet<string>>(new Set())
     let busy = $state(false)
     /** Which action is running, so only the button that started it shows a spinner. */
     let activeAction = $state('')
@@ -82,6 +88,8 @@
     let historyError = $state<Record<string, string>>({})
     /** Cards whose history was read once, so a failing remote is not read again on every poll. */
     const historyRequested = new Set<string>()
+    /** Connections asked for a fresh history read while one ran. */
+    const historyReread = new Set<string>()
     let historyCursor = $state<Record<string, string | undefined>>({})
     let historyLoading = $state<Record<string, boolean>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
@@ -137,6 +145,23 @@
         busy = true
         try { await requestExternalLwwNow(connection.id) }
         catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally {
+            await refresh(true)
+            busy = false
+        }
+    }
+    async function switchFormat(connection: ExternalConnectionSummary): Promise<void> {
+        const lww = language.lwwSync
+        const choice = await alertCheckboxConfirm({ title: lww.formatSwitchTitle, description: lww.formatSwitchDescription, checkboxLabel: lww.formatSwitchAcknowledge, actionLabel: lww.formatSwitch, cancelLabel: strings.cancel, requireChecked: true })
+        if (!choice.confirmed) return
+        busy = true
+        try {
+            // A library already above this app's level stops sync with its own guidance, which the sync attempt records.
+            try { await switchExternalLwwLibraryFormat(connection.id) } catch (reason) {
+                if (externalFormatCode(reason) !== 'app-update-required') { error = lww.formatSwitchFailed; return }
+            }
+            await requestExternalLwwNow(connection.id)
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
         finally {
             await refresh(true)
             busy = false
@@ -251,21 +276,58 @@
         }, 1200)
     }
 
+    $effect(() => {
+        const connectionId = $externalRenewalRequest
+        if (!connectionId || !storageState || busy) return
+        untrack(() => {
+            externalRenewalRequest.set(null)
+            const connection = storageState?.connections.find(item => item.id === connectionId)
+            if (!connection) return
+            // A form already open keeps what it holds; the request only brings it into view.
+            if (!adding && !addressConnection && !renewalConnection) renewalConnection = connection
+            void tick().then(() => document.getElementById('risunest-external-storage')?.scrollIntoView({ block: 'start' }))
+        })
+    })
+
+    $effect(() => {
+        if (!renewalConnection && !renewalSettling) return
+        externalRenewalOpen.set(true)
+        return () => externalRenewalOpen.set(false)
+    })
+
+    function closeForm(): void {
+        adding = false
+        renewalConnection = undefined
+        addressConnection = undefined
+    }
+
     async function onConnected(result: ExternalConnectionResult): Promise<void> {
         busy = false
         adding = false
         const addressChanged = addressConnection !== undefined
         addressConnection = undefined
         const renewed = renewalConnection !== undefined
+        renewalSettling = renewed
         renewalConnection = undefined
         if (result.recovery) recoveryKey = result.recovery.key
-        await refreshExternalStorageProductionState()
-        await refresh()
+        // The history read with the old sign-in or address is read again with the new one.
+        if (renewed || addressChanged) historyRequested.delete(result.connection.id)
+        try {
+            await refreshExternalStorageProductionState()
+            await refresh()
+        } finally {
+            renewalSettling = false
+        }
         schedulePoll()
         if (addressChanged) return
         if (renewed) {
-            const job = activeJob(result.connection)
-            if (job && externalJobIsPaused(job)) await resumeJob(result.connection, job)
+            // Sync stopped on the failed sign-in; it runs now instead of at its next retry.
+            const selection = storageState?.selection
+            if (selection?.kind === 'external' && selection.connectionId === result.connection.id) {
+                void requestExternalLwwNow(result.connection.id).catch(() => {}).finally(() => refresh(true))
+            }
+            // A resumed backup runs until it ends, so the sync above does not wait for it.
+            await resumeJobsWaitingOn(result.connection.id)
         } else if (result.connection.purpose === 'sync') {
             if (recoveryKey) pendingSyncStart = result.connection
             else await startSync(result.connection)
@@ -343,7 +405,7 @@
                 schedulePoll(true)
                 await operation
             } else {
-                const started = await bridge.startJob({
+                const started = await startExternalStorageMaintenanceJob({
                     connectionId: connection.id,
                     kind: job,
                     reason: 'manual',
@@ -462,12 +524,21 @@
             await bridge.unlockConnection(connection.id, unlockKey)
             unlockKey = ''
             unlockConnection = undefined
+            // The history read while the key was locked is read again.
+            historyRequested.delete(connection.id)
             await refreshExternalStorageProductionState()
             await refresh(true)
         } catch (reason) { error = externalErrorMessage(strings, reason) }
         finally { busy = false }
-        const job = activeJob(connection)
-        if (!unlockConnection && job && externalJobIsPaused(job)) await resumeJob(connection, job)
+        if (!unlockConnection) await resumeJobsWaitingOn(connection.id)
+    }
+
+    /** Resumes the paused jobs this connection's sign-in or key clears: its own, and those that read through it. */
+    async function resumeJobsWaitingOn(connectionId: string): Promise<void> {
+        for (const connection of storageState?.connections ?? []) {
+            const job = activeJob(connection)
+            if (job && externalJobIsPaused(job) && externalJobFixedOn(job) === connectionId) await resumeJob(connection, job)
+        }
     }
 
 
@@ -517,7 +588,11 @@
 
 
     async function loadHistory(connection: ExternalConnectionSummary, append: boolean): Promise<void> {
-        if (historyLoading[connection.id]) return
+        if (historyLoading[connection.id]) {
+            // The read running may predate what this one follows, such as a renewed sign-in, so it reads once more.
+            if (!append) historyReread.add(connection.id)
+            return
+        }
         historyLoading[connection.id] = true
         try {
             let items = append ? history[connection.id] ?? [] : []
@@ -539,6 +614,8 @@
             historyError[connection.id] = externalErrorMessage(strings, reason)
         } finally {
             historyLoading[connection.id] = false
+            const latest = historyReread.delete(connection.id) ? storageState?.connections.find(item => item.id === connection.id) : undefined
+            if (latest) void loadHistory(latest, false)
         }
     }
 
@@ -727,6 +804,15 @@
         return strings.cancelled
     }
 
+    /** A job's sentence on its card, naming the connection to sign in to or unlock when the job waits on another one. */
+    function jobLabelFor(connection: ExternalConnectionSummary, job: ExternalJobSummary): string {
+        const fixedOn = externalJobFixedOn(job)
+        if (fixedOn === connection.id) return jobLabel(job)
+        const other = storageState?.connections.find(item => item.id === fixedOn)
+        if (!other) return strings.failed
+        return (job.error?.action === 'unlock-key' ? strings.unlockKeyOther : strings.reauthenticateOther).replace('{0}', externalConnectionTitle(strings, other))
+    }
+
     function errorLabel(value?: ExternalJobSummary['error']): string {
         return externalErrorLabel(strings, value)
     }
@@ -764,9 +850,18 @@
         return connection.purpose === 'sync' && selection?.kind === 'external' && selection.connectionId === connection.id && !syncRunning[connection.id]
     }
 
+    /** The sync failure a card shows: one that this connection's sign-in or recovery key clears goes on this card, even
+     * when another connection's sync hit it, and on no other. */
+    function syncFailureFor(connectionId: string): unknown {
+        const own = syncFailures.get(connectionId)
+        if (own !== undefined && [undefined, connectionId].includes(externalRemedyConnection(own, connectionId))) return own
+        for (const [owner, failure] of syncFailures) if (owner !== connectionId && externalRemedyConnection(failure, owner) === connectionId) return failure
+        return undefined
+    }
+
     // The status button shows the same badge, so the mapping lives with the sync status view.
     function connectionBadge(connection: ExternalConnectionSummary) {
-        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection))
+        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection), syncCatchingUp.has(connection.id), syncFailureFor(connection.id))
     }
 
     // A backup registers each pack as it seals it, so its upload has no total until it ends.
@@ -820,6 +915,7 @@
 
     onMount(async () => {
         stopSyncFailures = subscribeExternalLwwFailures(value => syncFailures = value)
+        stopSyncCatchUp = subscribeExternalLwwCatchUp(value => syncCatchingUp = value)
         stopProgress = subscribeExternalProgress(value => {
             const completed = [...value].some(([key, operation]) => operation.visible && operation.state === 'complete' && progress.get(key)?.state === 'running')
             progress = value
@@ -845,6 +941,7 @@
         clearTimeout(pollTimer)
         stopJobEvents?.()
         stopSyncFailures?.()
+        stopSyncCatchUp?.()
         stopProgress?.()
         stopBindingChanges?.()
         if (exportRun) void bridge.cancelExport(exportRun.id).catch(() => {})
@@ -863,7 +960,7 @@
     {#if !storageState && busy}<p class="placeholder">{strings.loading}</p>
     {:else if storageState && !storageState.supported}<p class="placeholder">{strings.unsupported}</p>
     {:else if adding || renewalConnection || addressConnection}
-        <ConnectionForm {addressConnection} {renewalConnection} {strings} onconnected={onConnected} oncancel={() => { adding = false; renewalConnection = undefined; addressConnection = undefined }} onbusychange={value => busy = value} />
+        <ConnectionForm {addressConnection} {renewalConnection} {strings} onconnected={onConnected} oncancel={closeForm} onbusychange={value => busy = value} />
     {:else if storageState}
         {#if !storageState.connections.length}
             <div class="blank">
@@ -875,10 +972,12 @@
             {@const job = activeJob(connection)}
             {@const ProviderIcon = providerIcon(connection.providerId)}
             {@const badge = connectionBadge(connection)}
-            {@const renewable = connection.status === 'reauth-required' || job?.error?.action === 'reauthenticate'}
-            {@const lockable = connection.status === 'key-locked' || job?.error?.action === 'unlock-key'}
+            {@const failure = syncFailureFor(connection.id)}
+            {@const ownError = !job || externalJobFixedOn(job) === connection.id}
+            {@const renewable = connection.status === 'reauth-required' || (ownError && job?.error?.action === 'reauthenticate') || externalRenewalConnection(failure, connection.id) !== undefined}
+            {@const lockable = connection.status === 'key-locked' || (ownError && job?.error?.action === 'unlock-key') || externalNeedsUnlock(failure)}
             {@const recheckable = job?.state === 'uncertain' && job.kind === 'backup'}
-            {@const retryable = !!job && externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)}
+            {@const retryable = !!job && externalJobIsPaused(job) && (!ownError || ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '')) && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)}
             {@const remedy = renewable || lockable || recheckable || retryable}
             {@const syncTarget = storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id}
             {@const syncing = syncTarget && !!syncRunning[connection.id]}
@@ -896,16 +995,18 @@
                 </header>
 
                 {#if connection.lastError && !restoreReportsError(connection, job)}<SettingNotice text={errorLabel(connection.lastError)} />{/if}
-                {#if syncFailures.has(connection.id)}
-                    {@const failure = syncFailures.get(connection.id)}
+                {#if failure !== undefined}
                     <SettingNotice role="status" text={externalSyncFailureText(strings, failure)} />
+                    {#if syncTarget && externalFormatCode(failure) === 'library-format-switch-required'}
+                        <div class="actions"><SettingButton disabled={busy} onclick={() => void switchFormat(connection)}>{language.lwwSync.formatSwitch}</SettingButton></div>
+                    {/if}
                     {#if ['clockSkew', 'corrupt'].includes(externalErrorKind(failure) ?? '') && supportsExternalLwwNewDevice(connection.id)}
                         <div class="actions">
                             <BindingTargetSwitch target={{kind:'external',connectionId:connection.id}} options={{mode:'new-device'}} label={language.lwwSync.newDeviceAction} onBound={() => refreshExternalStorageProductionState().then(() => refresh())} onError={reason => error = externalErrorMessage(strings, reason)} />
                         </div>
                     {/if}
                 {/if}
-                {#if job && (!externalJobIsActive(job) || externalJobIsPaused(job)) && job.state !== 'succeeded' && !connection.lastError && !unfinishedRestore(job)}<SettingNotice role="status" tone={job.state === 'cancelled' && !job.stoppedByApp ? 'info' : 'danger'} text={jobLabel(job)} />{/if}
+                {#if job && (!externalJobIsActive(job) || externalJobIsPaused(job)) && job.state !== 'succeeded' && !connection.lastError && !unfinishedRestore(job)}<SettingNotice role="status" tone={job.state === 'cancelled' && !job.stoppedByApp ? 'info' : 'danger'} text={jobLabelFor(connection, job)} />{/if}
 
                 {#if unfinishedRestore(job)}
                     <SettingNotice role="status" text={strings.restoreUnfinished} />
@@ -921,7 +1022,7 @@
                     </dl>
                 {/if}
                 {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="note">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
-                <ExternalTransferProgress connectionId={connection.id} {strings} {job} remaining={remaining[connection.id]}>
+                <ExternalTransferProgress connectionId={connection.id} {strings} {job} remaining={remaining[connection.id]} catchingUp={syncCatchingUp.has(connection.id)}>
                     {#snippet exportActions()}
                         {#if exportRun?.connectionId === connection.id}
                             <SettingButton variant="secondary" size="sm" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton>
@@ -1123,11 +1224,11 @@
             class="dialog outline-hidden"
         >
             <h3 id="external-recovery-title" class="text-lg font-bold">{strings.recovery}</h3>
-            <p class="text-sm text-textcolor2">{strings.recoveryNotice}</p>
+            <p class="text-sm text-subtext">{strings.recoveryNotice}</p>
             <label class="block text-sm">
                 <span class="font-medium">{strings.recoveryCode}</span>
                 <input readonly class="mt-1 w-full select-all rounded-md border border-darkborderc bg-darkbg p-2 font-mono shadow-xs" value={recoveryKey} />
-                <span class="mt-1 block text-[13px] text-textcolor2">{strings.recoveryCodeHelp}</span>
+                <span class="mt-1 block text-[13px] text-subtext">{strings.recoveryCodeHelp}</span>
             </label>
             <div class="actions"><SettingButton onclick={closeRecoveryKey}>{strings.closeRecovery}</SettingButton></div>
         </div>
@@ -1145,7 +1246,7 @@
     .placeholder {
         padding: 1rem;
         font-size: 14px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .blank {
         display: grid;
@@ -1162,14 +1263,14 @@
         border: 1px solid var(--risu-theme-darkborderc);
         border-radius: 50%;
         background: var(--risu-theme-bgcolor);
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .blank p {
         max-width: 46ch;
         margin: 0;
         font-size: 13px;
         line-height: 1.55;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .card {
         display: grid;
@@ -1205,7 +1306,7 @@
         border: 1px solid var(--risu-theme-darkborderc);
         border-radius: 0.5rem;
         background: var(--risu-theme-bgcolor);
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .card-name {
         min-width: 0;
@@ -1221,7 +1322,7 @@
         margin: 0.125rem 0 0;
         font-size: 12.5px;
         line-height: 1.4;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         overflow-wrap: anywhere;
     }
     .kv {
@@ -1233,7 +1334,7 @@
         line-height: 1.45;
     }
     .kv dt {
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         white-space: nowrap;
     }
     .kv dd {
@@ -1245,7 +1346,7 @@
     .note {
         margin: 0;
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .unlock {
         display: grid;
@@ -1304,7 +1405,7 @@
         border-bottom: 2px solid transparent;
         background: transparent;
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         cursor: pointer;
     }
     .tabs:only-child .tab {
@@ -1331,7 +1432,7 @@
     .empty {
         margin: 0;
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .rows {
         display: grid;
@@ -1368,7 +1469,7 @@
         font-size: 11.5px;
         font-weight: 600;
         line-height: 1.5;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .kind[data-kind='snapshot'] {
         border-color: color-mix(in srgb, var(--risu-theme-primary-500) 45%, transparent);
@@ -1402,7 +1503,7 @@
         gap: 0.25rem;
         font-size: 12px;
         line-height: 1.25;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .flag + .flag {
         margin-left: 0.5rem;
@@ -1444,7 +1545,7 @@
     .stat dt {
         font-size: 13px;
         line-height: 1.4;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .stat dd {
         margin: 0;
@@ -1459,12 +1560,12 @@
     }
     .stat-value[data-unknown='true'] {
         font-weight: 500;
-        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+        color: var(--color-subtext);
     }
     .stat-note {
         font-size: 13px;
         line-height: 1.45;
-        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+        color: var(--color-subtext);
     }
     .usage-section {
         display: grid;
@@ -1505,7 +1606,7 @@
         min-width: 0;
     }
     .bucket-count {
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
     }
@@ -1548,14 +1649,14 @@
     }
     .unit {
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .help {
         max-width: 62ch;
         margin: 0;
         font-size: 13px;
         line-height: 1.5;
-        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+        color: var(--color-subtext);
     }
     .foot {
         display: flex;

@@ -122,6 +122,7 @@ fn precondition(status: Option<u16>) -> ProviderError {
         oauth_error: None,
         oauth_error_description: None,
         cause: Default::default(),
+        connection_id: None,
     }
 }
 
@@ -270,12 +271,16 @@ impl S3Provider {
 
     /// Default S3 status meanings with the documented per-service overrides.
     fn classify(&self, profile: &Profile, response: &HttpResponse) -> ProviderError {
+        const CLOCK_SKEW_LIMIT_MS: u128 = 14 * 60 * 1000;
         let mut error = common::classify_status(response.status, &response.headers, self.now_ms());
-        if response.status == 403 && response.headers.get("date")
+        if let Some(offset) = response.headers.get("date")
             .and_then(|date| httpdate::parse_http_date(date).ok())
             .and_then(|date| date.duration_since(std::time::UNIX_EPOCH).ok())
-            .is_some_and(|date| date.as_millis().abs_diff(u128::from(self.now_ms())) > 14 * 60 * 1000) {
-            error.kind = ErrorKind::ClockSkew;
+            .map(|date| date.as_millis().abs_diff(u128::from(self.now_ms())))
+            .filter(|offset| response.status == 403 && *offset > CLOCK_SKEW_LIMIT_MS) {
+            error = crate::external_storage::clock::failure("provider", "server-offset",
+                format_args!("offset_ms={offset} limit_ms={CLOCK_SKEW_LIMIT_MS}"));
+            error.http_status = Some(response.status);
         }
         if response.status == 503 && profile.slow_down_is_rate_limit {
             error.kind = ErrorKind::RateLimited;
@@ -866,19 +871,15 @@ impl Provider for S3Provider {
                 return Ok(None);
             }
             let credentials = self.credentials(context).await?;
-            let mut response = self
-                .dispatch(
-                    context,
-                    &credentials,
-                    Call::object(
-                        reqwest::Method::POST,
-                        &key,
-                        ProviderOperation::UploadSession,
-                    )
-                    .query("uploads", String::new()),
-                    cancel,
-                )
-                .await?;
+            let mut call = Call::object(
+                reqwest::Method::POST,
+                &key,
+                ProviderOperation::UploadSession,
+            )
+            .query("uploads", String::new());
+            // Without it the empty POST states no length, which some endpoints refuse.
+            call.content_length = Some(0);
+            let mut response = self.dispatch(context, &credentials, call, cancel).await?;
             self.require(profile, &response, &[200])?;
             let body =
                 common::read_bounded(&mut response.body, common::MAX_CONTROL_BODY, cancel).await?;
@@ -1004,6 +1005,41 @@ impl Provider for S3Provider {
                     context,
                     &credentials,
                     head_call(&key, head, ProviderOperation::ReplaceHead),
+                    cancel,
+                )
+                .await?;
+            self.require(context.profile, &response, &[200])?;
+            Ok(HeadReceipt {
+                version: version_of(&response.headers),
+                complete: true,
+            })
+        })
+    }
+
+    fn replace_descriptor<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        locator: &'a RemoteLocator,
+        bytes: &'a HeadBytes,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, HeadReceipt> {
+        Box::pin(async move {
+            cancel.check()?;
+            let context = context_of(repository)?;
+            locator.validate_for(repository)?;
+            let folder = role_folder(ObjectRole::Descriptor);
+            let key = context.key(&locator.object)?;
+            if locator.collection.as_deref() != Some(folder)
+                || context.object_of(folder, &key).as_deref() != Some(locator.object.as_str())
+            {
+                return Err(corrupt());
+            }
+            let credentials = self.credentials(context).await?;
+            let response = self
+                .dispatch(
+                    context,
+                    &credentials,
+                    head_call(&key, bytes, ProviderOperation::ReplaceHead),
                     cancel,
                 )
                 .await?;

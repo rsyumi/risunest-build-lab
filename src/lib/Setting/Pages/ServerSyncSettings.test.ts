@@ -3,12 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
 import type { PlatformShape } from 'src/ts/platform.testSupport'
-const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), ensure: vi.fn(), connect: vi.fn(), dismiss: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), evict: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, scanner: { scan: vi.fn(), cancel: vi.fn() }, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
+const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), ensure: vi.fn(), connect: vi.fn(), dismiss: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), evict: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, scanner: { scan: vi.fn(), cancel: vi.fn() }, switchFormat: vi.fn(), retry: vi.fn(), os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: f.native ? 'tauri' : 'web', os: f.os as PlatformShape['os'] })))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => f.os }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertActionConfirm: f.action, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
-    connectServerSync: f.connect, dismissServerSyncConnectionFailure: f.dismiss, completeServerSyncBinding: f.complete, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: vi.fn(), holdServerSync: f.hold,
+    connectServerSync: f.connect, dismissServerSyncConnectionFailure: f.dismiss, completeServerSyncBinding: f.complete, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: f.retry, switchServerSyncLibraryFormat: f.switchFormat, holdServerSync: f.hold,
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
     getServerSyncController: () => ({ snapshot: () => f.view, subscribe: (listener: (value: Record<string, unknown>) => void) => { f.listeners.add(listener); listener(f.view); return () => { f.listeners.delete(listener) } }, ensureStatus: f.ensure, watchProgress: () => () => {}, pendingChanges: f.pending, track: (_stage: string, operation: () => Promise<unknown>) => operation() }),
 }))
@@ -50,7 +50,7 @@ beforeEach(() => {
     serverRegistrationInbox.clear()
     assetCleanupProgress.set(undefined)
     vi.clearAllMocks(); f.native = true; f.scan = false; f.os = 'windows'; f.listeners.clear(); f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host)
-    for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.evict, f.cancel, f.checkbox, f.action, f.complete, f.ensure]) mock.mockReset()
+    for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.evict, f.cancel, f.checkbox, f.action, f.complete, f.ensure, f.switchFormat, f.retry]) mock.mockReset()
     f.hold.mockResolvedValue(f.release)
     f.state.db = { language: 'en', characters: [] }
     f.preset.mockImplementation((db: Record<string, unknown>) => ({ ...db, preset: 'starting' }))
@@ -333,11 +333,57 @@ it.each([
     { error: 'device-credential-unavailable', text: languageEnglish.risuNest.serverSync.credentialUnavailable },
     { error: 'previous-files-download-failed', text: languageEnglish.lwwSync.downloadFailedNotConnected },
     { error: 'previous-storage-unavailable', text: languageEnglish.lwwSync.previousStorageUnavailable },
+    { error: 'library-format-switch-required', text: languageEnglish.lwwSync.formatSwitchRequiredHelp },
+    { error: 'app-update-required', text: languageEnglish.lwwSync.appUpdateRequiredHelp },
+    { error: 'sync-server-update-required', text: languageEnglish.lwwSync.serverUpdateRequiredHelp },
 ])('explains "$error" instead of the generic sync error', async ({ error, text }) => {
     f.view = { status: { configured: true, bound: true }, paused: true, error }
     component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
     await settle()
     expect(host.querySelector('[role="alert"]')?.textContent).toBe(text)
+})
+describe('a library below this app data format', () => {
+    const lww = languageEnglish.lwwSync
+    const below = { status: { configured: true, bound: true }, paused: true, error: 'library-format-switch-required', blockedCode: 'library-format-switch-required' }
+    async function open(view: Record<string, unknown> = below) {
+        f.view = view
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+    }
+    // A first publication that stops at the format level stops sync outside the scheduler, with no blocked code.
+    it.each(['library-format-switch-required', ''])('names the stop and switches after the acknowledgement, then resumes sync (blocked code "%s")', async blockedCode => {
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        await open({ ...below, blockedCode })
+        expect(host.textContent).toContain(lww.formatSwitchRequired)
+        click(lww.formatSwitch); await settle()
+        expect(f.checkbox).toHaveBeenCalledWith(expect.objectContaining({ title: lww.formatSwitchTitle, description: lww.formatSwitchDescription, checkboxLabel: lww.formatSwitchAcknowledge, actionLabel: lww.formatSwitch, requireChecked: true }))
+        expect(f.switchFormat).toHaveBeenCalledOnce()
+        expect(f.retry).toHaveBeenCalledOnce()
+    })
+    it('switches nothing when the question is cancelled', async () => {
+        f.checkbox.mockResolvedValue({ confirmed: false, checked: false })
+        await open()
+        click(lww.formatSwitch); await settle()
+        expect(f.switchFormat).not.toHaveBeenCalled(); expect(f.retry).not.toHaveBeenCalled()
+    })
+    it('explains a failed switch and stays paused', async () => {
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        f.switchFormat.mockRejectedValue({ code: 'server-unreachable', retryable: true })
+        await open()
+        click(lww.formatSwitch); await settle()
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(lww.formatSwitchFailed)
+        expect(f.retry).not.toHaveBeenCalled()
+        // A library already above this app is left to the sync attempt, which reports it.
+        f.switchFormat.mockRejectedValue({ code: 'app-update-required', retryable: false })
+        click(lww.formatSwitch); await settle()
+        expect(host.textContent).not.toContain(lww.formatSwitchFailed)
+        expect(f.retry).toHaveBeenCalledOnce()
+    })
+    it.each(['app-update-required', 'sync-server-update-required'])('offers no switch while %s stops sync', async code => {
+        await open({ ...below, error: code, blockedCode: code })
+        expect(findButton(lww.formatSwitch)).toBeUndefined()
+        expect(host.textContent).toContain(code === 'app-update-required' ? lww.appUpdateRequired : lww.serverUpdateRequired)
+    })
 })
 it.each(['linux', 'windows', 'macos', 'android', 'ios'])('names the Secret Service for an unreadable credential only on Linux (%s)', async os => {
     f.os = os

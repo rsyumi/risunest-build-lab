@@ -9,6 +9,7 @@ import { get } from 'svelte/store'
 import type { Chat, Database, Message, character } from '../storage/database.svelte'
 import { DBState, selectedCharID, settingsOpen, ReloadChatPointer } from '../stores.svelte'
 import { IndexedDbPersistentDataStore } from '../storage/indexedDbPersistentDataStore'
+import { createConversationSummaryStubFromChat } from '../storage/conversationResidency'
 import {
     capturePersistentRoot,
     createPersistentDataRuntime,
@@ -99,7 +100,6 @@ vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHa
     downloadFile: vi.fn(),
 }))
 vi.mock('../plugins/plugins.svelte', async () => (await import('./tests/sendChatTestHarness')).pluginsModule())
-vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal))
 vi.mock('./presetChain', async () => (await import('./tests/sendChatTestHarness')).presetChainModule())
 vi.mock('./command', async () => (await import('./tests/sendChatTestHarness')).commandModule())
 
@@ -216,7 +216,11 @@ function syntheticDatabase(messages: Message[]): Database {
     } as unknown as Database
 }
 
-async function bootWindowedConversation(messages: Message[], configure?: (seed: Database) => void) {
+async function bootWindowedConversation(
+    messages: Message[],
+    configure?: (seed: Database) => void,
+    configureWorkingSet?: (db: Database) => void,
+) {
     const { resetScriptCache } = await import('./scripts')
     resetScriptCache()
     const seed = syntheticDatabase(messages)
@@ -230,6 +234,7 @@ async function bootWindowedConversation(messages: Message[], configure?: (seed: 
     )
     await store.open()
     await store.replaceFromDatabase(structuredClone(seed))
+    configureWorkingSet?.(seed)
     // The working set lives in DBState, as in the app.
     DBState.db = seed
     selectedCharID.set(0)
@@ -360,6 +365,61 @@ describe('a windowed send through the production runtime', () => {
         } finally { pluginV2.editprocess.delete(hook) }
         expect((await reopen()).scriptstate.$counter).toBe('4')
         expect(backgroundErrors).toEqual([])
+    })
+    it.each([false, true])('aborts a queued parser call promptly without letting a later write overtake its predecessor (history: %s)', async (needsHistory) => {
+        const { store, reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+            seed.characters[0].chats[0].scriptstate = { $counter: '0' }
+        })
+        const { parseRisuChat } = await import('../plugins/parseRisuChat')
+        let entered!: () => void
+        const reading = new Promise<void>((resolve) => { entered = resolve })
+        let release!: () => void
+        const held = new Promise<void>((resolve) => { release = resolve })
+        const acquire = store.acquireRevision.bind(store)
+        const spy = vi.spyOn(store, 'acquireRevision').mockImplementationOnce(async (revision) => {
+            const lease = await acquire(revision)
+            const read = lease.readConversationWindow.bind(lease)
+            lease.readConversationWindow = async (query) => {
+                entered()
+                await held
+                return read(query)
+            }
+            return lease
+        })
+        const increment = '{{setvar::counter::{{calc::{{getvar::counter}}+1}}}}{{getvar::counter}}'
+        if (needsHistory) spy.mockImplementationOnce(async (revision) => {
+            await held
+            return acquire(revision)
+        })
+        const first = parseRisuChat('{{previouschatlog::0}}|' + increment, { runVar: true })
+        const controller = new AbortController()
+        let queued: Promise<string> | undefined
+        let later: Promise<string> | undefined
+        let laterSettled = false
+        try {
+            await reading
+            queued = parseRisuChat((needsHistory ? '{{previouschatlog::0}}|' : '') + increment, { runVar: true }, controller.signal)
+            let rejection: unknown
+            void queued.catch((error) => { rejection = error })
+            controller.abort()
+            await vi.waitFor(() => expect(rejection).toMatchObject({ name: 'AbortError' }))
+            later = parseRisuChat(increment, { runVar: true })
+            void later.then(() => { laterSettled = true })
+            // Drain queued continuations without releasing the first read.
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            expect(laterSettled).toBe(false)
+            release()
+            expect(await first).toBe('m0|1')
+            expect(await later).toBe('2')
+            expect((await reopen()).scriptstate.$counter).toBe('2')
+            expect(backgroundErrors).toEqual([])
+        } finally {
+            release()
+            await Promise.allSettled([first, ...(queued ? [queued] : []), ...(later ? [later] : [])])
+            spy.mockRestore()
+        }
     })
     it.each(['variable', 'inject'])('persists a delayed parser %s write to the invocation conversation after navigation', async (effect) => {
         const { store, reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
@@ -563,9 +623,87 @@ describe('a windowed send through the production runtime', () => {
         }
     })
 
-    it('stores trigger, Lua, @@inject and response writes inside the window and leaves earlier messages byte-identical', async () => {
+    it('gives output listeners the whole conversation and the absolute output index', async () => {
         const original = storedMessages()
-        const { store, backgroundErrors } = await bootWindowedConversation(structuredClone(original))
+        const { reopen, backgroundErrors } = await bootWindowedConversation(structuredClone(original), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+        })
+        const { sendChat } = await import('./index.svelte')
+        const { pluginV2 } = await import('../plugins/plugins.svelte')
+        const events: { char: character; chat: Chat; messageIndex: number }[] = []
+        const output = vi.fn(async (event: { char: character; chat: Chat; messageIndex: number }) => { events.push(event) })
+        pluginV2.chatOutput.add(output)
+        vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        try {
+            await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+            expect(current.runtime.getSelectedConversationMode()).toBe('windowed')
+            const stored = await reopen()
+            const [{ char, chat, messageIndex }] = events
+            expect(chat.message).toHaveLength(stored.message.length)
+            expect(JSON.stringify(chat.message.slice(0, WINDOW_START))).toBe(JSON.stringify(original.slice(0, WINDOW_START)))
+            expect(messageIndex).toBe(stored.message.length - 1)
+            expect(chat.message[messageIndex]).toMatchObject({ role: 'char', data: 'answer' })
+            expect(char.chats[0]).toEqual(chat)
+            expect(char.chats[0]).not.toBe(chat)
+            expect(backgroundErrors).toEqual([])
+        } finally {
+            pluginV2.chatOutput.delete(output)
+        }
+    })
+
+    it("omits other conversations' messages for listeners that ask for the current conversation or when only the current chat is sent", async () => {
+        const others = ['chat-b', 'chat-c'].map((id) => ({
+            id, name: `Other ${id}`, note: '', localLore: [], fmIndex: -1,
+            message: [{ role: 'user', data: `${id} message`, chatId: `${id}-0` }],
+        }) as Chat)
+        await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+            seed.characters[0].chats.push(...structuredClone(others))
+        }, (db) => {
+            // Only chat-b stays loaded; chat-c is read from the store.
+            db.characters[0].chats[2] = createConversationSummaryStubFromChat('character-a', db.characters[0].chats[2], 2)
+        })
+        const { sendChat } = await import('./index.svelte')
+        const { pluginV2 } = await import('../plugins/plugins.svelte')
+        const { registerChatOutputListener, removeChatOutputListener } = await import('../plugins/pluginChatOutputListeners')
+        const { updateDeviceSettings } = await import('../storage/deviceSettings')
+        type Event = { char: character; chat: Chat }
+        const full: Event[] = []
+        const reduced: Event[] = []
+        const fullListener = vi.fn(async (event: Event) => { full.push(event) })
+        const currentListener = vi.fn(async (event: Event) => { reduced.push(event) })
+        registerChatOutputListener(pluginV2.chatOutput, fullListener as never)
+        registerChatOutputListener(pluginV2.chatOutput, currentListener as never, { history: 'current' })
+        vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        const withoutMessages = ({ message: _message, ...metadata }: Chat) => metadata
+        try {
+            await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+            expect(full[0].char.chats.map(chat => chat.message?.length)).toEqual([full[0].chat.message.length, 1, 1])
+            expect(reduced[0].char.chats).toEqual(full[0].char.chats.map(withoutMessages))
+            expect(reduced[0].char.chats.some(chat => 'message' in chat)).toBe(false)
+            expect(reduced[0].chat).toEqual(full[0].chat)
+
+            updateDeviceSettings({ pluginOutputCurrentChatOnly: true })
+            await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+            expect(full[1].char.chats.some(chat => 'message' in chat)).toBe(false)
+            expect(full[1].char.chats.slice(1)).toEqual(others.map(withoutMessages))
+            expect(full[1].chat.message.length).toBe(full[0].chat.message.length + 1)
+        } finally {
+            updateDeviceSettings({ pluginOutputCurrentChatOnly: false })
+            removeChatOutputListener(pluginV2.chatOutput, fullListener as never)
+            removeChatOutputListener(pluginV2.chatOutput, currentListener as never)
+        }
+    })
+
+    it('stores trigger, Lua, @@inject, parser and response writes inside the window and leaves earlier messages byte-identical', async () => {
+        const original = storedMessages()
+        Object.assign(original[910], { data: '{{setvar::window_var::first}}x', extra: { nested: ['한글', '🙂'] } })
+        Object.assign(original[920], { extra: { unchanged: true } })
+        original[930].data = 'y{{getvar::window_var}}'
+        original[940].data = '{{getvar::window_var}}z'
+        const { store, backgroundErrors, reopen } = await bootWindowedConversation(structuredClone(original))
         const { sendChat } = await import('./index.svelte')
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
 
@@ -575,9 +713,16 @@ describe('a windowed send through the production runtime', () => {
         expect(current.runtime.getSelectedConversationMode()).toBe('windowed')
         const persisted = (await store.readConversation('character-a', 'chat-a'))!.value.message
         expect(JSON.stringify(persisted.slice(0, WINDOW_START))).toBe(JSON.stringify(original.slice(0, WINDOW_START)))
+        expect((await reopen()).scriptstate.$window_var).toBe('first')
         const inserted = persisted[960]
         expect(persisted.slice(WINDOW_START)).toEqual([
-            ...original.slice(WINDOW_START, 950),
+            ...original.slice(WINDOW_START, 910),
+            { ...original[910], data: 'x' },
+            ...original.slice(911, 930),
+            { ...original[930], data: 'yfirst' },
+            ...original.slice(931, 940),
+            { ...original[940], data: 'firstz' },
+            ...original.slice(941, 950),
             { ...original[950], data: 'STORED:inside' },
             ...original.slice(951, 960),
             { role: 'char', data: 'lua inserted', chatId: inserted.chatId },

@@ -1,6 +1,6 @@
 use super::{
-    restore, ImportCounts, JobControl, JobDetail, JobPhase, JobProgress, JobResultSummary,
-    JobStage, NativeJobError, OpenedJobSource, StageUnit,
+    restore, FailureOwner, ImportCounts, JobControl, JobDetail, JobPhase, JobProgress,
+    JobResultSummary, JobStage, NativeJobError, OpenedJobSource, StageUnit,
 };
 use crate::asset_repository::job_pins::{
     CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob,
@@ -14,11 +14,11 @@ use crate::local_backup::{
     StrictLocalBackupDatabaseRestore,
 };
 use crate::persistent_store::export::{self, destination};
+use crate::persistent_store::held_binary::HeldBinaries;
 use crate::persistent_store::{
     AssetAlias, AssetOwnerHead, AssetOwnerLocator, PersistentStore,
     RevisionResult, StagingResult, StoreResult,
 };
-use crate::server_sync::residency::RemotePayloadAccess;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::fmt;
@@ -76,6 +76,9 @@ const ARCHIVE_FILE: &str = "archive.bin.part";
 struct JobCancellation<'a>(&'a JobControl);
 
 impl CancellationProbe for JobCancellation<'_> {
+    fn cancellation_flag(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        Some(self.0.cancellation_flag())
+    }
     fn is_cancelled(&self) -> bool {
         self.0.is_cancel_requested()
     }
@@ -213,10 +216,10 @@ impl<'a> LegacyRestoreProgress<'a> {
         restore::RestoreProgressScale {
             result_source: None,
             spool_directory: None,
-            reject_cold_references: false,
             base_bytes: state.read_bytes.saturating_add(state.prepared_bytes),
             total_bytes: Some(self.budget()),
             fixed_items: Some((state.counts.entries_read, state.counts.entries_total)),
+            cold_payloads: None,
             counts: state.counts.clone(),
         }
     }
@@ -411,6 +414,7 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
         }
         let sink = LegacyReplacementSink {
             app: self.app.clone(),
+            asset_keys: payloads.asset_aliases.iter().map(|alias| alias.key.clone()).collect(),
             payloads,
             durable: Mutex::new(durable),
             incomplete: Mutex::new(super::IncompleteRestorePreview::default()),
@@ -444,15 +448,17 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
     }
 }
 
-struct LegacyReplacementSink {
+struct LegacyReplacementSink<R: tauri::Runtime = tauri::Wry> {
     activation_pending: std::sync::atomic::AtomicBool,
-    app: AppHandle,
+    app: AppHandle<R>,
     payloads: PreparedLegacyRestorePayloads,
+    /// The asset keys the backup carries a file for.
+    asset_keys: HashSet<String>,
     durable: Mutex<DurableCasJob>,
     incomplete: Mutex<super::IncompleteRestorePreview>,
 }
 
-impl restore::ReplacementSink for LegacyReplacementSink {
+impl<R: tauri::Runtime> restore::ReplacementSink for LegacyReplacementSink<R> {
     fn prepare_activation_receipt(&self, staging_id: &str, job: &JobControl, result: &JobResultSummary) -> StoreResult<Option<String>> {
         crate::persistent_store::commands::with_store(self.app.state(), |store| super::restore_receipts::prepare(store, job, staging_id, result))
     }
@@ -473,18 +479,23 @@ impl restore::ReplacementSink for LegacyReplacementSink {
     }
 
     fn put_root(&self, staging_id: &str, root: &Value) -> StoreResult<()> {
+        self.add_missing_assets(missing_asset_references(root, &self.asset_keys))?;
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_put_upstream_root(staging_id, root)
         })
     }
 
     fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()> {
+        for preset in presets {
+            self.add_missing_assets(missing_asset_references(preset, &self.asset_keys))?;
+        }
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_put_upstream_presets(staging_id, presets)
         })
     }
 
     fn put_legacy_root(&self, staging_id: &str, root: &crate::persistent_store::upstream_stream::RootSpool) -> StoreResult<()> {
+        self.add_missing_assets(missing_root_asset_references(root, &self.asset_keys)?)?;
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_put_upstream_stream(staging_id, root)
         })
@@ -503,8 +514,19 @@ impl restore::ReplacementSink for LegacyReplacementSink {
     }
 
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
+        // Counted here, on the characters as staged: a cold stub carries its
+        // fields only after expansion, and a prepared character can still be excluded.
+        self.add_missing_assets(characters.iter().map(|character| missing_asset_references(character, &self.asset_keys)).sum())?;
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_add_characters(staging_id, characters)
+        })
+    }
+
+    fn add_characters_with_binaries(&self, staging_id: &str, characters: &[Value], binaries: &HeldBinaries) -> StoreResult<()> {
+        // A placeholder holds no string, as the object it stands for holds none.
+        self.add_missing_assets(characters.iter().map(|character| missing_asset_references(character, &self.asset_keys)).sum())?;
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_add_characters_with_binaries(staging_id, characters, binaries)
         })
     }
 
@@ -512,8 +534,12 @@ impl restore::ReplacementSink for LegacyReplacementSink {
 
     fn expands_cold_payloads(&self) -> bool { true }
 
-    fn cold_payload_path(&self, key: &str) -> Option<std::path::PathBuf> {
-        self.payloads.cold_payloads.get(key).cloned()
+    fn cold_payload_path(&self, key: &str) -> StoreResult<Option<std::path::PathBuf>> {
+        Ok(self.payloads.cold_payloads.get(key).cloned())
+    }
+
+    fn unavailable_cold_payload_reason(&self, key: &str) -> Option<restore::ColdPayloadUnavailable> {
+        self.payloads.unavailable_cold_payloads.get(key).copied()
     }
 
     fn unavailable_cold_payload(&self, key: &str, character_name: &str) -> StoreResult<()> {
@@ -524,6 +550,7 @@ impl restore::ReplacementSink for LegacyReplacementSink {
     }
 
     fn put_character_detail(&self, staging_id: &str, detail: &Value, conversation_count: i64) -> StoreResult<()> {
+        self.add_missing_assets(missing_asset_references(detail, &self.asset_keys))?;
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_put_character_detail(staging_id, detail, conversation_count)
         })
@@ -561,7 +588,7 @@ impl restore::ReplacementSink for LegacyReplacementSink {
         })
     }
 
-    fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
+    fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_put_asset_aliases(staging_id, &self.payloads.asset_aliases)?;
             self.durable
@@ -576,6 +603,7 @@ impl restore::ReplacementSink for LegacyReplacementSink {
             &self.app,
             staging_id,
             Some(expected_revision),
+            binding_authority,
         );
         if committed.is_ok() {
             self.release_durable(CasReleaseOutcome::Committed)?;
@@ -592,7 +620,15 @@ impl restore::ReplacementSink for LegacyReplacementSink {
     }
 }
 
-impl LegacyReplacementSink {
+impl<R: tauri::Runtime> LegacyReplacementSink<R> {
+    fn add_missing_assets(&self, missing: u64) -> StoreResult<()> {
+        if missing > 0 {
+            let mut preview = self.incomplete.lock().map_err(|error| crate::persistent_store::StoreError::Store { message: error.to_string() })?;
+            preview.omissions.missing_assets = preview.omissions.missing_assets.saturating_add(missing);
+        }
+        Ok(())
+    }
+
     fn release_durable(&self, outcome: CasReleaseOutcome) -> StoreResult<()> {
         self.durable
             .lock()
@@ -604,13 +640,46 @@ impl LegacyReplacementSink {
     }
 }
 
-impl Drop for LegacyReplacementSink {
+impl<R: tauri::Runtime> Drop for LegacyReplacementSink<R> {
     fn drop(&mut self) {
         if self.activation_pending.load(std::sync::atomic::Ordering::Acquire) { return; }
         if let Ok(durable) = self.durable.get_mut() {
             let _ = durable.release(CasReleaseOutcome::Aborted);
         }
     }
+}
+
+/// The asset references in `value` the backup carries no file for. RisuAI
+/// leaves out files it does not keep, and the reference is restored as it is.
+fn missing_asset_references(value: &Value, carried: &HashSet<String>) -> u64 {
+    let mut missing = 0;
+    let _ = compatible_projection::visit_asset_fields(value, &mut |_, value| {
+        if value.as_str().is_some_and(|key| key.starts_with("assets/") && !carried.contains(key)) {
+            missing += 1;
+        }
+        Ok::<(), std::convert::Infallible>(())
+    });
+    missing
+}
+
+/// The same count for the root fields of a streamed database.
+fn missing_root_asset_references(
+    root: &crate::persistent_store::upstream_stream::RootSpool,
+    carried: &HashSet<String>,
+) -> StoreResult<u64> {
+    let mut missing = 0;
+    for key in ["customBackground", "userIcon"] {
+        if let Some(value) = root.scalar(key)? {
+            missing += missing_asset_references(&Value::Object(Map::from_iter([(key.to_owned(), value)])), carried);
+        }
+    }
+    for key in ["personas", "modules", "characterOrder", "botPresets"] {
+        root.visit(key, |_, member| {
+            missing += missing_asset_references(&member, carried);
+            Ok(())
+        })?;
+    }
+    Ok(missing)
 }
 
 fn local_backup_error(error: LocalBackupError) -> NativeJobError {
@@ -687,6 +756,8 @@ pub(crate) struct PreparedLegacyRestorePayloads {
     pub(crate) skipped_inlays: u64,
     /// Upstream cold payload key to the staged file that holds its body.
     pub(crate) cold_payloads: HashMap<String, std::path::PathBuf>,
+    /// Upstream cold payload keys whose entry could not be staged.
+    pub(crate) unavailable_cold_payloads: HashMap<String, restore::ColdPayloadUnavailable>,
 }
 
 #[cfg(test)]
@@ -741,6 +812,7 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
     let mut invalid_inlays = Vec::new();
     let mut skipped_inlays = 0;
     let mut cold_payloads = HashMap::new();
+    let mut unavailable_cold_payloads = HashMap::new();
     let mut asset_keys = HashSet::new();
     let mut incoming = Vec::new();
     let mut incoming_names = Vec::new();
@@ -805,10 +877,14 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
         if let Some(key) = cold_key(&entry.logical_name) {
             observer.item_started(&entry.logical_name);
             let staged = prepare_cold_with_limits(entry, cancellation, observer, limits)?;
-            if cold_payloads.insert(key, staged).is_some() {
+            if cold_payloads.contains_key(&key) || unavailable_cold_payloads.contains_key(&key) {
                 return Err(invalid(
                     "legacy backup contains a duplicate cold payload key",
                 ));
+            }
+            match staged {
+                Ok(path) => { cold_payloads.insert(key, path); }
+                Err(reason) => { unavailable_cold_payloads.insert(key, reason); }
             }
         } else if let Some(encoded_key) = inlay_key_hex(&entry.logical_name) {
             observer.item_started(&entry.logical_name);
@@ -860,6 +936,7 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
         skipped_inlays,
         asset_aliases,
         cold_payloads,
+        unavailable_cold_payloads,
     })
 }
 
@@ -1002,13 +1079,15 @@ fn prepare_inlay(
 
 /// Validates a staged upstream cold payload without materializing its full body.
 /// The body is spliced into its referencing record when characters are staged.
+/// An entry that is not one JSON value, or exceeds the decoded limit, is staged
+/// as unavailable, and whatever references it reports the omission.
 #[cfg(test)]
 fn prepare_cold_with_limit(
     entry: &StagedLocalBackupEntry,
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
     max_decoded_bytes: u64,
-) -> Result<std::path::PathBuf, LocalBackupError> {
+) -> Result<Result<std::path::PathBuf, restore::ColdPayloadUnavailable>, LocalBackupError> {
     prepare_cold_with_limits(entry, cancellation, observer, restore::RestoreLimits {
         max_decoded_block_bytes: max_decoded_bytes, ..Default::default()
     })
@@ -1019,30 +1098,30 @@ fn prepare_cold_with_limits(
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
     limits: restore::RestoreLimits,
-) -> Result<std::path::PathBuf, LocalBackupError> {
+) -> Result<Result<std::path::PathBuf, restore::ColdPayloadUnavailable>, LocalBackupError> {
     let file = open_staged(entry)?;
     if entry.byte_length > limits.max_decoded_block_bytes || file.metadata().map_err(LocalBackupError::io)?.len() > limits.max_decoded_block_bytes {
-        return Err(LocalBackupError::new(LocalBackupErrorCode::DecodedBlockTooLarge, "decoded block limit exceeded for cold payload"));
+        return Ok(Err(restore::ColdPayloadUnavailable::TooLarge));
     }
     let source = CancellationReader::observed(file, cancellation, observer);
     // Cold plugin values may be any JSON. Apply record limits only when a character
     // or conversation references the payload, through the common restore reader.
     let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(source));
-    <IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer).map_err(|_| {
-        if cancellation.is_cancelled() {
-            LocalBackupError::new(LocalBackupErrorCode::Cancelled, "legacy backup job was cancelled")
-        } else {
-            invalid("legacy backup cold payload is invalid")
+    let parsed = <IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer)
+        .and_then(|_| deserializer.end());
+    if let Err(error) = parsed {
+        check_cancelled(cancellation)?;
+        if error.is_io() {
+            return Err(LocalBackupError::io(error.into()));
         }
-    })?;
-    deserializer
-        .end()
-        .map_err(|_| invalid("legacy backup cold payload has trailing data"))?;
+        return Ok(Err(restore::ColdPayloadUnavailable::Damaged));
+    }
 
     check_cancelled(cancellation)?;
     entry
         .staged_path
         .clone()
+        .map(Ok)
         .ok_or_else(|| invalid("legacy backup cold payload is not staged"))
 }
 
@@ -1324,7 +1403,7 @@ mod tests {
             drop(output);
             let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length:fs::metadata(&path).unwrap().len(), sha256:String::new(), staged_path:Some(path) };
             let observed = ObservedBytes { total: Cell::new(0), largest: Cell::new(0) };
-            prepare_cold_with_limits(&entry, &NeverCancelled, &observed, restore::RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap();
+            prepare_cold_with_limits(&entry, &NeverCancelled, &observed, restore::RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap().unwrap();
             assert_eq!(observed.total.get(), entry.byte_length);
             assert!(observed.largest.get() <= 64 * 1024);
             let error = cold_expansion::load_with_limits(entry.staged_path.as_ref().unwrap(), entry.byte_length, 64 * 1024).unwrap_err();
@@ -1343,8 +1422,8 @@ mod tests {
         fs::write(&path, br#"{"message":[]}"#).unwrap();
         for (byte_length, limit) in [(0, 8), (1024, 8), (1024, 64)] {
             let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length, sha256:String::new(), staged_path:Some(path.clone()) };
-            let error = prepare_cold_with_limit(&entry, &NeverCancelled, &UnexpectedRead, limit).unwrap_err();
-            assert!(error.message.contains("decoded block limit exceeded"));
+            let staged = prepare_cold_with_limit(&entry, &NeverCancelled, &UnexpectedRead, limit).unwrap();
+            assert_eq!(staged, Err(restore::ColdPayloadUnavailable::TooLarge));
         }
     }
 
@@ -1364,6 +1443,13 @@ mod tests {
             cancellation_io(error, &AlwaysCancelled).code,
             LocalBackupErrorCode::Cancelled
         );
+
+        // A cancelled cold entry read cancels the restore instead of staging the entry as damaged.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cold.json");
+        fs::write(&path, b"{broken").unwrap();
+        let entry = StagedLocalBackupEntry { logical_name:"coldstorage/cold.json".to_owned(), byte_length:7, sha256:String::new(), staged_path:Some(path) };
+        assert_eq!(prepare_cold_with_limit(&entry, &AlwaysCancelled, &NoopPrepareObserver, 1024).unwrap_err().code, LocalBackupErrorCode::Cancelled);
     }
 
     #[derive(Default)]
@@ -1531,6 +1617,79 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn counts_asset_references_the_backup_carries_no_file_for() {
+        use serde_json::json;
+        let carried = HashSet::from(["assets/carried.png".to_owned()]);
+        let character = json!({
+            "image": "assets/carried.png",
+            "emotionImages": [["joy", "assets/gone-joy.png"]],
+            "additionalAssets": [["extra", "assets/gone-extra.png", "png"]],
+            "ccAssets": [{"uri": "assets/gone-cc.png"}, {"uri": "embeded://card.png"}],
+            "vits": {"files": {"voice": "assets/gone-voice.bin"}},
+            "firstMessage": "assets/gone-in-text.png",
+        });
+        assert_eq!(missing_asset_references(&character, &carried), 4);
+        let root = crate::persistent_store::upstream_stream::RootSpool::new(Default::default()).unwrap();
+        for (key, value) in [
+            ("customBackground", json!("assets/gone-background.png")),
+            ("userIcon", json!("assets/carried.png")),
+            ("personas", json!([{"icon": "assets/gone-persona.png"}])),
+            ("modules", json!([{"assets": [["module", "assets/gone-module.png", "png"]]}])),
+            ("characterOrder", json!(["character", {"img": "assets/gone-folder.png"}])),
+            ("botPresets", json!([{"image": "assets/gone-preset.png"}])),
+            ("mainPrompt", json!("assets/gone-in-text.png")),
+        ] {
+            root.put(key, Some(&value)).unwrap();
+        }
+        assert_eq!(missing_root_asset_references(&root, &carried).unwrap(), 5);
+    }
+
+    #[test]
+    fn restore_counts_the_missing_assets_of_the_characters_it_stages() {
+        use restore::ReplacementSink as _;
+        use serde_json::json;
+        let directory = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(crate::persistent_store::commands::PersistentStoreState::with_test_store(
+            PersistentStore::open(&directory.path().join("store")).unwrap(),
+        ));
+        // The archived character's assets exist only in its cold payload.
+        let archived = directory.path().join("archived.json");
+        fs::write(&archived, serde_json::to_vec(&json!({"character": {
+            "chaId": "archived", "name": "Archived", "chats": [],
+            "additionalAssets": [["extra", "assets/archived.png", "png"], ["second", "assets/archived-second.png", "png"]],
+        }})).unwrap()).unwrap();
+        let sink = LegacyReplacementSink {
+            activation_pending: std::sync::atomic::AtomicBool::new(false),
+            app: app.handle().clone(),
+            payloads: PreparedLegacyRestorePayloads {
+                asset_aliases: Vec::new(),
+                invalid_inlays: Vec::new(),
+                skipped_inlays: 0,
+                cold_payloads: HashMap::from([("archived".to_owned(), archived)]),
+                unavailable_cold_payloads: HashMap::new(),
+            },
+            asset_keys: HashSet::new(),
+            durable: Mutex::new(DurableCasJob::begin(
+                directory.path(),
+                "synthetic-job",
+                CasJobKind::LocalBackupRestore,
+                crate::asset_repository::job_pins::CasJobOwner::for_test(),
+                0,
+            ).unwrap()),
+            incomplete: Mutex::new(Default::default()),
+        };
+        let staging = sink.begin().unwrap().staging_id;
+        let staged = sink.prepare_character(json!({"chaId": "archived", "name": "Archived", "chats": [], "coldstorage": "archived"})).unwrap();
+        // The restore excludes a character after preparing it and never stages it.
+        sink.prepare_character(json!({"chaId": "excluded", "name": "Excluded", "chats": [], "image": "assets/excluded.png"})).unwrap();
+        sink.add_characters(&staging, &[staged]).unwrap();
+        assert_eq!(sink.incomplete_restore_preview().unwrap().omissions.missing_assets, 2);
+    }
 
     #[test]
     fn prepares_asset_inlay_and_cold_payloads_without_mutating_live_aliases() {

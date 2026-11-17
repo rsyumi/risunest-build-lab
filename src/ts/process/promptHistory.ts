@@ -22,6 +22,12 @@ export interface PromptHistoryEntry {
     locator?: MessageLocator
 }
 
+export interface PromptHistoryTarget {
+    absoluteIndex: number
+    relativeIndex: number
+    locator: MessageLocator
+}
+
 export interface PromptHistoryCompatibilitySnapshot {
     readonly entries: PromptHistoryEntry[]
     dispose(): void
@@ -29,7 +35,7 @@ export interface PromptHistoryCompatibilitySnapshot {
 
 export function ensurePromptHistoryEntryId(
     history: ConversationHistoryOperation,
-    entry: PromptHistoryEntry,
+    entry: Pick<PromptHistoryEntry, 'absoluteIndex' | 'locator'>,
     createId: () => string,
 ): Message {
     if (!entry.locator) {
@@ -99,14 +105,14 @@ export function selectPromptHistory(
     let resetByAllBefore = false
 
     while (startIndexExclusive > 0) {
-        const page = history.scanBackward(
+        const page = history.scanMetadataBackward(
             startIndexExclusive,
             Math.min(pageSize, startIndexExclusive),
         )
         if (page.entries.length === 0) break
         for (const entry of page.entries) {
-            if (entry.message.disabled === true) continue
-            if (entry.message.disabled === 'allBefore') {
+            if (entry.disabled === true) continue
+            if (entry.disabled === 'allBefore') {
                 startIndex = entry.absoluteIndex + 1
                 resetByAllBefore = true
                 history.assertCurrent()
@@ -133,14 +139,14 @@ export function selectPromptHistory(
     }
 }
 
-export function* iteratePromptHistory(
+export function* iteratePromptHistoryTargets(
     history: ConversationHistoryOperation,
     selection: PromptHistorySelection,
     pageSize = PROMPT_HISTORY_PAGE_SIZE,
-): Generator<PromptHistoryEntry> {
+): Generator<PromptHistoryTarget> {
     let relativeIndex = 0
     for (let startIndex = selection.startIndex; startIndex < selection.endIndex;) {
-        const page = history.readRange(
+        const page = history.readMetadataRange(
             startIndex,
             Math.min(pageSize, selection.endIndex - startIndex),
         )
@@ -151,7 +157,6 @@ export function* iteratePromptHistory(
             yield {
                 absoluteIndex: page.startIndex + offset,
                 relativeIndex,
-                message,
                 locator: page.locators[offset],
             }
             relativeIndex += 1

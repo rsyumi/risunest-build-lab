@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 #[cfg(feature = "native-official-publication")]
 use std::io::Read;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -109,11 +109,17 @@ pub(crate) fn pinned_asset_alias(
     target: &ReadTarget,
     key: &str,
 ) -> StoreResult<super::AssetAlias> {
-    super::query::read_asset_alias(connection, "asset", key, target)?
-        .ok_or_else(|| StoreError::Validation {
-            message: format!("pinned character asset alias is missing: {key}"),
-        })
-        .map(|versioned| versioned.value)
+    pinned_asset_alias_if_present(connection, target, key)?.ok_or_else(|| StoreError::Validation {
+        message: format!("pinned character asset alias is missing: {key}"),
+    })
+}
+
+pub(crate) fn pinned_asset_alias_if_present(
+    connection: &Connection,
+    target: &ReadTarget,
+    key: &str,
+) -> StoreResult<Option<super::AssetAlias>> {
+    Ok(super::query::read_asset_alias(connection, "asset", key, target)?.map(|versioned| versioned.value))
 }
 
 pub(super) const PRESET_MIRRORS: &[(&str, &str)] = &[
@@ -1126,7 +1132,16 @@ fn write_block(
         let mut encoder = GzBuilder::new()
             .mtime(0)
             .write(checked, Compression::default());
-        if let Err(error) = write_json(&mut encoder) {
+        // The encoder runs deflate on every write; the buffer spares it one call per JSON token.
+        let mut buffered = BufWriter::with_capacity(64 * 1024, &mut encoder);
+        // into_inner drains the buffer without flushing the encoder, which would add a sync block.
+        let written = write_json(&mut buffered).and_then(|()| {
+            buffered
+                .into_inner()
+                .map(drop)
+                .map_err(|error| StoreError::from(error.into_error()))
+        });
+        if let Err(error) = written {
             check_export_cancelled(is_cancelled)?;
             return Err(error);
         }

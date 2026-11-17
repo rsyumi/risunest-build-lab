@@ -510,6 +510,7 @@ mod tests {
         let credential = server.store.add_device().unwrap();
         let device = Device {
             id: credential.device_id.clone(),
+            format_level: None,
         };
         let asset = vec![41; 98_304];
         let digest = hash(&asset);
@@ -631,6 +632,7 @@ mod tests {
         let credential = server.store.add_device().unwrap();
         let device = Device {
             id: credential.device_id.clone(),
+            format_level: None,
         };
         let inline = b"synthetic-inline-control";
         let a = vec![13; 65_537];
@@ -762,6 +764,7 @@ mod tests {
         let credential = server.store.add_device().unwrap();
         let device = Device {
             id: credential.device_id.clone(),
+            format_level: None,
         };
         let asset = vec![37; 65_537];
         let control = b"synthetic other unit body";
@@ -860,6 +863,7 @@ mod tests {
         let credential = server.store.add_device().unwrap();
         let device = Device {
             id: credential.device_id.clone(),
+            format_level: None,
         };
         let asset = vec![43; 65_537];
         let asset_hash = hash(&asset);
@@ -987,6 +991,7 @@ mod tests {
         let credential = server.store.add_device().unwrap();
         let device = Device {
             id: credential.device_id,
+            format_level: None,
         };
         server
             .begin(

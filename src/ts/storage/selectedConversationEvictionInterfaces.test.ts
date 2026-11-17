@@ -85,6 +85,9 @@ function mockPublicGeneration(
         captureWindowedConversationMutationController: (target: never, chat: Chat, start: number) =>
             runtime.captureWindowedConversationMutationController(target, chat, start),
         flushPendingData: (reason: string) => runtime.flushPendingData(reason),
+        flushPendingDataLocallyForCheckpoint: (reason: string) => runtime.flushPendingDataLocallyForCheckpoint(reason),
+        capturesImmutableCharacters: () => runtime.capturesImmutableCharacters(),
+        pendingConversationMutationDiagnostics: () => runtime.pendingConversationMutationDiagnostics(),
         drainDeferredLwwReceives: vi.fn(async () => undefined),
     }))
     vi.doMock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => fixture.store }))
@@ -313,6 +316,8 @@ describe('independent windowed conversation interfaces', () => {
 
     }, 30_000)
     it('runs public generation from a fresh windowed owner', async () => {
+        vi.resetModules()
+        const { createEvictionFixture, makeConversation } = await import('./tests/selectedConversationEvictionFixture')
         const fixture = await createEvictionFixture(makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS))
         const { store, initial, runtime, selectedConversation } = fixture
         const oracle = makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS)

@@ -79,16 +79,28 @@ describe('bound library replacement prerequisite',()=>{
     it('clears failed fences and unregistered transports without affecting another replacement',async()=>{
         const adapter=transport()
         const release=registerSyncBindingTransport(state.target as {kind:'server';connectionId:string},adapter)
+        let starts=0
+        const gate=createPluginStartupGate({enabled:()=>true,delay:()=>true,replacementPending:()=>isSyncBindingReplacementPending(),
+            context:async()=>({identity:'synthetic',bound:true,receive:async()=>{},assertCurrent:async()=>{}}),
+            start:async()=>{if(await gate.ensure())starts++},
+        })
+        const stop=subscribeSyncBindingChanges(()=>{if(gate.isWaiting())gate.retry()})
         try {
             const prepared=await prepareBoundLibraryReplacement()
-            adapter.fenceOldJobs=async()=>{throw new Error('fence failed')}
-            await expect(prepared.fence()).rejects.toThrow('fence failed')
+            try {
+                adapter.fenceOldJobs=async()=>{throw new Error('fence failed')}
+                await expect(prepared.fence()).rejects.toThrow('fence failed')
+                expect(isSyncBindingReplacementPending(state)).toBe(false)
+                adapter.fenceOldJobs=async()=>{}
+                await prepared.fence()
+                expect(isSyncBindingReplacementPending(state)).toBe(true)
+                expect(await gate.ensure()).toBe(false)
+            } finally {release()}
             expect(isSyncBindingReplacementPending(state)).toBe(false)
-            adapter.fenceOldJobs=async()=>{}
-            await prepared.fence()
-            expect(isSyncBindingReplacementPending(state)).toBe(true)
-        } finally {release()}
-        expect(isSyncBindingReplacementPending(state)).toBe(false)
+            // Plugin startup that waited on the dropped replacement checks again, though the replacement then ends without resuming.
+            prepared.release()
+            await vi.waitFor(()=>expect(starts).toBe(1))
+        } finally {stop()}
     })
     it('skips new catchup for an exact committed restore while retaining old-job and authority fences',async()=>{
         const adapter={fenceOldJobs:vi.fn(async()=>{}),resumeBinding:vi.fn(async()=>{})} as unknown as SyncBindingTransport

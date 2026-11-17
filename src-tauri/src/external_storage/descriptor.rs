@@ -2,8 +2,8 @@
 //! untrusted until the secretstream has authenticated the complete object.
 use super::{
     contract::{
-        Cancellation, Collection, ErrorKind, ObjectIntent, ObjectRole, Provider, ProviderError, ReadReceipt,
-        RemoteLocator, RepositoryHandle, Result, UploadResolution,
+        Cancellation, Collection, ErrorKind, HeadBytes, ObjectIntent, ObjectRole, Provider, ProviderError,
+        ReadReceipt, RemoteLocator, RepositoryHandle, Result, UploadResolution,
     },
     transfer::{SpoolSink, SpoolSource},
 };
@@ -47,14 +47,7 @@ fn staging_path(root: &Path) -> Result<TemporaryFile> {
     ))
 }
 
-pub(crate) async fn upload(
-    root: &Path,
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    descriptor: &Descriptor,
-    root_key: &[u8; 32],
-    cancel: &Cancellation,
-) -> Result<RemoteLocator> {
+fn seal(descriptor: &Descriptor, root_key: &[u8; 32]) -> Result<Vec<u8>> {
     descriptor.validate().map_err(|_| corrupt())?;
     let plaintext = serde_json::to_vec(descriptor).map_err(|_| corrupt())?;
     if plaintext.len() as u64 > MAX_DESCRIPTOR_PLAINTEXT {
@@ -79,7 +72,18 @@ pub(crate) async fn upload(
     if encrypted.len() as u64 > MAX_DESCRIPTOR_CIPHERTEXT {
         return Err(corrupt());
     }
+    Ok(encrypted)
+}
 
+pub(crate) async fn upload(
+    root: &Path,
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    descriptor: &Descriptor,
+    root_key: &[u8; 32],
+    cancel: &Cancellation,
+) -> Result<RemoteLocator> {
+    let encrypted = seal(descriptor, root_key)?;
     let temporary = staging_path(root)?;
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
@@ -175,11 +179,33 @@ pub(crate) async fn read(
     {
         return Err(corrupt());
     }
+    // A later level may add fields this build cannot decode, so its level is
+    // read first and asks for an update instead of reporting damage.
+    if Descriptor::declared_format_level(&plaintext)
+        .is_some_and(|level| level > crate::server_sync::library_format::LEVEL)
+    {
+        return Err(ProviderError::new(ErrorKind::AppUpdateRequired));
+    }
     let descriptor = Descriptor::decode(&plaintext).map_err(|_| corrupt())?;
-    if &descriptor != expected {
+    if !descriptor.same_repository(expected) {
         return Err(corrupt());
     }
     Ok(descriptor)
+}
+
+/// Overwrites the descriptor at `locator`, sealed as `upload` seals it.
+pub(crate) async fn replace(
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    locator: &RemoteLocator,
+    descriptor: &Descriptor,
+    root_key: &[u8; 32],
+    cancel: &Cancellation,
+) -> Result<()> {
+    locator.validate_for(repository)?;
+    let bytes = HeadBytes::new(seal(descriptor, root_key)?)?;
+    provider.replace_descriptor(repository, locator, &bytes, cancel).await?;
+    Ok(())
 }
 
 /// Reuses only an authenticated descriptor from an unfinished initialization.
@@ -459,6 +485,40 @@ mod tests {
             )
             .await
             .is_err());
+        });
+    }
+
+    /// Seals descriptor plaintext this build would not write itself.
+    fn sealed(plaintext: &[u8], repository_id: &str) -> HeadBytes {
+        let key = derive_key(&[7; 32], repository_id, "metadata").unwrap();
+        let header = PublicObjectHeader::new(repository_id.into(), repository_id.into(), EnvelopeRole::Descriptor, plaintext.len() as u64).unwrap();
+        let mut encrypted = Vec::new();
+        seal_envelope(&mut std::io::Cursor::new(plaintext), &mut encrypted, &key, &header).unwrap();
+        HeadBytes::new(encrypted).unwrap()
+    }
+
+    #[test]
+    fn a_replaced_descriptor_reads_back_its_level_and_a_later_level_asks_for_an_update() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let provider = fake::FakeProvider::new(true);
+            let repository = fake::repository();
+            let cancel = Cancellation::default();
+            let level = crate::server_sync::library_format::LEVEL;
+            let stored = Descriptor::new("synthetic-descriptor-id".into(), Some(risunest_external_storage_format::format::Strategy::Cas)).unwrap();
+            let locator = upload(root.path(), &provider, &repository, &stored, &[7; 32], &cancel).await.unwrap();
+            replace(&provider, &repository, &locator, &stored.clone().with_format_level(level).unwrap(), &[7; 32], &cancel).await.unwrap();
+            // The stored copy stays without a level and still names the repository.
+            assert_eq!(read(root.path(), &provider, &repository, &locator, &stored, &[7; 32], &cancel).await.unwrap().level(), level);
+            let mut later = serde_json::to_value(stored.clone().with_format_level(level + 1).unwrap()).unwrap();
+            later["laterField"] = serde_json::json!(true);
+            let bytes = sealed(&serde_json::to_vec(&later).unwrap(), &stored.repository_id);
+            provider.replace_descriptor(&repository, &locator, &bytes, &cancel).await.unwrap();
+            assert_eq!(read(root.path(), &provider, &repository, &locator, &stored, &[7; 32], &cancel).await.unwrap_err().kind, ErrorKind::AppUpdateRequired);
+            later["formatLevel"] = serde_json::json!(level);
+            let bytes = sealed(&serde_json::to_vec(&later).unwrap(), &stored.repository_id);
+            provider.replace_descriptor(&repository, &locator, &bytes, &cancel).await.unwrap();
+            assert_eq!(read(root.path(), &provider, &repository, &locator, &stored, &[7; 32], &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
         });
     }
 }

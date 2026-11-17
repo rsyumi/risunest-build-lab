@@ -1159,6 +1159,7 @@ impl PayloadCas {
             expected_byte_size,
             expected_physical_key,
             true,
+            true,
             |_| Ok(()),
         )
     }
@@ -1166,13 +1167,14 @@ impl PayloadCas {
     /// Requires positively acknowledged, persisted server custody for this exact
     /// hash and size. Offloading discards a local copy of that retained content.
     /// All path, size, open-handle identity and replacement checks still apply.
+    /// The caller syncs the object's directory.
     pub(crate) fn unlink_retained_object(
         &self,
         content_hash: &str,
         expected_byte_size: u64,
         expected_physical_key: &str,
     ) -> io::Result<ExactObjectUnlink> {
-        self.unlink_exact_object_inner(content_hash, expected_byte_size, expected_physical_key, false, |_| Ok(()))
+        self.unlink_exact_object_inner(content_hash, expected_byte_size, expected_physical_key, false, false, |_| Ok(()))
     }
 
     #[cfg(test)]
@@ -1188,6 +1190,7 @@ impl PayloadCas {
             expected_byte_size,
             expected_physical_key,
             true,
+            true,
             after_hash,
         )
     }
@@ -1198,6 +1201,7 @@ impl PayloadCas {
         expected_byte_size: u64,
         expected_physical_key: &str,
         verify_content: bool,
+        sync_parent: bool,
         after_hash: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<ExactObjectUnlink> {
         #[cfg(test)]
@@ -1247,7 +1251,7 @@ impl PayloadCas {
             )
         })?;
         Ok(ExactObjectUnlink::Removed {
-            directory_entries_synced: sync_directory(parent)?,
+            directory_entries_synced: sync_parent && sync_directory(parent)?,
         })
     }
 
@@ -2486,7 +2490,7 @@ mod tests {
             assert!(cas.unlink_retained_object(&payload.content_hash, payload.byte_size, "assets/elsewhere").is_err());
             let path = directory.path().join(&payload.physical_key);
             let replacement = vec![42; payload.byte_size as usize];
-            let result = cas.unlink_exact_object_inner(&payload.content_hash, payload.byte_size, &payload.physical_key, verify_content, |_| {
+            let result = cas.unlink_exact_object_inner(&payload.content_hash, payload.byte_size, &payload.physical_key, verify_content, true, |_| {
                 fs::remove_file(&path)?;
                 fs::write(&path, &replacement)
             });

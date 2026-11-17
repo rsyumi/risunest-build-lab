@@ -1,4 +1,10 @@
 import { getPluginDeviceKeyspace, type PluginDeviceKeyspace } from "./pluginDeviceKeyspace";
+import { isTauri } from "../platform";
+import {
+    STRUCTURE_PART_BYTES, decodeStructuredLocalPluginValue, encodeStructuredLocalPluginValue, isPlainLocalPluginValue,
+    isStructureText, parseStructureText, structurePartCount, structureText,
+} from "./localPluginStorageValue";
+import { PLUGIN_DEVICE_VALUE_BYTES, pluginDeviceValueSize, readNativePluginDevicePart, storeNativePluginDeviceParts } from "./pluginDeviceTransfer";
 
 /**
  * Device-local strings for one plugin. Every call is answered from that
@@ -39,40 +45,100 @@ export class SafeLocalStorage {
     }
 }
 
-/** The same device keyspace, holding JSON values under their own space. */
+type LocalQueue = { keys: Map<string, Promise<void>>; clear: Promise<void> | null; enumeration: Promise<void> | null };
+const localQueues = new WeakMap<PluginDeviceKeyspace, LocalQueue>();
+const placeholderPart = '0'.repeat(64);
+
+/**
+ * The same device keyspace, holding values under their own space. A value JSON
+ * reproduces exactly is stored as JSON text; any other value in the structured
+ * clone range is stored in structure form with its bytes as device parts.
+ */
 export class SafeLocalPluginStorage {
     __classType = 'REMOTE_REQUIRED' as const;
+    readonly #owner: string;
     readonly #keyspace: PluginDeviceKeyspace;
+    readonly #queueState: LocalQueue;
 
     constructor(owner: string, keyspace = getPluginDeviceKeyspace(owner)) {
+        this.#owner = owner;
         this.#keyspace = keyspace;
+        let queue = localQueues.get(keyspace);
+        if (!queue) { queue = { keys: new Map(), clear: null, enumeration: null }; localQueues.set(keyspace, queue); }
+        this.#queueState = queue;
     }
 
     async getItem<T>(key: string): Promise<T | null> {
-        const stored = await this.#keyspace.getItem('json', key);
-        if (stored === null) return null;
-        try {
-            return JSON.parse(stored) as T;
-        } catch {
-            return null;
-        }
+        return this.#queue(key, async () => {
+            const stored = await this.#keyspace.getItem('json', key);
+            if (stored === null) return null;
+            if (isStructureText(stored)) {
+                // A value this build cannot read fails for its own key only.
+                try {
+                    const structure = parseStructureText(stored);
+                    return await decodeStructuredLocalPluginValue<T>(structure, index => readNativePluginDevicePart(
+                        structure.parts[index], Math.min(STRUCTURE_PART_BYTES, structure.byteLength - index * STRUCTURE_PART_BYTES)));
+                } catch (error) {
+                    throw new Error('getLocalPluginStorage cannot read this value', { cause: error });
+                }
+            }
+            try {
+                return JSON.parse(stored) as T;
+            } catch {
+                return null;
+            }
+        }, false);
     }
     async setItem<T>(key: string, value: T): Promise<void> {
-        // Avoid V8's fast-stringifier Zone allocation limit for large flat strings.
-        const serialized = JSON.stringify(value, null);
-        if (typeof serialized !== 'string') {
-            throw new TypeError('getLocalPluginStorage values must be JSON-serializable');
+        // Upstream's store keeps a top-level undefined as null.
+        const stored = value === undefined ? null : value;
+        if (isPlainLocalPluginValue(stored)) {
+            // Avoid V8's fast-stringifier Zone allocation limit for large flat strings.
+            const serialized = JSON.stringify(stored, null);
+            await this.#queue(key, () => this.#keyspace.setItem('json', key, serialized));
+            return;
         }
-        await this.#keyspace.setItem('json', key, serialized);
+        // Encode before any await so later changes to the value are not stored.
+        const encoded = encodeStructuredLocalPluginValue(stored);
+        if (!isTauri) throw new TypeError('getLocalPluginStorage values that are not JSON are not supported on the web');
+        const placeholders = new Array<string>(structurePartCount(encoded.byteLength)).fill(placeholderPart);
+        pluginDeviceValueSize(structureText(encoded, placeholders), PLUGIN_DEVICE_VALUE_BYTES - encoded.byteLength);
+        await this.#queue(key, async () => {
+            const parts = await storeNativePluginDeviceParts(this.#owner, encoded);
+            await this.#keyspace.setItem('json', key, structureText(encoded, parts));
+        });
+    }
+    #queue<T>(key: string | null, operation: () => Promise<T>, mutation = true): Promise<T> {
+        const state = this.#queueState;
+        const barriers: Promise<void>[] = key === null ? [...state.keys.values()] : [];
+        const pending = key === null ? undefined : state.keys.get(key);
+        if (pending) barriers.push(pending);
+        if (state.clear) barriers.push(state.clear);
+        if ((mutation || key === null) && state.enumeration) barriers.push(state.enumeration);
+        const next = barriers.length === 0 ? operation()
+            : barriers.length === 1 ? barriers[0].then(operation) : Promise.all(barriers).then(operation);
+        const release = () => {
+            if (key !== null) { if (state.keys.get(key) === settled) state.keys.delete(key); }
+            else if (mutation) { if (state.clear === settled) state.clear = null; }
+            else if (state.enumeration === settled) state.enumeration = null;
+        };
+        const settled = next.then(release, release);
+        if (key === null) {
+            if (mutation) state.clear = settled;
+            else state.enumeration = settled;
+        } else {
+            state.keys.set(key, settled);
+        }
+        return next;
     }
     async removeItem(key: string): Promise<void> {
-        await this.#keyspace.removeItem('json', key);
+        await this.#queue(key, () => this.#keyspace.removeItem('json', key));
     }
     async keys(): Promise<string[]> {
-        return await this.#keyspace.keys('json');
+        return await this.#queue(null, () => this.#keyspace.keys('json'), false);
     }
     async clear(): Promise<void> {
-        await this.#keyspace.clear('json');
+        await this.#queue(null, () => this.#keyspace.clear('json'));
     }
 }
 

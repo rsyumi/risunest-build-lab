@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: mocks.isTauri ? 'tauri' : 'web', os: 'windows' })))
 
 import { nativeOfficialAccountKeys } from './sync/nativeOfficialAccountFlow'
+import { DEVICE_MARKER_KEYS } from './deviceMarkers'
 
 import {
     createNativeDeviceSettings,
@@ -41,12 +42,12 @@ describe('native device settings', () => {
         mocks.isTauri = true
     })
 
-    it('assigns every official account metadata key to the native device store', () => {
+    it('assigns every device marker and official account metadata key to the native device store', () => {
         const source = readFileSync('src-tauri/src/persistent_store/device_store.rs', 'utf8')
         const declaration = source.match(/const DEVICE_SETTING_KEYS[^=]*=\s*\[([\s\S]*?)\];/)
         expect(declaration).not.toBeNull()
         const keys = [...declaration![1].matchAll(/"([^"]+)"/g)].map(match => match[1])
-        for (const key of Object.values(nativeOfficialAccountKeys)) {
+        for (const key of [...DEVICE_MARKER_KEYS, ...Object.values(nativeOfficialAccountKeys)]) {
             expect(keys, `Native device setting: ${key}`).toContain(key)
         }
     })

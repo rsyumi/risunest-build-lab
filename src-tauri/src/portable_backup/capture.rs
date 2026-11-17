@@ -101,6 +101,7 @@ fn capture_library_inner(
                 probe,
             )?;
         }
+        catalog.begin_inventory()?;
         let source_dependencies=store.capture_portable_units(&lease,&catalog.db,probe)?;
         let mut payloads=catalog.db.prepare("SELECT hash,body FROM backup_payload_spool ORDER BY hash")?;
         let mut rows=payloads.query([])?;
@@ -117,8 +118,8 @@ fn capture_library_inner(
             crate::device_backup::write_native_section(&catalog,section,probe)
                 .map_err(|error| Error::Io(std::io::Error::other(error.to_string())))?;
         }
-        catalog.begin_inventory()?;
         let cas = PayloadCas::new(store.repository_root())?;
+        let owner_manifests = catalog.owner_manifest_hashes()?;
         for (hash,size) in &source_dependencies.payloads {
             if source_dependencies.spooled_payloads.contains(hash) {continue;}
             let size=size.ok_or(Error::Invalid("original payload size is unavailable"))?;
@@ -126,7 +127,7 @@ fn capture_library_inner(
             if cas.stat_object(hash)? == Some(size) {
                 // An archived character's references include its owner manifest, which the file
                 // inventory below pins as a manifest.
-                let owner: bool = catalog.db.query_row("SELECT EXISTS(SELECT 1 FROM asset_owner_heads WHERE manifest_hash=?1)",[hash],|row| row.get(0))?;
+                let owner = owner_manifests.contains(hash);
                 let role=if owner {crate::asset_repository::job_pins::CasObjectRole::OwnerManifest} else {crate::asset_repository::job_pins::CasObjectRole::DirectObject};
                 pins.pin_existing(&cas,hash,size,role)?;
                 let path=cas.object_path(hash)?.ok_or(Error::Invalid("pinned backup payload disappeared"))?;

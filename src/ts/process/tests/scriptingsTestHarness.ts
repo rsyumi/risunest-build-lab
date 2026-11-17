@@ -13,11 +13,15 @@ type DatabaseModule = typeof import('../../storage/database.svelte')
 type StoresModule = typeof import('../../stores.svelte')
 type HypamemoryModule = typeof import('../memory/hypamemory')
 
-/** The persistence runtime with the active conversation session that `session` returns. */
+/** The persistence runtime with the active conversation session that `session` returns, and no windowed selection. */
 export function persistentRuntimeModule(
     session: () => ReturnType<PersistentRuntimeModule['peekActiveConversationSession']> = () => null,
 ) {
-    return { peekActiveConversationSession: session } satisfies Partial<PersistentRuntimeModule>
+    return {
+        peekActiveConversationSession: session,
+        captureSelectedConversationAuthority: vi.fn(() => null),
+        getActiveConversationViewportSource: vi.fn(() => null),
+    } satisfies Partial<PersistentRuntimeModule>
 }
 
 export function parserModule() {
@@ -46,12 +50,14 @@ export function utilModule() {
         getUserIcon: vi.fn(),
         getUserName: vi.fn(),
         parseKeyValue: vi.fn(() => []),
+        pickHashRand: vi.fn(),
     } satisfies Partial<typeof import('../../util')>
 }
 
 /** An empty database with an empty current character and chat. */
 export function databaseModule(overrides: Overrides<DatabaseModule> = {}) {
     const module = {
+        appVer: 'test',
         getCurrentCharacter: vi.fn(() => ({}) as ReturnType<DatabaseModule['getCurrentCharacter']>),
         getCurrentChat: vi.fn(() => ({ message: [] }) as ReturnType<DatabaseModule['getCurrentChat']>),
         getDatabase: vi.fn(() => ({ characters: [] }) as ReturnType<DatabaseModule['getDatabase']>),
@@ -78,6 +84,7 @@ export function storesModule(selectedIndex: () => number = () => 0) {
         ReloadChatPointer: storeStub({}),
         ReloadGUIPointer: storeStub(0),
         ScriptDisplayRefreshPointer: storeStub(0),
+        ScriptDisplayRebuildPointer: storeStub(0),
         CurrentTriggerIdStore: storeStub(null),
         selectedCharID: {
             subscribe: (run: (value: number) => void) => (run(selectedIndex()), () => undefined),

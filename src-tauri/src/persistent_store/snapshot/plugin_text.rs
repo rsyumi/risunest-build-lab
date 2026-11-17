@@ -1,6 +1,6 @@
 use super::{observe_native_cas_paths, observe_native_url, observe_text, retain_unscannable_record,
     cas_hash_from_physical_key, is_url_delimiter, AssetRootSet, CAS_PHYSICAL_PREFIX, COLD_STORAGE_HEADER, URL_SCHEMES};
-use crate::persistent_store::{device_store::plugin_values::text_value, StoreResult};
+use crate::persistent_store::{device_store::plugin_values::{structure, text_value}, StoreResult};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
 const REFERENCE_BYTES: usize = 1024 * 1024;
@@ -186,8 +186,13 @@ fn json_value(input: &mut impl BufRead, roots: &mut AssetRootSet, cold: u8, dept
 }
 
 pub(super) fn scan(mut input: impl Read + Seek, roots: &mut AssetRootSet) -> StoreResult<()> {
+    // A structure-form value is JSON after its marker line.
+    let mut marker = Vec::with_capacity(structure::MARKER.len());
+    (&mut input).take(structure::MARKER.len() as u64).read_to_end(&mut marker)?;
+    let start = if marker == structure::MARKER { marker.len() as u64 } else { 0 };
+    input.seek(SeekFrom::Start(start))?;
     let valid = serde_json::from_reader::<_, serde::de::IgnoredAny>(BufReader::new(&mut input)).is_ok();
-    input.seek(SeekFrom::Start(0))?;
+    input.seek(SeekFrom::Start(if valid { start } else { 0 }))?;
     if valid { json_value(&mut BufReader::new(input), roots, 0, 0)?; }
     else { scan_raw(input, roots, 0)?; }
     Ok(())
@@ -231,6 +236,9 @@ mod tests {
         let mut actual = AssetRootSet::default();
         scan(Cursor::new(encoded.as_bytes()), &mut actual).unwrap();
         assert_eq!(actual, expected);
+        let mut structured = AssetRootSet::default();
+        scan(Cursor::new([structure::MARKER, encoded.as_bytes()].concat()), &mut structured).unwrap();
+        assert_eq!(structured, expected);
         let mut expected = AssetRootSet::default();
         super::super::observe_json_value(&serde_json::Value::String(text.clone()), None, &mut expected);
         for width in [7, 79, 65_536] {

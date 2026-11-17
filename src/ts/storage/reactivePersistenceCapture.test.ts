@@ -7,7 +7,7 @@ import {
     PluginStorageCaptureCache,
 } from './saveCoordinatorHelpers'
 import type { Database } from './database.svelte'
-import { captureMaterializedCharacter } from './persistentUnitCapture'
+import { captureMaterializedCharacter, diffMaterializedCharacter } from './persistentUnitCapture'
 import { cloneConversationByMessage } from './conversationInsertPages'
 
 function fixture() {
@@ -186,6 +186,23 @@ describe('production reactive persistence captures', () => {
             expect(after.chats[0].note).toBe('metadata only')
             expect(after.chats[0].message).toBe(before.chats[0].message)
             expect(stringify.mock.calls.some(([value])=>Array.isArray(value))).toBe(false)
+        } finally { stringify.mockRestore() }
+    })
+
+    it('diffs an appended message without serializing the unchanged ones', () => {
+        const state=fixture()
+        state.database.characters[0].chats[0].id='conversation'
+        const cached=createPersistenceCanonicalCapture({root:()=>state.database,pluginStorage:()=>state.database.pluginCustomStorage,
+            presets:()=>state.database.botPresets,character:()=>state.database.characters[0],characters:()=>state.database.characters})
+        const before=cached.materializedCharacters!().get('synthetic')!
+        state.database.characters[0].chats[0].message.push({data:'appended'} as never)
+        const after=cached.materializedCharacters!().get('synthetic')!
+        expect(after.chats[0].message[0]).toBe(before.chats[0].message[0])
+        const stringify=vi.spyOn(JSON,'stringify')
+        try {
+            expect(diffMaterializedCharacter(before, after).conversations).toEqual([{type:'replace-range',
+                characterId:'synthetic',conversationId:'conversation',start:1,deleteCount:0,messages:[{data:'appended'}]}])
+            expect(stringify.mock.calls.some(([value])=>(value as {value?:{data?:unknown}})?.value?.data==='hello')).toBe(false)
         } finally { stringify.mockRestore() }
     })
 

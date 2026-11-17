@@ -1,0 +1,111 @@
+{
+  "oracle": "tokenizers==0.22.2",
+  "url": "https://huggingface.co/google/gemma-4-E4B-it/resolve/ee0ef6023621cff504d758262d4e04895a5af4a2/tokenizer.json",
+  "model": "public/token/gemma/gemma4.json",
+  "sha256": "4453a86456cdf02b3c8f79091ffda7ca017619ff5da495b9eda12141d5793962",
+  "cases": [
+    {
+      "name": "empty text",
+      "text": "",
+      "ids": []
+    },
+    {
+      "name": "English",
+      "text": "Hello, world!",
+      "ids": [
+        9259,
+        236764,
+        1902,
+        236888
+      ]
+    },
+    {
+      "name": "Korean",
+      "text": "안녕하세요. 오늘 날씨가 좋네요.",
+      "ids": [
+        61659,
+        236761,
+        31694,
+        57517,
+        240482,
+        237272,
+        27694,
+        55390,
+        236761
+      ]
+    },
+    {
+      "name": "whitespace",
+      "text": "  a\t\n\nb  ",
+      "ids": [
+        138,
+        236746,
+        255968,
+        108,
+        236763,
+        138
+      ]
+    },
+    {
+      "name": "Unicode and emoji",
+      "text": "café é 😀👩‍💻",
+      "ids": [
+        123125,
+        236859,
+        545,
+        238288,
+        163543,
+        243767,
+        237243,
+        244862
+      ]
+    },
+    {
+      "name": "special token text",
+      "text": "<bos><eos><start_of_turn>user\nHi<end_of_turn>",
+      "ids": [
+        2,
+        1,
+        236820,
+        3041,
+        236779,
+        1340,
+        236779,
+        887,
+        236813,
+        2364,
+        107,
+        10979,
+        236820,
+        643,
+        236779,
+        1340,
+        236779,
+        887,
+        236813
+      ]
+    },
+    {
+      "name": "Gemma 4 turn markers",
+      "text": "<|turn>user\nHello<turn|>",
+      "ids": [
+        105,
+        2364,
+        107,
+        9259,
+        106
+      ]
+    },
+    {
+      "name": "Gemma 4 channel markers",
+      "text": "<|channel>thought\ntext<channel|>",
+      "ids": [
+        100,
+        45518,
+        107,
+        1005,
+        101
+      ]
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { externalErrorKind } from './connection'
-import { beginMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
+import { beginDeferredMobileBackgroundTask, beginMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import type {
     DecimalString,
     ExternalConnectionError,
@@ -184,7 +184,14 @@ export function createExternalStorageController(
         return job
     }
     const runDestination = async (connectionId: string, run: DestinationRun): Promise<void> => {
-        while (run.goals.length > 0 && !run.cancelled) {
+        // A goal's hold ends only after the next goal's begins, so the run keeps its background time.
+        let held: { task: MobileBackgroundTask; success: boolean } | undefined
+        const releaseHeld = async () => {
+            const value = held
+            held = undefined
+            await value?.task.dispose(value.success)
+        }
+        try { while (run.goals.length > 0 && !run.cancelled) {
             if (run.cancelling) {
                 await run.cancelling
                 run.cancelling = undefined
@@ -198,10 +205,13 @@ export function createExternalStorageController(
             const request = selectedGoal.request
             run.activeGoal = selectedGoal
             if (run.abort.signal.aborted) run.abort = new AbortController()
-            const acquisition = request.backgroundTask ?? beginMobileBackgroundTask(
-                request.kind === 'cleanup' ? 'maintenance' : request.kind, run.abort.signal, request.reason === 'manual',
-            )
+            const taskKind = request.kind === 'cleanup' ? 'maintenance' : request.kind
+            // Scheduled work shows a notification only if the app leaves the screen while it runs.
+            const acquisition = request.backgroundTask ?? (request.reason === 'manual'
+                ? beginMobileBackgroundTask(taskKind, run.abort.signal, true)
+                : beginDeferredMobileBackgroundTask(taskKind, run.abort.signal))
             const background = acquisition instanceof Promise ? await acquisition : acquisition
+            if (held) await releaseHeld()
             const expired = () => {
                 run.abort.abort(background.signal?.reason)
                 if (run.active) run.cancelling ??= bridge.cancelJob(run.active.id).then(() => undefined, () => undefined)
@@ -282,12 +292,12 @@ export function createExternalStorageController(
                 background.signal?.removeEventListener('abort', expired)
                 await run.cancelling
                 run.cancelling = undefined
-                if (!request.backgroundTask) await background.dispose(success)
+                if (!request.backgroundTask) held = { task: background, success }
                 run.active = undefined
                 run.activeGoal = undefined
                 publish()
             }
-        }
+        } } finally { await releaseHeld() }
     }
 
     const kick = (connectionId: string, run: DestinationRun): void => {

@@ -24,11 +24,11 @@
     } from '@lucide/svelte'
 
     import { changeLanguage, language } from 'src/lang'
-    import { UI_LANGUAGES } from 'src/lang/uiLanguages'
+    import { UI_LANGUAGES, uiLanguageFor } from 'src/lang/uiLanguages'
     import { alertConfirm, alertError, alertNormal, openRisuAccountLogin } from 'src/ts/alert'
     import { restoreNativeOfficialAccountBackup } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
     import { NativeAccountLoginError } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
-    import { presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
+    import { fileOperationErrorWasPresented, presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
     import { hubURL } from 'src/ts/characterCards'
     import { getVersionString } from 'src/ts/globalApi.svelte'
     import { updateTextThemeAndCSS } from 'src/ts/gui/colorscheme'
@@ -113,8 +113,7 @@
     const t = $derived(strings.risuNest.onboarding)
 
     {
-        const browserLangShort = navigator.language.split('-')[0]
-        const initialLanguage = UI_LANGUAGES.find((option) => option.value === browserLangShort)?.value ?? 'en'
+        const initialLanguage = uiLanguageFor(navigator.language)
         changeLanguage(initialLanguage)
         DBState.db.language = initialLanguage
     }
@@ -142,13 +141,19 @@
     const jobShown = $derived(job.open && !job.compact)
     const jobDetails = $derived(formatErrorDetails($diagnosticInfo, job.terminal?.details || job.terminal?.reason || job.terminal?.summary || ''))
     const jobRecoveryRequired = $derived($nativeFileOperationOutcome?.error?.recoveryRequired === true)
+    const accountRetryAvailable = $derived(!!$nativeFileOperationOutcome?.status?.officialAssets?.operationId
+        && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.officialAssets.state)
+        && !['account-changed', 'library-changed'].includes($nativeFileOperationOutcome.status.officialAssets.reason ?? ''))
     const bodyRetryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'restore-portable-backup'
         && $nativeFileOperationOutcome.status.restoreAdoptionConfirmed === true
         && $nativeFileOperationOutcome.status.portableBodyRetry?.pending === true
         && $nativeFileOperationOutcome.status.portableBodyRetry.available === true
         && !$nativeFileOperationOutcome.status.portableBodyRetry.sourceRequired)
+    const stoppedAccountRestore = $derived($nativeFileOperationOutcome?.state === 'cancelled'
+        && $nativeFileOperationOutcome.status?.officialAssets?.state === 'cancelled'
+        && $nativeFileOperationOutcome.status.activationRevision !== undefined)
     // The restored data is in place, so the reader can move on unless the screen still waits for a refresh or the result is unknown.
-    const committedRecovery = $derived(jobRecoveryRequired
+    const committedRecovery = $derived((jobRecoveryRequired || stoppedAccountRestore)
         && $nativeFileOperationOutcome?.error?.code !== 'activation-outcome-unresolved'
         && $persistentWorkingSetRefreshRevision === null)
     const jobTicking = $derived(jobShown && job.terminal === null)
@@ -769,6 +774,16 @@
                                     {t.import.next}<ArrowRight />
                                 </button>
                             {:else}
+                                {#if accountRetryAvailable}
+                                    <button class="btn" type="button" onclick={() => {
+                                        const startedAt = Date.now()
+                                        void import('src/ts/storage/sync/nativeOfficialAccountOperations').then(module => module.retryNativeOfficialAccountAssetsFromOutcome()).then(continueAfterImport).catch(async error => {
+                                            if (fileOperationErrorWasPresented('import', startedAt)) return
+                                            const { failureReason } = await import('src/ts/gui/nativeFileJobDialogModel')
+                                            alertError(failureReason(error?.code ?? ''))
+                                        })
+                                    }}>{strings.retry}</button>
+                                {/if}
                                 {#if bodyRetryAvailable}
                                     <button class="btn" type="button" onclick={() => {
                                         void retryPortableRestoreBodiesFromOutcome().then(continueAfterImport).catch(() => {})
@@ -855,6 +870,7 @@
                                     <Globe />
                                     <span class="sr-only">{t.language}</span>
                                     <select
+                                        class="risu-select"
                                         value={DBState.db.language}
                                         onchange={(event) =>
                                             setLanguage(
@@ -1531,7 +1547,7 @@
     }
     .pill select {
         border: 0;
-        background: none;
+        background-color: transparent;
         font-size: 12.5px;
         outline: none;
     }
@@ -1629,7 +1645,9 @@
         gap: 12px;
         margin-top: 16px;
         padding: 12px 14px;
-        border: 1px solid color-mix(in srgb, var(--o-teal) 35%, transparent);
+        border-width: 1px;
+        border-style: solid;
+        border-color: color-mix(in srgb, var(--o-teal) 35%, transparent);
         border-radius: 14px;
         background: color-mix(in srgb, var(--o-teal) 8%, transparent);
     }
@@ -1890,7 +1908,9 @@
     .warnings {
         margin: 0 0 16px;
         padding: 10px 12px 10px 28px;
-        border: 1px solid color-mix(in srgb, var(--o-warn) 35%, transparent);
+        border-width: 1px;
+        border-style: solid;
+        border-color: color-mix(in srgb, var(--o-warn) 35%, transparent);
         border-radius: 10px;
         font-size: 12.5px;
         color: var(--o-warn);
@@ -2007,7 +2027,9 @@
         gap: 12px;
         margin-bottom: 14px;
         padding: 14px;
-        border: 1px solid color-mix(in srgb, var(--o-teal) 35%, transparent);
+        border-width: 1px;
+        border-style: solid;
+        border-color: color-mix(in srgb, var(--o-teal) 35%, transparent);
         border-radius: 14px;
         background: color-mix(in srgb, var(--o-teal) 8%, transparent);
     }

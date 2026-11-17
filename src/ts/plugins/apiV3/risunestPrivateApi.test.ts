@@ -7,6 +7,7 @@ function setup(granted: boolean | Promise<boolean> = true) {
     const context = { revision: 1 } as ConversationContext
     const readConversationContext = vi.fn(async () => context)
     const hasDatabasePermission = vi.fn(async () => granted)
+    const hasHostToolPermission = vi.fn(async () => granted)
     const lifetime = new AbortController()
     const patchConversation = vi.fn(async (_request: unknown, _signal?: AbortSignal): Promise<ConversationPatchResult> => ({ status: 'applied', revision: 2 }))
     const listTools = vi.fn(async () => ({ scope: 'scope', tools: [] }))
@@ -20,9 +21,10 @@ function setup(granted: boolean | Promise<boolean> = true) {
         chatView,
         generationEnd,
         hasDatabasePermission,
+        hasHostToolPermission,
         lifetimeSignal: lifetime.signal,
     })
-    return { api, context, readConversationContext, hasDatabasePermission, lifetime, patchConversation, listTools, callTool, chatView, generationEnd }
+    return { api, context, readConversationContext, hasDatabasePermission, hasHostToolPermission, lifetime, patchConversation, listTools, callTool, chatView, generationEnd }
 }
 
 describe('risunestReadConversationContext', () => {
@@ -143,23 +145,24 @@ describe('risunestPatchConversation', () => {
 describe('risunest host tools', () => {
     const input = { scope: 'scope', source: 'internal:dice', name: 'roll', arguments: { sides: 6 } }
 
-    it('asks for the db permission and passes the call on with a signal', async () => {
-        const { api, hasDatabasePermission, listTools, callTool } = setup()
+    it('asks for the hostTools permission alone and passes the call on with a signal', async () => {
+        const { api, hasDatabasePermission, hasHostToolPermission, listTools, callTool } = setup()
 
         await expect(api.listHostTools()).resolves.toEqual({ scope: 'scope', tools: [] })
         await expect(api.callHostTool(input)).resolves.toEqual([{ type: 'text', text: 'done' }])
-        expect(hasDatabasePermission).toHaveBeenCalledTimes(2)
+        expect(hasHostToolPermission).toHaveBeenCalledTimes(2)
+        expect(hasDatabasePermission).not.toHaveBeenCalled()
         expect(listTools).toHaveBeenCalledTimes(1)
         expect(callTool).toHaveBeenCalledWith(input, expect.any(AbortSignal))
         await expect(api.callHostTool({ ...input, source: '' })).rejects.toThrow(TypeError)
         await expect(api.callHostTool({ ...input, signal: 'stop' })).rejects.toThrow(TypeError)
     })
 
-    it('rejects both methods when the db permission is denied', async () => {
+    it('rejects both methods when the hostTools permission is denied', async () => {
         const { api, listTools, callTool } = setup(false)
 
-        await expect(api.listHostTools()).rejects.toThrow(/db permission/)
-        await expect(api.callHostTool(input)).rejects.toThrow(/db permission/)
+        await expect(api.listHostTools()).rejects.toThrow(/hostTools permission/)
+        await expect(api.callHostTool(input)).rejects.toThrow(/hostTools permission/)
         expect(listTools).not.toHaveBeenCalled()
         expect(callTool).not.toHaveBeenCalled()
     })

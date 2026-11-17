@@ -97,7 +97,48 @@ pub(crate) enum FrozenBodySource {
     Standalone(Source),
     Packed(PackedSource),
 }
+/// The connection root a registered source is read with. A source stores the
+/// data root of the run that registered it, and a link at the data root can
+/// have moved the files since. A stored root that still names the registry's
+/// directory, and is not itself a link, is kept as written; any other is
+/// replaced by the registry's root.
+struct Rooting {
+    root:PathBuf,
+    canonical:Option<Option<PathBuf>>,
+    kept:BTreeMap<PathBuf,bool>,
+}
+impl Rooting {
+    fn new(root:&Path)->Self {Self{root:root.to_owned(),canonical:None,kept:BTreeMap::new()}}
+    fn root(&mut self,stored:PathBuf)->PathBuf {
+        if stored==self.root {return stored;}
+        let kept=match self.kept.get(&stored) {
+            Some(&kept)=>kept,
+            None=>{
+                let canonical=self.canonical.get_or_insert_with(||std::fs::canonicalize(&self.root).ok());
+                let kept=canonical.is_some() && std::fs::canonicalize(&stored).ok()==*canonical
+                    && !std::fs::symlink_metadata(&stored).is_ok_and(|metadata|crate::trust_boundary::is_link_like(&metadata));
+                self.kept.insert(stored.clone(),kept);
+                kept
+            }
+        };
+        if kept {stored} else {self.root.clone()}
+    }
+}
+impl Source {
+    fn rooted(mut self,rooting:&mut Rooting)->Self {self.connection_root=rooting.root(std::mem::take(&mut self.connection_root));self}
+}
+impl<O> PackedSource<O> {
+    fn rooted(mut self,rooting:&mut Rooting)->Self {self.connection_root=rooting.root(std::mem::take(&mut self.connection_root));self}
+}
 impl FrozenBodySource {
+    /// The same source, read with `root` as the registry's root.
+    pub(crate) fn rooted(self,root:&Path)->Self {self.rooted_by(&mut Rooting::new(root))}
+    fn rooted_by(self,rooting:&mut Rooting)->Self {
+        match self {
+            Self::Standalone(source)=>Self::Standalone(source.rooted(rooting)),
+            Self::Packed(source)=>Self::Packed(source.rooted(rooting)),
+        }
+    }
     pub(crate) fn byte_length(&self)->u64 {
         match self {
             Self::Standalone(source)=>source.body.plaintext_byte_length.0,
@@ -138,7 +179,7 @@ fn database(root: &Path, create: bool) -> Result<Option<Connection>> {
 /// One connection to the remote body registry, for a pass that asks about many
 /// hashes.
 pub(crate) struct RemoteBodies {
-    root:PathBuf,
+    rooting:Rooting,
     db:Option<Connection>,
 }
 
@@ -210,13 +251,16 @@ pub(crate) struct BodyHolders {
 }
 impl RemoteBodies {
     pub(crate) fn open(root:&Path)->std::io::Result<Self> {Self::connect(root).map_err(invalid_source)}
-    fn connect(root:&Path)->Result<Self> {Ok(Self{root:root.to_owned(),db:database(root,false)?})}
+    fn connect(root:&Path)->Result<Self> {Ok(Self{rooting:Rooting::new(root),db:database(root,false)?})}
     /// Opens nothing until a first question needs the registry.
-    pub(crate) fn deferred(root:&Path)->Self {Self{root:root.to_owned(),db:None}}
+    pub(crate) fn deferred(root:&Path)->Self {Self{rooting:Rooting::new(root),db:None}}
     /// A registry created after the pass began is opened once it exists.
     fn db(&mut self)->Result<Option<&Connection>> {
-        if self.db.is_none() {self.db=database(&self.root,false)?;}
-        Ok(self.db.as_ref())
+        Ok(self.parts()?.map(|(db,_)|db))
+    }
+    fn parts(&mut self)->Result<Option<(&Connection,&mut Rooting)>> {
+        if self.db.is_none() {self.db=database(&self.rooting.root,false)?;}
+        Ok(match self.db.as_ref() {Some(db)=>Some((db,&mut self.rooting)),None=>None})
     }
     /// A standalone source comes before a packed one, and the first library in
     /// order before the others.
@@ -226,7 +270,7 @@ impl RemoteBodies {
             UNION ALL SELECT 1,library,source FROM packed_sources WHERE hash=?1) ORDER BY kind,library LIMIT 1",[hash],|r|Ok((r.get(0)?,r.get(1)?)))
             .optional().map_err(local)?;
         row.map(|(kind,source)| if kind==0 {serde_json::from_str(&source).map(FrozenBodySource::Standalone)} else {serde_json::from_str(&source).map(FrozenBodySource::Packed)})
-            .transpose().map_err(local)
+            .transpose().map(|source|source.map(|source|source.rooted_by(&mut self.rooting))).map_err(local)
     }
     pub(crate) fn stat(&mut self,hash:&str)->std::io::Result<Option<u64>> {
         self.frozen(hash).map(|source|source.map(|source|source.byte_length())).map_err(invalid_source)
@@ -234,7 +278,7 @@ impl RemoteBodies {
     /// The source `frozen` would choose, for every hash in `hashes` that has one.
     fn registered(&mut self,hashes:&[&str])->Result<BTreeMap<String,Registered>> {
         let mut found=BTreeMap::new();
-        let Some(db)=self.db()? else {return Ok(found)};
+        let Some((db,rooting))=self.parts()? else {return Ok(found)};
         for page in hashes.chunks(LOOKUP_PAGE) {
             let marks=(1..=page.len()).map(|index|format!("?{index}")).collect::<Vec<_>>().join(",");
             let mut statement=db.prepare(&format!("SELECT hash,0,library,source FROM sources WHERE hash IN ({marks})
@@ -245,11 +289,11 @@ impl RemoteBodies {
                 if found.contains_key(&hash) {continue;}
                 let kind:i64=row.get(1).map_err(local)?;
                 let source:String=row.get(3).map_err(local)?;
-                let registered=if kind==0 {Registered::Standalone(serde_json::from_str(&source).map_err(local)?)} else {
+                let registered=if kind==0 {Registered::Standalone(serde_json::from_str::<Source>(&source).map_err(local)?.rooted(rooting))} else {
                     let outline:OutlineRow=serde_json::from_str(&source).map_err(local)?;
                     let mut packs=outline.chunks.into_iter().map(|chunk|chunk.pack_id).collect::<Vec<_>>();
                     packs.sort();packs.dedup();
-                    Registered::Packed((outline.connection_root,outline.connection_id,outline.library_id),
+                    Registered::Packed((rooting.root(outline.connection_root),outline.connection_id,outline.library_id),
                         PackedOutline{hash:hash.clone(),byte_length:outline.byte_length,packs})
                 };
                 found.insert(hash,registered);
@@ -260,7 +304,7 @@ impl RemoteBodies {
     /// The holders of every hash in `hashes` that has a registered source.
     pub(crate) fn holders(&mut self,hashes:&[&str])->Result<BTreeMap<String,BodyHolders>> {
         let mut found=BTreeMap::<String,BodyHolders>::new();
-        let Some(db)=self.db()? else {return Ok(found)};
+        let Some((db,rooting))=self.parts()? else {return Ok(found)};
         for page in hashes.chunks(LOOKUP_PAGE) {
             let marks=(1..=page.len()).map(|index|format!("?{index}")).collect::<Vec<_>>().join(",");
             let mut statement=db.prepare(&format!("SELECT hash,0,library,source FROM sources WHERE hash IN ({marks})
@@ -272,10 +316,10 @@ impl RemoteBodies {
                 let source:String=row.get(3).map_err(local)?;
                 let (byte_length,connection)=if kind==0 {
                     let source:Source=serde_json::from_str(&source).map_err(local)?;
-                    (source.body.plaintext_byte_length.0,(source.connection_root,source.connection_id))
+                    (source.body.plaintext_byte_length.0,(rooting.root(source.connection_root),source.connection_id))
                 } else {
                     let outline:OutlineRow=serde_json::from_str(&source).map_err(local)?;
-                    (outline.byte_length,(outline.connection_root,outline.connection_id))
+                    (outline.byte_length,(rooting.root(outline.connection_root),outline.connection_id))
                 };
                 found.entry(hash).or_insert_with(||BodyHolders{byte_length,connections:BTreeSet::new()}).connections.insert(connection);
             }
@@ -309,7 +353,7 @@ impl RemoteBodies {
     /// The packed sources `library` registered for `hashes`.
     fn packed<'a>(&mut self,library:&str,hashes:impl IntoIterator<Item=&'a str>)->Result<BTreeMap<String,PackedSource>> {
         let mut found=BTreeMap::new();
-        let Some(db)=self.db()? else {return Ok(found)};
+        let Some((db,rooting))=self.parts()? else {return Ok(found)};
         let hashes=hashes.into_iter().collect::<Vec<_>>();
         for page in hashes.chunks(LOOKUP_PAGE) {
             let marks=(2..=page.len()+1).map(|index|format!("?{index}")).collect::<Vec<_>>().join(",");
@@ -318,7 +362,7 @@ impl RemoteBodies {
             while let Some(row)=rows.next().map_err(local)? {
                 let hash:String=row.get(0).map_err(local)?;
                 let source:String=row.get(1).map_err(local)?;
-                found.insert(hash,serde_json::from_str(&source).map_err(local)?);
+                found.insert(hash,serde_json::from_str::<PackedSource>(&source).map_err(local)?.rooted(rooting));
             }
         }
         Ok(found)
@@ -366,7 +410,7 @@ pub(crate) fn source(root: &Path, hash: &str) -> Result<Option<Source>> {
         .optional()
         .map_err(local)?;
     value
-        .map(|value| serde_json::from_str(&value).map_err(local))
+        .map(|value| serde_json::from_str::<Source>(&value).map(|source| source.rooted(&mut Rooting::new(root))).map_err(local))
         .transpose()
 }
 pub(crate) fn stat(root: &Path, hash: &str) -> std::io::Result<Option<u64>> {
@@ -452,7 +496,7 @@ pub(super) fn register_verified_packed_many<'a,O:Serialize+'a>(root:&Path,source
 pub(crate) fn packed_source(root:&Path,hash:&str) -> Result<Option<PackedSource>> {
     let Some(db)=database(root,false)? else {return Ok(None)};
     let value:Option<String>=db.query_row("SELECT source FROM packed_sources WHERE hash=?1 ORDER BY library LIMIT 1",[hash],|r|r.get(0)).optional().map_err(local)?;
-    value.map(|v|serde_json::from_str(&v).map_err(local)).transpose()
+    value.map(|v|serde_json::from_str::<PackedSource>(&v).map(|source|source.rooted(&mut Rooting::new(root))).map_err(local)).transpose()
 }
 /// A body grouped with every body it shares a pack with.
 trait PackMember {
@@ -502,8 +546,19 @@ fn hydration_error(_:impl std::fmt::Display)->crate::server_sync::SyncError {cra
 fn remote_error(error:ProviderError)->crate::server_sync::SyncError {
     match error.kind {
         ErrorKind::Cancelled=>crate::server_sync::SyncError::new("cancelled",409),
-        ErrorKind::ReauthRequired=>crate::server_sync::SyncError::new("external-reauth-required",502),
+        // A 401 or 403 asks for the same remedy as an expired sign-in.
+        ErrorKind::ReauthRequired|ErrorKind::Unauthorized=>crate::server_sync::SyncError::new("external-reauth-required",502),
+        ErrorKind::RepositoryKeyUnavailable|ErrorKind::RecoveryKeyMismatch=>crate::server_sync::SyncError::new("external-key-locked",502),
         _=>crate::server_sync::SyncError::new("external-body-unavailable",502),
+    }
+}
+/// Bodies come from every connection that holds them, so a sign-in or key
+/// failure names the connection that has to sign in again or take its key.
+fn source_error(connection_id:&str)->impl Fn(ProviderError)->crate::server_sync::SyncError+'_ {
+    move |error| {
+        let mut value=remote_error(error);
+        if ["external-reauth-required","external-key-locked"].contains(&value.code.as_str()) {value.connection_id=Some(connection_id.to_owned());}
+        value
     }
 }
 pub(crate) fn hydrate_registered_many(root:&Path,digests:&[String],priority:&BTreeSet<String>,
@@ -611,7 +666,7 @@ pub(crate) fn hydrate_registered_many_scheduled(root:&Path,digests:&[String],pri
         before_group(first,opened)?;
         match work {
             Work::Standalone(sources)=>{
-                let connection=source_connection(&mut connections,&connection,&cancel).map_err(remote_error)?;
+                let connection=source_connection(&mut connections,&connection,&cancel).map_err(source_error(&connection.1))?;
                 hydrate_standalone(connection,sources,scratch.path(),&publisher,opened)?;
             }
             Work::Packed(outlines)=>{
@@ -628,7 +683,7 @@ pub(crate) fn hydrate_registered_many_scheduled(root:&Path,digests:&[String],pri
                 }
                 drop(sources);
                 if group.is_empty() {continue;}
-                let opened_source=source_connection(&mut connections,&connection,&cancel).map_err(remote_error)?;
+                let opened_source=source_connection(&mut connections,&connection,&cancel).map_err(source_error(&connection.1))?;
                 hydrate_pack_group(root,opened_source,group,scratch.path(),&publisher,opened)?;
             }
         }
@@ -717,7 +772,7 @@ fn hydrate_pack_group(root:&Path,connection:&OpenedSource,group:Vec<SharedPacked
         }).await
     });
     if let Some(error)=installer_error.borrow_mut().take() {return Err(error);}
-    result.map_err(remote_error)
+    result.map_err(source_error(&connection.connection.1))
 }
 /// Reads the standalone bodies of one connection under one lease, publishing
 /// them a batch at a time so the scratch directory holds at most one batch.
@@ -786,7 +841,7 @@ fn hydrate_standalone(connection:&OpenedSource,sources:Vec<Source>,scratch:&Path
         }).await
     });
     if let Some(error)=installer_error.borrow_mut().take() {return Err(error);}
-    result.map_err(remote_error)
+    result.map_err(source_error(&connection.connection.1))
 }
 /// A verified body waiting in scratch to be staged into the repository.
 struct StagedBody {
@@ -934,7 +989,19 @@ pub(crate) async fn spool_verified_remote_body_observed(root:&Path,hash:&str,des
 pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destination:&Path,cancel:&Cancellation)->Result<tempfile::NamedTempFile> {
     spool_frozen_remote_body_observed(source,destination,cancel,None).await
 }
+/// The body comes from the connection that registered it, which can be another
+/// than the one the operation works on, so a failure that only that connection's
+/// sign-in or key clears names it.
 pub(super) async fn spool_frozen_remote_body_observed(source:&FrozenBodySource,destination:&Path,cancel:&Cancellation,observer:Option<std::sync::Arc<dyn Fn(u64)+Send+Sync>>)->Result<tempfile::NamedTempFile> {
+    let connection_id=match source {FrozenBodySource::Standalone(source)=>&source.connection_id,FrozenBodySource::Packed(source)=>&source.connection_id};
+    spool_frozen_remote_body_from(source,destination,cancel,observer).await.map_err(|mut error| {
+        if matches!(error.kind,ErrorKind::ReauthRequired|ErrorKind::Unauthorized|ErrorKind::RepositoryKeyUnavailable|ErrorKind::RecoveryKeyMismatch) {
+            error.connection_id=Some(connection_id.clone());
+        }
+        error
+    })
+}
+async fn spool_frozen_remote_body_from(source:&FrozenBodySource,destination:&Path,cancel:&Cancellation,observer:Option<std::sync::Arc<dyn Fn(u64)+Send+Sync>>)->Result<tempfile::NamedTempFile> {
     let high_water=std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let progress=|| {
         let observer=observer.clone(); let high_water=high_water.clone();
@@ -1050,6 +1117,41 @@ mod registration_tests {
         assert_eq!(count,sources.len() as i64);
         for source in [&sources[0],&sources[PACKED_REGISTRATION_BATCH],&sources[sources.len()-1]] {
             assert_eq!(packed_source(root.path(),&source.hash).unwrap().unwrap().byte_length,source.byte_length);
+        }
+    }
+
+    #[test]
+    fn a_stored_root_that_no_longer_names_the_data_root_without_a_link_reads_as_the_data_root() {
+        let fixture=tempfile::tempdir().unwrap();
+        let root=fixture.path().join("data");
+        std::fs::create_dir(&root).unwrap();
+        // A data root moved through a link leaves rows naming the link.
+        let link=fixture.path().join("earlier");
+        crate::app_paths::tests::link_directory(&root,&link);
+        let canonical=std::fs::canonicalize(&root).unwrap();
+        let catalog=StoredObject {
+            header:PublicObjectHeader::new("synthetic-repository".into(),"synthetic-catalog".into(),ObjectRole::Catalog,1).unwrap(),
+            locator:WireLocator {connection_identity:"synthetic-account".into(),collection:Some("catalogs".into()),object:"synthetic-object".into()},
+            ciphertext_length:1,ciphertext_sha256:[1;32],plaintext_length:1,plaintext_sha256:[2;32],
+        };
+        let stored=[(fixture.path().join("gone"),root.clone()),(link,root.clone()),(canonical.clone(),canonical)];
+        let sources=stored.iter().enumerate().map(|(index,(connection_root,_))| PackedSource {
+            hash:format!("{index:064x}"),byte_length:index as u64,library_id:"synthetic-library".into(),
+            connection_id:"synthetic-connection".into(),connection_root:connection_root.clone(),protected_snapshot:"synthetic-snapshot".into(),
+            catalog:catalog.clone(),chunks:Vec::new(),packs:Vec::new(),
+        }).collect::<Vec<_>>();
+        register_verified_packed_many(&root,&sources).unwrap();
+        let mut remote=RemoteBodies::open(&root).unwrap();
+        for (source,(_,expected)) in sources.iter().zip(&stored) {
+            let hash=source.hash.as_str();
+            assert_eq!(&packed_source(&root,hash).unwrap().unwrap().connection_root,expected);
+            let Some(FrozenBodySource::Packed(frozen))=remote.frozen(hash).unwrap() else {panic!("packed source")};
+            assert_eq!(&frozen.connection_root,expected);
+            let Some(Registered::Packed(connection,_))=remote.registered(&[hash]).unwrap().remove(hash) else {panic!("packed outline")};
+            assert_eq!(&connection.0,expected);
+            assert_eq!(&remote.packed("synthetic-library",[hash]).unwrap()[hash].connection_root,expected);
+            let holders=remote.holders(&[hash]).unwrap().remove(hash).unwrap();
+            assert_eq!(holders.connections,BTreeSet::from([(expected.clone(),"synthetic-connection".to_owned())]));
         }
     }
 }

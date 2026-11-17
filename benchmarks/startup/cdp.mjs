@@ -118,7 +118,7 @@ export async function waitForInteractive(client, timeoutMs = 120_000) {
 export const instrumentation = `(() => {
     performance.mark('startup:observer');
     const commands = new Set(['pds_open', 'pds_materialize', 'pds_commit', 'pds_replace_commit',
-        'pds_read_root', 'pds_query_characters', 'pds_snapshot_create', 'pds_snapshot_list',
+        'pds_read_root', 'pds_read_revision', 'pds_query_characters', 'pds_snapshot_create', 'pds_snapshot_list',
         'pds_read_character', 'pds_query_conversations', 'pds_read_conversation_window', 'pds_read_conversation',
         'pds_asset_gc_maintenance', 'plugin:fs|read_dir', 'plugin:fs|stat',
         'asset_cas_read_bytes', 'asset_cas_stat_object']);

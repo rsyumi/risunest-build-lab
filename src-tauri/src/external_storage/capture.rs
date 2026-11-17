@@ -452,15 +452,20 @@ impl CaptureCatalog {
         Ok(())
     }
 
-    pub(crate) fn backup_sections(&self) -> Result<Vec<super::sections::CapturedSection>> {
+    /// Section sources hold the absolute paths of the run that captured them,
+    /// so a job resumed under another data root finds them under `data_root`.
+    pub(crate) fn backup_sections(&self, data_root: &Path) -> Result<Vec<super::sections::CapturedSection>> {
         if !self.finalized { return Err(invalid("Backup capture is not durable")); }
         self.original_backup_units()?;
         let mut sections = Vec::new();
         let mut statement = self.db.prepare("SELECT kind,body FROM backup_sections ORDER BY kind")?;
         for row in statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
             let (kind, body) = row?;
-            let section: super::sections::CapturedSection = serde_json::from_str(&body)?;
+            let mut section: super::sections::CapturedSection = serde_json::from_str(&body)?;
             if section.kind.id() != kind { return Err(invalid("Backup section identity differs")); }
+            for source in &mut section.sources {
+                source.path = crate::app_paths::relocated_external_storage_path(&source.path, data_root);
+            }
             sections.push(section);
         }
         if sections.len() != 3 { return Err(invalid("Complete backup sections are unavailable")); }
@@ -937,7 +942,10 @@ pub(crate) fn registered_references(
     let mut query=db.prepare("SELECT c.id,c.identity,f.catalog_path,f.file_hash FROM external_storage_capture_files f JOIN external_storage_captures c ON c.id=f.capture_id")?;
     let mut rows = query.query([])?;
     while let Some(row) = rows.next()? {
-        let original = PathBuf::from(row.get::<_, String>(2)?);
+        let original = crate::app_paths::relocated_external_storage_path(
+            Path::new(&row.get::<_, String>(2)?),
+            repository_root,
+        );
         if is_link_like(&fs::symlink_metadata(&original)?) {
             return Err(invalid("Registered capture is a link"));
         }
@@ -1054,7 +1062,6 @@ mod tests {
     fn capture_object_publication_never_replaces_an_existing_identity() {
         let root = tempfile::tempdir().expect("create capture root");
         let capture_directory = root.path().join("capture");
-        let object_directory = root.path().join("objects");
         let mut catalog = CaptureCatalog::create(&capture_directory, root.path(), None)
             .expect("create capture catalog");
         // Above the threshold, so publication still goes through the shared
@@ -1062,6 +1069,8 @@ mod tests {
         let payload = vec![7u8; super::super::content_store::SMALL_OBJECT_BYTES + 1];
         let payload = payload.as_slice();
         let expected = hex::encode(hash(payload));
+        let published = super::super::content_store::file_location(root.path(), &expected);
+        let object_directory = published.parent().unwrap();
 
         catalog
             .content
@@ -1072,10 +1081,10 @@ mod tests {
             .put(&expected, payload)
             .expect("deduplicate capture object");
         assert_eq!(
-            fs::read(object_directory.join(&expected)).expect("read published object"),
+            fs::read(&published).expect("read published object"),
             payload
         );
-        assert!(fs::read_dir(&object_directory)
+        assert!(fs::read_dir(object_directory)
             .expect("list object directory")
             .all(|entry| !entry
                 .expect("read object entry")
@@ -1103,7 +1112,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let external = root.path().join("external-storage");
         let capture_directory = external.join("captures/conflict");
-        let object_directory = external.join("objects");
         let mut catalog = CaptureCatalog::create(&capture_directory, &external, None)
             .unwrap();
         let identity = identity();
@@ -1132,7 +1140,7 @@ mod tests {
         assert!(roots.content_objects.contains(&record_hash));
         assert!(roots
             .logical_records
-            .contains(&object_directory.join(&generated_hash).canonicalize().unwrap()));
+            .contains(&super::super::content_store::file_location(&external, &generated_hash).canonicalize().unwrap()));
         assert!(roots.assets.object_hashes.contains(&asset_hash));
 
         // A body that no longer matches its identity is found by the pass that

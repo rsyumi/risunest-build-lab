@@ -1,3 +1,9 @@
+import { imageFixture } from '../../../../../tests/support/imageFixtures'
+import { imageAliases, imageFormatForName } from '../../../media/imageFormats'
+const selection = vi.hoisted(() => ({ target: null as { characterId: string, conversationId: string } | null }))
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
+    captureSelectedConversationTarget: () => selection.target,
+}))
 import { setRuntimePerformanceProfile } from 'src/ts/runtimePerformanceProfile'
 vi.mock('src/ts/alert', () => ({ alertToast: vi.fn() }))
 import fc from 'fast-check'
@@ -6,6 +12,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { InlayAsset } from '../inlays'
 import {
     getInlayAsset,
+    getInlayAssetMetadata,
     getInlayAssetBlob,
     getInlayEncodeOptions,
     getInlayAssetRenderUrl,
@@ -163,6 +170,7 @@ function makeImage(w: number, h: number): HTMLImageElement {
 }
 
 beforeEach(() => {
+    selection.target = null
     vi.clearAllMocks()
     store.clear()
     corruptReadKey = undefined
@@ -192,6 +200,27 @@ beforeEach(() => {
 })
 
 describe('setInlayAsset', () => {
+    test('captures provenance before reading image bytes and replaces it for fixed-id content writes', async () => {
+        selection.target = { characterId: 'character-before', conversationId: 'chat-before' }
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(1000)
+        const input = new Blob([Uint8Array.of(1)], { type: 'image/png' })
+        const original = input.arrayBuffer.bind(input)
+        vi.spyOn(input, 'arrayBuffer').mockImplementation(async () => {
+            selection.target = { characterId: 'character-after', conversationId: 'chat-after' }
+            clock.mockReturnValue(2000)
+            return original()
+        })
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:provenance')
+        await setInlayAsset('fixed-origin', { data: input, ext: 'png', name: 'image.png', type: 'image' })
+        expect((await getInlayAssetMetadata('fixed-origin'))?.metadata).toEqual({
+            createdAt: 1000, charId: 'character-before', chatId: 'chat-before',
+        })
+        selection.target = null
+        await setInlayAsset('fixed-origin', { data: 'data:audio/wav;base64,AQ==', ext: 'wav', name: 'audio.wav', type: 'audio' })
+        expect((await getInlayAssetMetadata('fixed-origin'))?.metadata).toEqual({ createdAt: 2000 })
+        clock.mockRestore()
+    })
+
     test('normalizes absent and malformed configured options at the encoding boundary', () => {
         expect(getInlayEncodeOptions()).toEqual({
             format: 'webp', quality: 85, maxDimension: 0, skipReencode: true, animationDecodeBytes: 256 * 1024 * 1024, animationMaxFps: 0,
@@ -568,11 +597,11 @@ describe('postInlayAsset', () => {
             set src(_value: string) { throw new Error('source assignment failed') }
         })
 
-        await postInlayAsset({ name: 'broken.png', data: new Uint8Array([1]) })
+        await postInlayAsset({ name: 'broken.png', data: imageFixture('png') })
 
         // The bytes survive a decoder that never got started.
         const stored = await getInlayAssetBlob('test-uuid-1234')
-        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(new Uint8Array([1]))
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(imageFixture('png'))
         expect(stored).toMatchObject({ ext: 'png' })
         expect(revokeObjectURL).toHaveBeenCalledTimes(1)
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:source-throw')
@@ -587,10 +616,10 @@ describe('postInlayAsset', () => {
             set src(_value: string) { queueMicrotask(() => this.onerror?.()) }
         })
 
-        await postInlayAsset({ name: 'broken.png', data: new Uint8Array([1]) })
+        await postInlayAsset({ name: 'broken.png', data: imageFixture('png') })
 
         const stored = await getInlayAssetBlob('test-uuid-1234')
-        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(new Uint8Array([1]))
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(imageFixture('png'))
         expect(revokeObjectURL).toHaveBeenCalledTimes(1)
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:load-error')
     })
@@ -632,7 +661,7 @@ describe('postInlayAsset', () => {
     test('returns null for any unsupported extension', async () => {
         await fc.assert(
             fc.asyncProperty(
-                fc.string({ minLength: 1, maxLength: 10 }).filter((ext) => !allSupportedExts.includes(ext as any)),
+                fc.string({ minLength: 1, maxLength: 10 }).filter((ext) => !allSupportedExts.includes(ext.toLowerCase() as any) && !imageFormatForName(`file.${ext}`)),
                 async (ext) => {
                     store.clear()
                     const result = await postInlayAsset({

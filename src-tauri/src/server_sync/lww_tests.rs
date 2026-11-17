@@ -12,6 +12,7 @@ use risunest_sync_wire::{
 };
 use std::sync::Arc;
 
+mod format_levels;
 mod metadata_restore;
 
 pub(crate) struct LocalServerFixture {
@@ -54,6 +55,18 @@ impl LocalServerFixture {
     }
     pub(crate) fn root(&self) -> &std::path::Path {
         self._root.path()
+    }
+    /// A device as a request of this client's format level presents it.
+    pub(crate) fn device(&self, library_id: &str, token: &str) -> risunest_sync_server::store::Device {
+        let mut device = self.server.authenticate(library_id, token).unwrap();
+        device.format_level = Some(super::library_format::LEVEL);
+        device
+    }
+    /// Raises the library to this client's format level, as another device does.
+    pub(crate) fn switch_format(&self) {
+        let credential = self.server.add_device().unwrap();
+        let device = self.device(&credential.library_id, &credential.token);
+        ServerWriter::level(&self.server, &device, &credential.library_id, &uuid::Uuid::new_v4().to_string());
     }
     pub(crate) fn client(&self, store: &PersistentStore) -> LwwClient {
         let (config, stored) = self.candidate(store);
@@ -371,6 +384,7 @@ fn equal_stamp_different_value_stops_sync_after_original_is_superseded() {
 #[test]
 fn lost_accepted_response_is_recovered_after_reopen_and_keeps_a_later_edit_pending() {
     let server = LocalServerFixture::new();
+    server.switch_format();
     let (root, mut store) = local();
     let core = server.client(&store);
     save(&mut store, &["root", "language"], serde_json::json!("ja"));
@@ -603,6 +617,49 @@ fn asset_alias_receive_retains_remote_custody_before_apply_and_hydrates_only_mis
     );
 }
 #[test]
+fn image_families_keep_aliases_references_and_bodies_after_two_client_sync_and_restart() {
+    let server = LocalServerFixture::new();
+    let (a_root, mut a) = local();
+    let (b_root, mut b) = local();
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    let fixtures: &[(&str, &[u8])] = &[
+        ("png", include_bytes!("../../../tests/fixtures/images/animated.png")),
+        ("jpg", include_bytes!("../../../tests/fixtures/images/still.jpg")),
+        ("gif", include_bytes!("../../../tests/fixtures/images/animated.gif")),
+        ("webp", include_bytes!("../../../tests/fixtures/images/animated.webp")),
+        ("avif", include_bytes!("../../../tests/fixtures/images/animated.avif")),
+    ];
+    let mut aliases = Vec::new();
+    for (ext, bytes) in fixtures {
+        let key = format!("assets/synthetic.{ext}");
+        let mut alias = put_asset(&mut a, &key, bytes);
+        alias.ext = ext.to_string();
+        alias.mime = format!("image/{}", if *ext == "jpg" { "jpeg" } else { ext });
+        a.commit_asset_alias(&alias, a.revision().unwrap()).unwrap();
+        save(&mut a, &["exists", "character", ext], serde_json::json!({"type":"character"}));
+        save(&mut a, &["character", ext, "image"], serde_json::json!(key));
+        aliases.push(alias);
+    }
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    receive(&cb, &mut b);
+    b.hydrate_registered_remote_assets(|| Ok(())).unwrap();
+    drop(a); drop(b);
+    for root in [a_root.path(), b_root.path()] {
+        let store = PersistentStore::open(root).unwrap();
+        let revision = store.revision().unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(root).unwrap();
+        for ((ext, bytes), alias) in fixtures.iter().zip(&aliases) {
+            assert_eq!(store.read_asset_alias("asset", &alias.key, None).unwrap().unwrap().value, *alias);
+            assert_eq!(store.read_character(ext, None).unwrap().unwrap().value["image"], alias.key);
+            assert_eq!(cas.read_object(alias.object_hash.as_ref().unwrap()).unwrap().unwrap(), *bytes);
+        }
+        assert_eq!(store.revision().unwrap(), revision);
+        assert!(store.lww_read_outbox(0.into(), 256).unwrap().entries.is_empty());
+    }
+}
+
+#[test]
 fn clients_made_inside_a_lane_count_what_they_publish_receive_and_download() {
     use super::progress::{within, ProgressLane};
     let server = LocalServerFixture::new();
@@ -748,6 +805,7 @@ fn publication(client: &LwwClient, store: &PersistentStore) -> Publication {
 #[test]
 fn initial_state_retry_settles_original_acceptance_without_republishing_acked_units() {
     let server = LocalServerFixture::new();
+    server.switch_format();
     let (root, mut store) = local();
     let client = server.client(&store);
     save(&mut store, &["root", "language"], serde_json::json!("ja"));
@@ -1404,15 +1462,28 @@ struct ServerWriter {
 }
 impl ServerWriter {
     const WRITER: &'static str = "00000000-0000-4000-8000-0000000000aa";
+    /// A writer at this client's format level, which has switched the library.
     fn new(server: &Arc<Store>) -> Self {
         let credential = server.add_device().unwrap();
-        Self {
-            server: server.clone(),
-            device: server
-                .authenticate(&credential.library_id, &credential.token)
-                .unwrap(),
-            library_id: credential.library_id,
-        }
+        let mut device = server.authenticate(&credential.library_id, &credential.token).unwrap();
+        device.format_level = Some(super::library_format::LEVEL);
+        Self::level(server, &device, &credential.library_id, Self::WRITER);
+        Self { server: server.clone(), device, library_id: credential.library_id }
+    }
+    fn level(server: &Store, device: &risunest_sync_server::store::Device, library_id: &str, writer: &str) {
+        let level = risunest_sync_wire::library_format::value(super::library_format::LEVEL).unwrap();
+        let change = UnitChange {
+            key: risunest_sync_wire::library_format::key(),
+            stamp: Stamp { physical_ms: 1.into(), logical: 0, writer_id: writer.into() },
+            value: level,
+        };
+        let request = PushRequest {
+            library_id: library_id.into(),
+            writer_id: writer.into(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            changes: vec![change],
+        };
+        server.push(device, &request).unwrap();
     }
     fn push(&self, operation: &str, key: &UnitKey, physical: u64, value: UnitValue) {
         self.server
@@ -1510,15 +1581,16 @@ fn a_state_read_plans_its_listing_from_the_units_its_pin_holds() {
         let upper = client.admission().unwrap();
         client.state(&mut store, upper).unwrap().1
     });
-    assert_eq!(changes.len(), 2050);
+    // The pushed units and the library format unit.
+    assert_eq!(changes.len(), 2051);
     let read = lane.snapshot("binding");
-    assert_eq!(read.listed, 2050);
+    assert_eq!(read.listed, 2051);
     let listing = read.listing.unwrap();
-    assert_eq!((listing.done, listing.total), (2050, 2050));
+    assert_eq!((listing.done, listing.total), (2051, 2051));
     // Every state page was requested with the whole total already planned.
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 3);
-    assert!(seen.iter().all(|total| *total == 2050));
+    assert!(seen.iter().all(|total| *total == 2051));
 }
 
 #[test]
@@ -1556,13 +1628,14 @@ fn a_restarted_state_read_does_not_double_its_listing_total() {
         let upper = client.admission().unwrap();
         client.state(&mut store, upper).unwrap().1
     });
-    assert_eq!(changes.len(), 1026);
+    // The pushed units and the library format unit.
+    assert_eq!(changes.len(), 1027);
     let read = lane.snapshot("binding");
-    assert!(read.listed > 1026);
+    assert!(read.listed > 1027);
     assert!(read.received_bytes > 0);
     let listing = read.listing.unwrap();
-    assert_eq!((listing.done, listing.total), (1026, 1026));
-    assert_eq!(*seen.lock().unwrap(), [(0, 1026), (1024, 1026), (0, 1026), (1024, 1026)]);
+    assert_eq!((listing.done, listing.total), (1027, 1027));
+    assert_eq!(*seen.lock().unwrap(), [(0, 1027), (1024, 1027), (0, 1027), (1024, 1027)]);
 }
 
 fn publication_ids(client: &LwwClient) -> Vec<String> {
@@ -1712,6 +1785,61 @@ fn a_multi_page_bootstrap_from_cursor_zero_finishes_every_page() {
         .query_row("SELECT (SELECT count(*) FROM bootstrap)+(SELECT count(*) FROM receive_pages)", [], |row| row.get(0))
         .unwrap();
     assert_eq!(pending, 0);
+}
+
+#[test]
+fn a_bootstrap_reports_what_is_left_of_its_pin_in_every_session() {
+    use super::progress::{within, ProgressLane};
+    let server = LocalServerFixture::new();
+    ServerWriter::new(&server.server).push_units("first-library", "unit", 1100);
+    raise_journal_floor(&server);
+    let (_root, mut target) = local();
+    server.client(&target);
+    let (_earlier_root, mut earlier) = local();
+    server.client(&earlier);
+    // Each page is read by a new client, as a later session would read it.
+    let page = |target: &mut PersistentStore| {
+        let lane = Arc::new(ProgressLane::default());
+        within(&lane, || {
+            let client = LocalServerFixture::reopen_client(target, Default::default())?;
+            receive_cycle(&client, target, &[])
+        }).unwrap();
+        let read = lane.snapshot("receive");
+        (read.backlog_done, read.backlog_left)
+    };
+    let log = |target: &PersistentStore| OperationLog::open(target.repository_root()).unwrap().0;
+    let counts = |target: &PersistentStore| -> i64 {
+        log(target).query_row("SELECT count(*) FROM bootstrap_received", [], |row| row.get(0)).unwrap()
+    };
+    let (done, left) = page(&mut target);
+    assert_eq!(done, 256);
+    let total = done + left;
+    assert!(total >= 1100, "{total}");
+    for pages in 2..=4 {
+        assert_eq!(page(&mut target), (256, total - 256 * pages));
+    }
+    assert_eq!(page(&mut target).1, 0);
+    assert_eq!(received_bootstrap_units(&target), 1100);
+    assert_eq!(counts(&target), 0);
+    // A bootstrap an earlier version began kept no count of what it received, so the rest of
+    // its pages report no known work.
+    page(&mut earlier);
+    let kept: (String, String, i64) = log(&earlier)
+        .query_row("SELECT pin,after_key,units FROM bootstrap_received", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap();
+    log(&earlier).execute("DELETE FROM bootstrap_received", []).unwrap();
+    for _ in 2..=3 {
+        assert_eq!(page(&mut earlier), (0, 0));
+    }
+    // Nor does a count an earlier version left behind when it read further pages.
+    log(&earlier)
+        .execute("INSERT INTO bootstrap_received VALUES(?1,?2,?3)", rusqlite::params![kept.0, kept.1, kept.2])
+        .unwrap();
+    for _ in 4..=5 {
+        assert_eq!(page(&mut earlier), (0, 0));
+    }
+    assert_eq!(received_bootstrap_units(&earlier), 1100);
+    assert_eq!(counts(&earlier), 0);
 }
 
 #[test]

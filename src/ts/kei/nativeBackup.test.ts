@@ -5,6 +5,7 @@ import type { PersistentDataRuntime } from '../storage/persistentDataRuntime'
 import type { PersistentRevisionLease } from '../storage/persistentDataStore'
 import { createLeaseStub } from '../storage/persistentDataStore.testSupport'
 import { runNativeKeiBackupJob, tryNativeKeiBackup } from './nativeBackup'
+import * as mobileTasks from '../mobileBackgroundTask'
 
 function nativeRuntime() {
     const release = vi.fn(async () => undefined)
@@ -224,16 +225,21 @@ describe('runNativeKeiBackupJob', () => {
             })
             .mockResolvedValueOnce(true)
         const wait = vi.fn(async () => undefined)
+        const hold = vi.spyOn(mobileTasks, 'runWithDeferredMobileBackgroundTask')
 
-        await expect(runNativeKeiBackupJob(
-            {
-                runtime: harness.runtime,
-                url: 'https://kei.example/autobackup/save',
-                accountId: 'account-1',
-                token: 'secret-token',
-            },
-            { isTauri: () => true, invoke, wait, warn },
-        )).resolves.toBe(true)
+        try {
+            await expect(runNativeKeiBackupJob(
+                {
+                    runtime: harness.runtime,
+                    url: 'https://kei.example/autobackup/save',
+                    accountId: 'account-1',
+                    token: 'secret-token',
+                },
+                { isTauri: () => true, invoke, wait, warn },
+            )).resolves.toBe(true)
+            // A save starts this backup, so it never shows the notification while the app is visible.
+            expect(hold).toHaveBeenCalledExactlyOnceWith('backup', expect.any(Function), undefined)
+        } finally { hold.mockRestore() }
 
         expect(harness.flushPendingData).toHaveBeenCalledWith('kei-auto-backup')
         expect(invoke.mock.calls).toEqual([

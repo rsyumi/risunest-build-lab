@@ -180,19 +180,27 @@ impl Residency {
         super::hash_metrics::record("c_context_identity", format!("{}\0{}\0{}", config.library_id, config.device_id, epoch).len());
         hash(format!("{}\0{}\0{}", config.library_id, config.device_id, epoch).as_bytes())
     }
+    #[cfg(test)]
     pub fn confirm(
         &mut self,
         config: &StoredConfig,
         head: &RemoteHead,
         objects: &[RetainedObject],
     ) -> Result<()> {
+        Self::check_head(config, head)?;
+        self.confirm_under(config, &head.epoch, objects)
+    }
+    fn check_head(config: &StoredConfig, head: &RemoteHead) -> Result<()> {
         head.validate()?;
         if config.library_id != head.library_id {
             return Err(SyncError::new("retention-library-mismatch", 409));
         }
-        let context = Self::context_id(config, &head.epoch);
+        Ok(())
+    }
+    fn confirm_under(&mut self, config: &StoredConfig, epoch: &str, objects: &[RetainedObject]) -> Result<()> {
+        let context = Self::context_id(config, epoch);
         let tx = self.db.transaction()?;
-        tx.execute("INSERT INTO contexts VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET config=excluded.config",params![context,config.library_id,config.device_id,head.epoch,serde_json::to_string(config).map_err(|_|SyncError::new("invalid-retention-config",409))?])?;
+        tx.execute("INSERT INTO contexts VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET config=excluded.config",params![context,config.library_id,config.device_id,epoch,serde_json::to_string(config).map_err(|_|SyncError::new("invalid-retention-config",409))?])?;
         let order: i64 = tx.query_row("SELECT COALESCE(MAX(confirmation_order),0)+1 FROM objects", [], |row| row.get(0))?;
         for object in objects {
             validate_hash(&object.hash)?;
@@ -216,13 +224,47 @@ impl Residency {
         head: &RemoteHead,
         objects: &[(String, Option<u64>)],
     ) -> Result<()> {
+        Self::check_head(config, head)?;
+        self.retain_under(client, config, &head.epoch, objects)
+    }
+    /// Retains `objects` under the epoch of the newest custody confirmation, without asking the
+    /// server for its head first, when that confirmation was this device's in the configured
+    /// library. Otherwise, or when the server has moved to another epoch, it asks and retains
+    /// under the current head.
+    pub fn retain_current(
+        &mut self,
+        client: &super::client::ServerClient,
+        config: &StoredConfig,
+        objects: &[(String, Option<u64>)],
+    ) -> Result<()> {
+        let confirmed: Option<String> = self.db.query_row(
+            "SELECT epoch FROM contexts WHERE id=(SELECT context FROM objects ORDER BY confirmation_order DESC LIMIT 1) AND library_id=?1 AND device_id=?2",
+            params![config.library_id, config.device_id],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(epoch) = confirmed {
+            match self.retain_under(client, config, &epoch, objects) {
+                Err(error) if error.code == "epoch-mismatch" => {}
+                other => return other,
+            }
+        }
+        let head = client.resolve_identity()?;
+        self.retain(client, config, &head, objects)
+    }
+    fn retain_under(
+        &mut self,
+        client: &super::client::ServerClient,
+        config: &StoredConfig,
+        epoch: &str,
+        objects: &[(String, Option<u64>)],
+    ) -> Result<()> {
         for page in objects.chunks(1024) {
             let requests=page.iter().map(|(hash,size)|serde_json::json!({"hash":hash,"size":size.map(|size|size.to_string())})).collect::<Vec<_>>();
             let (_, retained): (_, Vec<RetainedObject>) = client.json(
                 reqwest::Method::POST,
                 "objects/retention",
                 &[],
-                Some(&serde_json::json!({"epoch":head.epoch,"objects":requests})),
+                Some(&serde_json::json!({"epoch":epoch,"objects":requests})),
                 &[],
             )?;
             let mut expected = page
@@ -240,7 +282,7 @@ impl Residency {
                     return Err(SyncError::new("invalid-retention-response", 502));
                 }
             }
-            self.confirm(config, head, &retained)?;
+            self.confirm_under(config, epoch, &retained)?;
         }
         Ok(())
     }
@@ -454,17 +496,43 @@ pub(crate) mod test_remote {
             .unwrap();
     }
 
+    /// Leaves a body only on the Sync server: its local file is removed, and the
+    /// server holds and serves it.
+    pub(crate) fn keep_only_on_server(root: &Path, digest: &str) {
+        let cas = crate::asset_repository::PayloadCas::new(root).unwrap();
+        let path = cas.object_path(digest).unwrap().unwrap();
+        let body = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        hold(root, &[(digest, body.len() as u64)]);
+        serve(root, digest, body);
+    }
+
     /// How many bodies this repository fetched.
     pub(crate) fn fetched(root: &Path) -> usize {
         let root = std::fs::canonicalize(root).unwrap();
         SERVED.lock().unwrap().get(&root).map_or(0, |(_, fetched)| *fetched)
     }
 
+    static FETCH_HOOKS: Mutex<BTreeMap<PathBuf, Box<dyn Fn() + Send>>> =
+        Mutex::new(BTreeMap::new());
+
+    /// Runs `hook` each time this repository starts fetching a body.
+    pub(crate) fn on_fetch(root: &Path, hook: impl Fn() + Send + 'static) {
+        let root = std::fs::canonicalize(root).unwrap();
+        FETCH_HOOKS.lock().unwrap().insert(root, Box::new(hook));
+    }
+
     pub(super) fn body(root: &Path, digest: &str) -> Option<Vec<u8>> {
-        let mut served = SERVED.lock().unwrap();
-        let (bodies, fetched) = served.get_mut(root)?;
-        let body = bodies.get(digest)?.clone();
-        *fetched += 1;
+        let body = {
+            let mut served = SERVED.lock().unwrap();
+            let (bodies, fetched) = served.get_mut(root)?;
+            let body = bodies.get(digest)?.clone();
+            *fetched += 1;
+            body
+        };
+        if let Some(hook) = FETCH_HOOKS.lock().unwrap().get(root) {
+            hook();
+        }
         Some(body)
     }
 }
@@ -906,22 +974,5 @@ fn lock_with_check<'a>(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
-    }
-}
-
-/// Explicit byte-consumer adapter. Ordinary PayloadCas::stat_object continues
-/// to describe physical storage and never performs a network request.
-pub(crate) trait RemotePayloadAccess {
-    fn open_available_object(&self, hash: &str) -> std::io::Result<Option<std::fs::File>>;
-    fn stat_available_object(&self, hash: &str) -> std::io::Result<Option<u64>> {
-        self.open_available_object(hash)?
-            .map(|file| file.metadata().map(|metadata| metadata.len()))
-            .transpose()
-    }
-}
-impl RemotePayloadAccess for crate::asset_repository::PayloadCas {
-    fn open_available_object(&self, hash: &str) -> std::io::Result<Option<std::fs::File>> {
-        open_or_hydrate(self.repository_root(), hash)
-            .map_err(|error| std::io::Error::other(error.code))
     }
 }

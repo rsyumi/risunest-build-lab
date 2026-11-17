@@ -137,24 +137,75 @@ pub(super) fn placement(db: &Connection, digest: &str) -> Result<Option<(u64, bo
 // symlinks/junctions in every path component; HTTP clients never supply paths.
 pub(super) fn check_path(path: &Path) -> Result<()> {
     for ancestor in path.ancestors() {
-        match fs::symlink_metadata(ancestor) {
-            Ok(meta) => {
-                #[cfg(windows)]
-                let linked = {
-                    use std::os::windows::fs::MetadataExt;
-                    meta.file_attributes() & 0x400 != 0
-                };
-                #[cfg(not(windows))]
-                let linked = meta.file_type().is_symlink();
-                if linked {
-                    return Err(Error::new("unsafe-storage-path", 400));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.into()),
-        }
+        unlinked_metadata(ancestor)?;
     }
     Ok(())
+}
+/// The metadata of `path` itself, or `None` when it does not exist. A symlink
+/// or junction is refused.
+fn unlinked_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    #[cfg(test)]
+    frame_metrics::PATH_CHECKS.with(|count| count.set(count.get() + 1));
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            #[cfg(windows)]
+            let linked = {
+                use std::os::windows::fs::MetadataExt;
+                meta.file_attributes() & 0x400 != 0
+            };
+            #[cfg(not(windows))]
+            let linked = meta.file_type().is_symlink();
+            if linked {
+                return Err(Error::new("unsafe-storage-path", 400));
+            }
+            Ok(Some(meta))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+/// Object file paths for one operation over many objects. The data directory,
+/// its ancestors and `objects` are checked on first use and each shard once, so
+/// each object adds only the check of its own file. It lives for one operation
+/// and is never kept, so a link made between operations is still refused.
+pub(crate) struct ObjectPaths<'a> {
+    root: &'a Path,
+    objects: std::sync::OnceLock<std::path::PathBuf>,
+    shards: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+impl ObjectPaths<'_> {
+    /// The checked path of `digest`'s file.
+    pub(crate) fn path(&self, digest: &str) -> Result<std::path::PathBuf> {
+        Ok(self.file(digest)?.0)
+    }
+    /// The metadata of `digest`'s file, or `None` when it does not exist.
+    pub(crate) fn metadata(&self, digest: &str) -> Result<Option<fs::Metadata>> {
+        Ok(self.file(digest)?.1)
+    }
+    fn file(&self, digest: &str) -> Result<(std::path::PathBuf, Option<fs::Metadata>)> {
+        validate_hash(digest)?;
+        let objects = match self.objects.get() {
+            Some(objects) => objects,
+            None => {
+                let objects = self.root.join("objects");
+                check_path(&objects)?;
+                self.objects.get_or_init(|| objects)
+            }
+        };
+        let shard = objects.join(&digest[..2]);
+        let mut shards = self
+            .shards
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
+        if !shards.contains(&digest[..2]) {
+            unlinked_metadata(&shard)?;
+            shards.insert(digest[..2].to_owned());
+        }
+        drop(shards);
+        let path = shard.join(digest);
+        let metadata = unlinked_metadata(&path)?;
+        Ok((path, metadata))
+    }
 }
 pub(super) fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -240,7 +291,13 @@ impl Store {
     /// Whether the body behind an accounted object is actually present at the
     /// size its metadata states, for the two paths that admit a reference to
     /// it without reading it.
-    pub(super) fn check_object_body(&self, db: &Connection, digest: &str, size: u64) -> Result<()> {
+    pub(super) fn check_object_body(
+        &self,
+        db: &Connection,
+        paths: &ObjectPaths,
+        digest: &str,
+        size: u64,
+    ) -> Result<()> {
         let (recorded, inline) =
             placement(db, digest)?.ok_or(Error::new("object-not-found", 404))?;
         if recorded != size {
@@ -249,7 +306,9 @@ impl Store {
         let present = if inline {
             small_object_store::size(db, digest).map_err(body_error)? == Some(size)
         } else {
-            let metadata = fs::metadata(self.object_path(digest)?)?;
+            let metadata = paths
+                .metadata(digest)?
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
             metadata.is_file() && metadata.len() == size
         };
         if present {
@@ -258,11 +317,16 @@ impl Store {
             Err(Error::new("corrupt-object", 503))
         }
     }
+    /// Paths for one operation over many objects; see [`ObjectPaths`].
+    pub(crate) fn object_paths(&self) -> ObjectPaths<'_> {
+        ObjectPaths {
+            root: &self.root,
+            objects: std::sync::OnceLock::new(),
+            shards: std::sync::Mutex::default(),
+        }
+    }
     pub(super) fn object_path(&self, digest: &str) -> Result<std::path::PathBuf> {
-        validate_hash(digest)?;
-        let path = self.root.join("objects").join(&digest[..2]).join(digest);
-        check_path(&path)?;
-        Ok(path)
+        self.object_paths().path(digest)
     }
     pub fn put_object(&self, device: &super::Device, digest: &str, bytes: &[u8]) -> Result<()> {
         validate_hash(digest)?;
@@ -396,10 +460,11 @@ impl Store {
                 filed.push((digest.as_str(), bytes.as_slice()));
             }
         }
+        let paths = self.object_paths();
         let prepared = file_batch(&filed, |(digest, bytes)| {
             #[cfg(test)]
             let measured = std::time::Instant::now();
-            let destination = self.object_path(digest)?;
+            let destination = paths.path(digest)?;
             fs::create_dir_all(destination.parent().unwrap())?;
             let mut temp = self.staging_temp()?;
             temp.write_all(bytes)?;
@@ -490,6 +555,10 @@ impl Store {
             .transpose()
     }
     pub fn object_presence(&self, digest: &str) -> Result<bool> {
+        self.object_presence_in(&self.object_paths(), digest)
+    }
+    /// [`Self::object_presence`] for one of many objects an operation checks.
+    pub(crate) fn object_presence_in(&self, paths: &ObjectPaths, digest: &str) -> Result<bool> {
         let db = self.reader()?;
         let Some((size, inline)) = placement(&db, digest)? else {
             return Ok(false);
@@ -497,11 +566,9 @@ impl Store {
         if inline {
             return Ok(small_object_store::size(&db, digest).map_err(body_error)? == Some(size));
         }
-        match fs::metadata(self.object_path(digest)?) {
-            Ok(meta) => Ok(meta.is_file() && meta.len() == size),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        Ok(paths
+            .metadata(digest)?
+            .is_some_and(|meta| meta.is_file() && meta.len() == size))
     }
     pub fn get_object(&self, digest: &str) -> Result<Vec<u8>> {
         #[cfg(all(test, feature = "source-observer"))]
@@ -558,6 +625,8 @@ pub(super) mod frame_metrics {
         /// The identities ingress computed, by step and body length. A
         /// materialized frame is hashed once and published under that hash.
         pub static HASHES: std::cell::RefCell<Vec<(&'static str, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// Counts the paths checked for links.
+        pub static PATH_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
     pub fn record(stage: usize, started: std::time::Instant) {
         SAMPLES.with(|samples| {
@@ -591,6 +660,7 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
+            format_level: None,
         };
         let good = b"synthetic good".to_vec();
         let digest = hash(&good);
@@ -620,6 +690,7 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
+            format_level: None,
         };
         let small = b"synthetic base".to_vec();
         let large = vec![b'z'; SMALL_OBJECT_BYTES + 1];
@@ -643,6 +714,7 @@ mod tests {
         assert!(store.object_size(&hash(&small)).unwrap().is_none());
         let unknown = super::super::Device {
             id: "missing-device".into(),
+            format_level: None,
         };
         assert!(store.receive_frames(&unknown, &encoded).is_err());
         assert!(store.object_size(&hash(&small)).unwrap().is_none());
@@ -683,6 +755,7 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
+            format_level: None,
         };
         let staging = directory.path().join("staging");
         std::fs::remove_dir(&staging).unwrap();
@@ -719,6 +792,7 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
+            format_level: None,
         };
         let bytes = b"synthetic inline body".to_vec();
         let digest = hash(&bytes);
@@ -757,6 +831,7 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
+            format_level: None,
         };
         assert_eq!(
             store
@@ -817,6 +892,7 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
+            format_level: None,
         };
         let sizes = [64 * 1024, 64 * 1024 + 1, 256 * 1024, 256 * 1024 + 1];
         let bodies = sizes.map(|size| vec![0x5a; size]);
@@ -889,6 +965,7 @@ mod tests {
             let registration = store.add_device().unwrap();
             let device = super::super::Device {
                 id: registration.device_id,
+                format_level: None,
             };
             let bodies = (0..8)
                 .map(|index| vec![index; SMALL_OBJECT_BYTES + 1])
@@ -952,6 +1029,7 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
+            format_level: None,
         };
         let bodies = (0..8)
             .map(|index| vec![index; SMALL_OBJECT_BYTES + 1])
@@ -1094,6 +1172,7 @@ mod tests {
                     let store = Store::init(directory.path()).unwrap();
                     let device = super::super::Device {
                         id: store.add_device().unwrap().device_id,
+                        format_level: None,
                     };
                     upload(&store, &device, first, bytes).unwrap();
                     assert_readable(&store, bytes, &case);
@@ -1132,6 +1211,7 @@ mod tests {
         let store = Store::init(directory.path()).unwrap();
         let device = super::super::Device {
             id: store.add_device().unwrap().device_id,
+            format_level: None,
         };
         upload(&store, &device, Upload::Frame, bytes).unwrap();
         damage(&store, bytes, Held::Missing);
@@ -1165,6 +1245,7 @@ mod tests {
         let store = Store::init(directory.path()).unwrap();
         let device = super::super::Device {
             id: store.add_device().unwrap().device_id,
+            format_level: None,
         };
         upload(&store, &device, Upload::Chunked, bytes).unwrap();
         damage(&store, bytes, Held::Corrupt);
@@ -1192,6 +1273,7 @@ mod tests {
         let credential = store.add_device().unwrap();
         let device = super::super::Device {
             id: credential.device_id,
+            format_level: None,
         };
         let base = vec![b'a'; 2048];
         let mut target = base.clone();
@@ -1235,6 +1317,7 @@ mod tests {
         let credential = store.add_device().unwrap();
         let device = super::super::Device {
             id: credential.device_id,
+            format_level: None,
         };
         let head = store.head().unwrap();
         {
@@ -1304,6 +1387,7 @@ mod tests {
                 let registration = store.add_device().unwrap();
                 let device = super::super::Device {
                     id: registration.device_id,
+                    format_level: None,
                 };
                 let count = 64usize;
                 frame_metrics::SAMPLES

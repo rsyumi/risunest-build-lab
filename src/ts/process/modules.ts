@@ -5,7 +5,7 @@ import { alertClear, alertConfirm, alertError, alertModuleSelect, alertNormal, a
 import { getCurrentCharacter, getCurrentChat, getDatabase, setCurrentCharacter, setDatabase, type customscript, type loreBook, type triggerscript } from "../storage/database.svelte"
 import { downloadFile, forageStorage, LocalWriter, readImage, saveAsset, VirtualWriter } from "../globalApi.svelte"
 import { AppendableBuffer } from "../appendableBuffer"
-import { checkPersonaBinded, selectSingleFile, sleep } from "../util"
+import { checkPersonaBinded, selectMultipleFile, sleep } from "../util"
 import { v4 } from "uuid"
 import { convertExternalLorebook } from "./lorebook.svelte"
 import { decodeRPack, encodeRPack } from "../rpack/rpack_js"
@@ -17,9 +17,11 @@ import { isTauri, isTauriDesktop, isTauriAndroid, isTauriIOS } from '../platform
 import { open } from '../storage/fileSelection'
 import { readFile } from '@tauri-apps/plugin-fs'
 import type { NativeFileJobOptions, NativeFileJobSource } from '../storage/nativeFileJobs'
-import { importDesktopNativeModulePath } from '../storage/nativeModuleFileRoute'
+import { importContentBatch } from '../storage/contentImportBatch'
+import { runSharedNativeFileOperation, type SharedNativeFileOperationContext } from '../storage/nativeFileJobManager'
 import { assertModuleMCPImportAllowed, StdioModuleImportError } from './mcp/moduleImport'
 import { selectConversationModules } from './moduleSelection'
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 
 export interface MCPModule{
     url: string
@@ -97,10 +99,11 @@ export async function exportModule(module:RisuModule, arg:{
     }
     const writer = new LocalWriter()
     await writer.init(module.name + '.module', ['charx'])
-    await exportCharacterCard(char, 'charx', {
+    // The destination is chosen, so the picker never holds the background task.
+    await runWithMobileBackgroundTask('export', () => exportCharacterCard(char, 'charx', {
         spec: 'v3',
         writer
-    })
+    }), undefined, true)
     if(alertEnd){
         alertNormal(language.successExport)
     }
@@ -113,10 +116,14 @@ export async function exportModuleLegacy(module:RisuModule, arg:{
     const alertEnd = arg.alertEnd ?? true
     const saveData = arg.saveData ?? true
     if(saveData && isTauri){
-        const { exportNativeModuleRisumFromPicker } = await import('../storage/nativeModuleRisumExportRoute')
-        const result = await exportNativeModuleRisumFromPicker(module)
-        if(result !== undefined){
-            if(result && alertEnd) alertNormal(language.successExport)
+        const startedAt = Date.now()
+        try {
+            const { exportNativeModuleRisumFromPicker } = await import('../storage/nativeModuleRisumExportRoute')
+            // The export dialog reports how a native export ended.
+            if(await exportNativeModuleRisumFromPicker(module) !== undefined) return new Uint8Array(0)
+        } catch (error) {
+            const { presentContentExportError } = await import('../storage/fileOperationErrorPresentation')
+            presentContentExportError(error, startedAt)
             return new Uint8Array(0)
         }
     }
@@ -309,24 +316,32 @@ export async function readModule(buf:Buffer):Promise<RisuModule> {
     }
 
     module.id = v4()
+    delete module.mcp
     return module
 }
 
 export async function importModule() {
-    if (isTauriIOS) {
-        const { importIOSContentFromPicker } = await import('../storage/iosContentPicker')
-        return await importIOSContentFromPicker('module')
+    const callStartedAt = Date.now()
+    try {
+        if (isTauriIOS) {
+            const { importIOSContentFromPicker } = await import('../storage/iosContentPicker')
+            return await importIOSContentFromPicker('module')
+        }
+        if (isTauriAndroid) {
+            const { importAndroidContentFromPicker } = await import(
+                '../storage/androidContentPicker'
+            )
+            return await importAndroidContentFromPicker('module')
+        }
+    } catch (error) {
+        // The picker import shows how it ended, so only a failure to start is reported here.
+        const { presentFileOperationError } = await import('../storage/fileOperationErrorPresentation')
+        presentFileOperationError('import', error, callStartedAt)
+        return null
     }
-    if (isTauriAndroid) {
-        const { importAndroidContentFromPicker } = await import(
-            '../storage/androidContentPicker'
-        )
-        return await importAndroidContentFromPicker('module')
-    }
-    let desktopFile: { name: string; data: Uint8Array } | undefined
     if (isTauriDesktop) {
         const selected = await open({
-            multiple: false,
+            multiple: true,
             directory: false,
             filters: [
                 {
@@ -335,36 +350,47 @@ export async function importModule() {
                 },
             ],
         })
-        if (typeof selected !== 'string') return
-        const displayName = selected.split(/[\\/]/).at(-1) || selected
-        if (
-            ['risum', 'charx'].includes(
-                displayName.split('.').at(-1)?.toLocaleLowerCase('en-US') ?? '',
+        const paths = typeof selected === 'string' ? [selected] : (selected ?? [])
+        if (!paths.length) return null
+        try {
+            return await runSharedNativeFileOperation(
+                'import',
+                'content-picker',
+                (context) => importContentBatch(
+                    context,
+                    paths,
+                    (path) => ({ name: path.split(/[\\/]/).at(-1) || path }),
+                    (path) => importDesktopModulePath(path, context),
+                ),
+                { presentation: 'dialog', format: 'content' },
             )
-        ) {
-            const result = await importDesktopNativeModulePath(
-                selected,
-                importPreparedNativeModuleContent,
-                {},
-                (error) => {
-                    console.error(error)
-                    alertError(error instanceof Error ? error : String(error))
-                },
-            )
-            return
+        } catch (error) {
+            const { presentFileOperationError } = await import('../storage/fileOperationErrorPresentation')
+            presentFileOperationError('import', error, callStartedAt)
+            return null
         }
-        desktopFile = { name: displayName, data: await readFile(selected) }
     }
-    const f =
-        desktopFile ??
-        (await selectSingleFile(['json', 'lorebook', 'risum', 'charx']))
-    if (!f) {
-        return
-    }
-    return importModuleData(f)
+    const files = await selectMultipleFile(['json', 'lorebook', 'risum', 'charx'])
+    let imported = false
+    for (const file of files ?? []) imported = await importModuleData(file) || imported
+    return imported ? 'module' : null
 }
 
-export async function importModuleData(f: { name: string; data: Uint8Array; parsedJson?: ParsedImportJson }) {
+async function importDesktopModulePath(path: string, context: SharedNativeFileOperationContext): Promise<string | null> {
+    const displayName = path.split(/[\\/]/).at(-1) || path
+    if (/\.(risum|charx)$/i.test(displayName)) {
+        const result = await importPreparedNativeModuleContent(
+            { source: { type: 'desktopPath', path }, displayName },
+            { signal: context.signal, onStatus: context.onStatus },
+        )
+        return result.kind === 'imported' ? result.value : null
+    }
+    context.signal.throwIfAborted()
+    return await importModuleData({ name: displayName, data: await readFile(path) }) ? 'module' : null
+}
+
+/** Adds the module the file holds and reports whether it did; a refusal is alerted here. */
+export async function importModuleData(f: { name: string; data: Uint8Array; parsedJson?: ParsedImportJson }): Promise<boolean> {
     let fileData = f.data
     if (f.name.endsWith('.charx')) {
         try {
@@ -376,28 +402,29 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
             })
             if (!char || typeof char === 'number') {
                 alertError(language.errors.noData)
-                return
+                return false
             }
             const module = convertCharacterToModule(char)
             DBState.db.modules.push(module)
         } catch (error) {
             console.error(error)
             alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
-            return
+            return false
         }
         alertNormal(language.successImport)
-        return
+        return true
     }
     if (f.name.endsWith('.risum')) {
         try {
             const buf = Buffer.from(fileData)
             const module = await readModule(buf)
             DBState.db.modules.push(module)
+            return true
         } catch (error) {
             console.error(error)
             alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
         }
-        return
+        return false
     }
     try {
         const importData = (f.parsedJson ?? parseImportJson(fileData)).value
@@ -405,9 +432,10 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
             assertModuleMCPImportAllowed(importData)
             if (!importData.name || !importData.id) {
                 alertError(language.errors.noData)
-                return
+                return false
             }
             importData.id = v4()
+            delete importData.mcp
 
             if (importData.lowLevelAccess) {
                 const conf = await alertConfirm(language.lowLevelAccessConfirm)
@@ -416,7 +444,7 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
                 }
             }
             DBState.db.modules.push(importData)
-            return
+            return true
         }
         // importData.type === 'risu' in conflict with HypaV3 preset exports
         // difference: record vs. array
@@ -434,7 +462,7 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
                 id: v4(),
             }
             DBState.db.modules.push(importModule)
-            return
+            return true
         }
         if (importData.entries) {
             const lores: loreBook[] = convertExternalLorebook(
@@ -449,7 +477,7 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
                 id: v4(),
             }
             DBState.db.modules.push(importModule)
-            return
+            return true
         }
         if (importData.type === 'regex' && importData.data) {
             const regexs: customscript[] = importData.data
@@ -461,17 +489,18 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
                 id: v4(),
             }
             DBState.db.modules.push(importModule)
-            return
+            return true
         }
     } catch (error) {
         console.error(error)
         if (error instanceof StdioModuleImportError) {
             alertError(error)
-            return
+            return false
         }
     }
 
     alertNormal(language.errors.noData)
+    return false
 }
 
 function getModuleById(id:string){

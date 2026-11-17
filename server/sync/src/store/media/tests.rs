@@ -6,6 +6,7 @@ fn fixture() -> (tempfile::TempDir, Store, Device, MediaRequest) {
     let store = Store::init(root.path()).unwrap();
     let device = Device {
         id: store.add_device().unwrap().device_id,
+        format_level: None,
     };
     let bytes = b"synthetic media bytes";
     let hash = risunest_sync_wire::hash(bytes);

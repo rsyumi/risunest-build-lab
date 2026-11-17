@@ -2,14 +2,21 @@ import { get, writable } from 'svelte/store'
 import { alertStore } from './modalNavigationAdapters'
 export { languageKorean as language } from '../../src/lang/ko'
 
-export const DBState = { db: { didFirstSetup: true, characters: [{ name: 'Synthetic', chaId: 'character-a', chatPage: 0, chats: [{ id: 'chat-a' }] }], keepSessionAlive: false } }
+export const DBState = { db: { didFirstSetup: true, characters: [{ name: 'Synthetic', chaId: 'character-a', chatPage: 0, chats: [{ id: 'chat-a' }] }] } }
 export const DynamicGUI = writable(false), settingsOpen = writable(false), sideBarStore = writable(true), sideBarClosing = writable(false)
 export const ShowRealmFrameStore = writable(false), openPresetList = writable(false), openPersonaList = writable(false)
-export const MobileGUI = writable(false), CustomGUISettingMenuStore = writable(false), loadedStore = writable(true)
+export const MobileGUI = writable(false), CustomGUISettingMenuStore = writable(false), loadedStore = writable(!new URLSearchParams(location.search).has('loading'))
+export const bootFailure = writable<import('../../src/ts/stores.svelte').BootFailure | null>(null)
+export const recoveryStart = writable(null)
+export const serverSyncNavigation = { subscribe: (_listener: unknown) => () => {} }
+export const dataHealthNavigation = serverSyncNavigation
+export const getStartupExclusions = () => ['autoUpdate']
+export const isStartupExcluded = () => true
 export { alertStore }
-export const bookmarkListOpen = writable(false)
+export { showsDialog } from '../../src/ts/alertQueue'
+export const bookmarkListOpen = writable(false), moduleScopeMenuOpen = writable(false)
 export const LoadingStatusState = { startedAt: null, text: '' }
-export const popupStore = {}, easyPanelStore = {}, popUpEditorStore = {}, loadoutModalStore = {}, irisStore = {}, customSideBarConfigDialogStore = {}
+export const popupStore = {}, easyPanelStore = {}, popUpEditorStore = {}, loadoutModalStore = {}, onboardingModalStore = {}, irisStore = {}, customSideBarConfigDialogStore = {}
 export const hypaV3ModalOpen = writable(false), hypaV3ProgressStore = writable({ open: false })
 export const MobileGUIStack = writable(1), MobileSideBar = writable(0), selectedCharID = writable(-1)
 export const onboardingHold = writable(false), showRealmInfoStore = writable(null), SettingsMenuIndex = writable(0)

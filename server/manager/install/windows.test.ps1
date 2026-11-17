@@ -422,6 +422,58 @@ Function SkipExistingDirectory
             $server = Join-Path $syncInstall 'risunest-sync-server.exe'
             $priorLocal = $env:LOCALAPPDATA
             $priorRoaming = $env:APPDATA
+            $diagRoot = if ($env:RISUNEST_NSIS_DIAGNOSTICS) { [IO.Path]::GetFullPath($env:RISUNEST_NSIS_DIAGNOSTICS) } else { Join-Path $testRoot 'diagnostics' }
+            New-Item -ItemType Directory -Force -Path $diagRoot | Out-Null
+            $diagRetryModes = if ($env:RISUNEST_NSIS_DIAG_RETRY_MODES) { @($env:RISUNEST_NSIS_DIAG_RETRY_MODES -split ',') } else { @('normal', 'force') }
+            $script:diagFailures = @()
+            function Write-RemovalDiagnostics([string]$label, [DateTime]$startUtc, [int]$startTick, $children) {
+                $lines = [Collections.Generic.List[string]]::new()
+                $lines.Add("label=$label nowTick=$([Environment]::TickCount) startTick=$startTick startUtc=$($startUtc.ToString('o')) nowUtc=$([DateTime]::UtcNow.ToString('o'))")
+                $lines.Add("installExists=$(Test-Path $syncInstall) recordExists=$(Test-Path $instanceRecord) dataExists=$(Test-Path $data)")
+                foreach ($root in @($syncInstall, $data)) {
+                    $lines.Add("== tree $root")
+                    if (Test-Path -LiteralPath $root) {
+                        foreach ($item in Get-ChildItem -LiteralPath $root -Force -Recurse -ErrorAction Continue) {
+                            $relative = $item.FullName.Substring($root.Length)
+                            $length = if ($item.PSIsContainer) { 'dir' } else { $item.Length }
+                            $lines.Add("$relative|$length|$($item.Attributes)|$($item.LastWriteTimeUtc.ToString('o'))")
+                        }
+                    }
+                }
+                $updateDirectory = Join-Path $data 'manager-update'
+                if (Test-Path -LiteralPath $updateDirectory) {
+                    foreach ($item in Get-ChildItem -LiteralPath $updateDirectory -File -Force | Where-Object { ($_.Name -like 'installer-*' -or $_.Name -like 'activity-*' -or $_.Name -like '*.json') -and $_.Length -lt 4096 }) {
+                        $lines.Add("== file $($item.Name) $($item.LastWriteTimeUtc.ToString('o'))")
+                        $lines.Add((Get-Content -LiteralPath $item.FullName -Raw -ErrorAction Continue))
+                    }
+                }
+                $lines.Add('== children')
+                foreach ($child in $children) {
+                    try {
+                        $child.Refresh()
+                        $lines.Add("$($child.Id)|$($child.ProcessName)|exited=$($child.HasExited)|exit=$(if ($child.HasExited) { $child.ExitCode })|exitTime=$(if ($child.HasExited) { $child.ExitTime.ToUniversalTime().ToString('o') })")
+                    } catch { $lines.Add("$($child.Id)|unavailable|$($_.Exception.Message)") }
+                }
+                $lines.Add('== processes')
+                foreach ($process in Get-CimInstance Win32_Process) {
+                    $path = [string]$process.ExecutablePath
+                    if (($path -and ($path.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or $path.StartsWith($testRoot, [StringComparison]::OrdinalIgnoreCase))) -or $process.Name -like 'risunest*' -or $process.Name -like '*u_.exe') {
+                        $created = if ($process.CreationDate) { $process.CreationDate.ToUniversalTime().ToString('o') } else { '' }
+                        $lines.Add("$($process.ProcessId)|parent=$($process.ParentProcessId)|$($process.Name)|created=$created|$path|$($process.CommandLine)")
+                    }
+                }
+                $lines.Add('== helper tasks')
+                foreach ($task in Get-ScheduledTask -ErrorAction Continue | Where-Object { $_.Description -eq 'RisuNest update helper' -or $_.TaskName -like '*update-helper*' -or $_.TaskName -like '*RisuNest*' }) {
+                    $info = $task | Get-ScheduledTaskInfo -ErrorAction Continue
+                    $lines.Add("$($task.TaskPath)$($task.TaskName)|state=$($task.State)|lastRun=$($info.LastRunTime)|lastResult=$($info.LastTaskResult)")
+                }
+                $lines.Add('== nsis outcome')
+                $outcome = Join-Path $diagRoot "nsis-$frozenName.log"
+                if (Test-Path -LiteralPath $outcome) { $lines.Add((Get-Content -LiteralPath $outcome -Raw -Encoding Unicode)) }
+                $lines | Set-Content -LiteralPath (Join-Path $diagRoot "$label.txt") -Encoding utf8
+                Write-Output "DIAG-SNAPSHOT $label"
+                $lines | ForEach-Object { Write-Output "  $_" }
+            }
             $env:LOCALAPPDATA = $local
             $env:APPDATA = $roaming
             function Invoke-Manager([string[]]$arguments) {
@@ -593,7 +645,7 @@ FunctionEnd
                         $detail = if (Test-Path $detailLog) { Get-Content -LiteralPath $detailLog -Raw -Encoding Unicode } else { '' }
                         if (($detail -match 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다') -ne $kept) { throw 'Resumed removal reported the wrong data deletion outcome.' }
                         if ($kept) {
-                            if (!$detail.Contains($resumeData) -or ($detail -notmatch 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다')) { throw 'Resumed removal did not report kept custom data and its path.' }
+                            if (!$detail.Contains($resumeData) -or $detail.Contains('\\?\') -or ($detail -notmatch 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다')) { throw 'Resumed removal did not report kept custom data and its path.' }
                         }
                     }
                 }
@@ -634,7 +686,8 @@ FunctionEnd
                     $releasedHook = Read-FrozenSource 'server/manager/install/windows.nsh'
                     $resumable = $releasedHook -match 'installer remove-files-resumable\b'
                     if (!$resumable -and $releasedHook -notmatch 'installer remove-files ') { throw 'Unknown frozen removal command contract.' }
-                    $releasedTemplate = Read-FrozenSource 'src-tauri/windows-installer.nsi'
+                    # The current CLI's language files renamed choowHowToInstall; released templates still name it.
+                    $releasedTemplate = (Read-FrozenSource 'src-tauri/windows-installer.nsi').Replace('$(choowHowToInstall)', '$(chooseHowToInstall)')
                     $releasedCommon = Read-FrozenSource 'src-tauri/windows-common.nsh'
                     $releasedCommonPath = Join-Path $project 'released-common.nsh'
                     $releasedCommon | Set-Content -Encoding utf8 $releasedCommonPath
@@ -658,6 +711,33 @@ FunctionEnd
                         if ($LASTEXITCODE -ne 0) { throw 'Frozen Sync installer generation failed.' }
                     } finally { $env:CARGO_TARGET_DIR = $priorTarget; Pop-Location }
                     $frozenSource = [IO.File]::ReadAllText((Join-Path $generatedRoot 'installer.nsi'))
+                    $outcomeLog = Join-Path $diagRoot "nsis-$frozenName.log"
+                    $frozenSource += @"
+
+Function un.onUninstFailed
+  Push `$8
+  Push `$9
+  System::Call 'kernel32::GetTickCount()i.r9'
+  FileOpen `$8 "$outcomeLog" a
+  FileSeek `$8 0 END
+  FileWriteUTF16LE `$8 "`$9|failed|`$EXEPATH|`$SyncFailureMessage|`$0|`$1`$\r`$\n"
+  FileClose `$8
+  Pop `$9
+  Pop `$8
+FunctionEnd
+
+Function un.onUninstSuccess
+  Push `$8
+  Push `$9
+  System::Call 'kernel32::GetTickCount()i.r9'
+  FileOpen `$8 "$outcomeLog" a
+  FileSeek `$8 0 END
+  FileWriteUTF16LE `$8 "`$9|success|`$EXEPATH`$\r`$\n"
+  FileClose `$8
+  Pop `$9
+  Pop `$8
+FunctionEnd
+"@
                     $frozenFixture = Compile-Template $frozenName $frozenSource
                     $releasedManager = Join-Path $frozenBundle 'risunest-sync-manager.exe'
                     if (!$resumable) {
@@ -666,7 +746,9 @@ FunctionEnd
                             if ($LASTEXITCODE -eq 0) { throw "The legacy manager accepted a new command shape: $shape" }
                         }
                     }
-                    foreach ($retryMode in @('normal', 'force')) {
+                    $diagIteration = 0
+                    foreach ($retryMode in $diagRetryModes) {
+                        $diagIteration++
                         Run-Installer $frozenFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                         Invoke-Manager @('uninstall', 'lock-held')
                         $frozenUninstaller = Join-Path $syncInstall 'uninstall.exe'
@@ -686,9 +768,44 @@ FunctionEnd
                             } elseif (Test-Path $retry) { throw 'A legacy frozen command created resumable artifacts.' }
                         } finally { $heldMarker.Dispose() }
                         $retryArgs = if ($retryMode -eq 'force') { @('/S', '/FORCE', '/DELETEAPPDATA') } else { @('/S') }
+                        $diagLabel = "$frozenName-$diagIteration-$retryMode"
+                        $retryStartUtc = [DateTime]::UtcNow
+                        $retryStartTick = [Environment]::TickCount
                         Run-Installer $frozenUninstaller $retryArgs 0 $releasedInstallerTimeoutSeconds
+                        $diagChildren = @(Get-Process -Name 'Au_', 'Bu_', 'Cu_', 'Du_', 'Un_A' -ErrorAction SilentlyContinue)
+                        foreach ($child in $diagChildren) { try { $null = $child.Handle } catch {} }
                         $removedDeadline = [DateTime]::UtcNow.AddSeconds(30)
                         while (((Test-Path $syncInstall) -or (Test-Path $instanceRecord)) -and [DateTime]::UtcNow -lt $removedDeadline) { Start-Sleep -Milliseconds 50 }
+                        $removedMs = [Environment]::TickCount - $retryStartTick
+                        if ((Test-Path $syncInstall) -or (Test-Path $instanceRecord)) {
+                            Write-RemovalDiagnostics "$diagLabel-at30s" $retryStartUtc $retryStartTick $diagChildren
+                            $lateDeadline = [DateTime]::UtcNow.AddSeconds(150)
+                            while (((Test-Path $syncInstall) -or (Test-Path $instanceRecord)) -and [DateTime]::UtcNow -lt $lateDeadline) { Start-Sleep -Milliseconds 200 }
+                            $lateMs = [Environment]::TickCount - $retryStartTick
+                            if ((Test-Path $syncInstall) -or (Test-Path $instanceRecord)) {
+                                Write-RemovalDiagnostics "$diagLabel-at180s" $retryStartUtc $retryStartTick $diagChildren
+                                $script:diagFailures += "$diagLabel stuck after $lateMs ms"
+                                Write-Output "DIAG-RESULT $diagLabel outcome=stuck elapsedMs=$lateMs children=$($diagChildren.Count)"
+                                $recovery = Start-Process -FilePath $frozenUninstaller -ArgumentList ($retryArgs + @("_?=$syncInstall")) -PassThru -WindowStyle Hidden
+                                $recovered = $recovery.WaitForExit(240000)
+                                Write-Output "DIAG-RECOVERY $diagLabel exited=$recovered exit=$(if ($recovered) { $recovery.ExitCode } else { 'n/a' }) dirExists=$(Test-Path $syncInstall)"
+                                Write-RemovalDiagnostics "$diagLabel-after-recovery" $retryStartUtc $retryStartTick $diagChildren
+                                if (Test-Path $syncInstall) {
+                                    if (Test-Path (Join-Path $syncInstall 'uninstall.exe')) {
+                                        throw "DIAG: recovery could not remove $diagLabel. Failures: $($script:diagFailures -join '; ')"
+                                    }
+                                    Remove-Item -LiteralPath $syncInstall -Recurse -Force
+                                }
+                                if (Test-Path $instanceRecord) { throw "DIAG: recovery left the registration for $diagLabel." }
+                            } else {
+                                $script:diagFailures += "$diagLabel late after $lateMs ms"
+                                Write-Output "DIAG-RESULT $diagLabel outcome=late elapsedMs=$lateMs children=$($diagChildren.Count)"
+                                Write-RemovalDiagnostics "$diagLabel-late" $retryStartUtc $retryStartTick $diagChildren
+                            }
+                        } else {
+                            $childState = ($diagChildren | ForEach-Object { "$($_.Id):$(if ($_.HasExited) { $_.ExitCode } else { 'alive' })" }) -join ','
+                            Write-Output "DIAG-RESULT $diagLabel outcome=removed elapsedMs=$removedMs children=$childState"
+                        }
                         if (Test-Path $syncInstall) { throw "Frozen $retryMode removal left the installation directory." }
                         if (Test-Path $instanceRecord) { throw "Frozen $retryMode removal left its registration." }
                         if ((Test-Path $data) -ne ($retryMode -eq 'normal')) { throw 'Frozen removal did not honor its data choice.' }
@@ -697,6 +814,7 @@ FunctionEnd
                     }
                     Write-Output "$frozenName uninstallers remove archive-updated installs, retry normally and with force, and permit reinstall (resumable=$resumable)."
                 }
+                if ($script:diagFailures.Count -ne 0) { throw "DIAG: frozen retries did not finish within 30 s: $($script:diagFailures -join '; ')" }
             } finally {
                 if (Test-Path $oldManager) {
                     & $ManagerBinary --data-dir $data --server $server uninstall lock-held | Out-Null

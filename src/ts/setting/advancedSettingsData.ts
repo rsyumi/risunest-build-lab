@@ -67,18 +67,6 @@ export const advancedSettingsItems: SettingItem[] = [
         }
     },
 
-    // Keep Session alive
-    {
-        id: 'adv.keepSessionAlive', type: 'select', labelKey: 'keepSessionAlive', bindKey: 'keepSessionAlive', helpKey: 'keepSessionAlive',
-        options: {
-            selectOptions: [
-                { value: 'off', label: 'Off' },
-                { value: 'sound', label: 'Via Sound' },
-            ]
-        }
-    },
-    
-
     // Height Mode
     {
         id: 'adv.heightMode', type: 'select', labelKey: 'heightMode', bindKey: 'heightMode',
@@ -200,7 +188,6 @@ export const advancedSettingsItems: SettingItem[] = [
     { id: 'adv.openAIFlex', type: 'check', labelKey: 'openAIFlexProcessing', bindKey: 'openAIFlexProcessing', helpKey: 'openAIFlexProcessing', showExperimental: true, classes: 'mt-4' },
     { id: 'adv.claudeCache', type: 'check', labelKey: 'claude1HourCaching', bindKey: 'claude1HourCaching', classes: 'mt-4' },
     { id: 'adv.claudeBatch', type: 'check', labelKey: 'claudeBatching', bindKey: 'claudeBatching', showExperimental: true, classes: 'mt-4' },
-    { id: 'adv.personaNote', type: 'check', labelKey: 'personaNote', bindKey: 'personaNote', showExperimental: true, classes: 'mt-4' },
     { id: 'adv.toolUsage', type: 'check', labelKey: 'rememberToolUsage', bindKey: 'rememberToolUsage', classes: 'mt-4' },
     { id: 'adv.bookmark', type: 'check', labelKey: 'bookmark', bindKey: 'enableBookmark', classes: 'mt-4' },
     { id: 'adv.simpleTool', type: 'check', labelKey: 'simplifiedToolUse', bindKey: 'simplifiedToolUse', classes: 'mt-4' },

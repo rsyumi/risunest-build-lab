@@ -14,6 +14,8 @@
     import { convertModuleToCharacter } from "src/ts/interchangeability";
     import { commitDetachedCharacter } from "src/ts/characters";
     import { commitModuleCharacterConversion } from "./moduleCharacterConversion";
+    import { collectOwnedAssetKeys, scheduleDeletedOwnerAssetCleanup } from "src/ts/storage/deletedOwnerAssetCleanup";
+    import { assetAliasCleanupTarget } from "src/ts/storage/persistentDataRuntime.svelte";
     let mode = $state(0)
     let editModuleId = $state('')
     const currentModule = $derived(DBState.db.modules.find(module => module.id === editModuleId))
@@ -124,12 +126,15 @@
                                 if(d){
                                     const index = DBState.db.modules.findIndex((v) => v.id === rmodule.id)
                                     if (index < 0) return
+                                    const startedAtMs = Date.now()
+                                    const assetKeys = collectOwnedAssetKeys(DBState.db.modules[index])
                                     if(DBState.db.enabledModules.includes(rmodule.id)){
                                         DBState.db.enabledModules.splice(DBState.db.enabledModules.indexOf(rmodule.id), 1)
                                         DBState.db.enabledModules = DBState.db.enabledModules
                                     }
                                     DBState.db.modules.splice(index, 1)
                                     DBState.db.modules = DBState.db.modules
+                                    scheduleDeletedOwnerAssetCleanup(assetKeys, startedAtMs, 'module-delete', assetAliasCleanupTarget)
                                 }
                             }}>
                                 <TrashIcon size={18}/>

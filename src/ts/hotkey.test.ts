@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
+import { setAppLockInputBlocked } from './appLock/input'
 
 const mocks = vi.hoisted(() => {
     function store<T>(initial: T, onSet?: (value: T) => void) {
@@ -52,7 +53,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('./alert', async (importOriginal) => ({
     alertMd: vi.fn(),
-    alertSelect: vi.fn(),
+    alertSelect: (await importOriginal<typeof import('./alert')>()).alertSelect,
     alertToast: mocks.alertToast,
     alertWait: vi.fn(),
     doingAlert: (await importOriginal<typeof import('./alert')>()).doingAlert,
@@ -91,7 +92,7 @@ vi.mock('./process/index.svelte', () => ({
 }))
 vi.mock('./dragTypes', () => ({ RISU_SIDEBAR_DRAG_TYPE: 'character' }))
 
-import { initHotkey, initMobileGesture } from './hotkey'
+import { hotkeyMatches, initHotkey, initMobileGesture } from './hotkey'
 import { alertStore, settingsOpen } from './stores.svelte'
 
 afterEach(() => vi.restoreAllMocks())
@@ -140,6 +141,42 @@ describe('character hotkeys', () => {
         await keydown(event)
         expect(mocks.deactivateActiveWorkingSet).not.toHaveBeenCalled()
         expect(event.defaultPrevented).toBe(false)
+    })
+
+    it.each([
+        { name: 'an empty contenteditable', html: '<div contenteditable="" tabindex="0" data-focus></div>' },
+        { name: 'an inherited contenteditable', html: '<div contenteditable="true"><span tabindex="0" data-focus>text</span></div>' },
+        { name: 'a plaintext-only contenteditable', html: '<div contenteditable="plaintext-only" tabindex="0" data-focus></div>' },
+        { name: 'an EditContext element', html: '<div tabindex="0" data-focus data-edit-context></div>' },
+    ])('does not run unmodified hotkeys while typing in $name', async ({ html }) => {
+        let keydown!: (event: KeyboardEvent) => Promise<void>
+        vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
+            if (type === 'keydown') keydown = handler as unknown as typeof keydown
+        })
+        initHotkey()
+        const host = document.createElement('div')
+        host.innerHTML = html
+        document.body.append(host)
+        const focused = host.querySelector<HTMLElement>('[data-focus]')!
+        if (focused.hasAttribute('data-edit-context')) Object.assign(focused, { editContext: {} })
+        try {
+            focused.focus()
+            expect(document.activeElement).toBe(focused)
+
+            await keydown(new KeyboardEvent('keydown', { key: 'h', cancelable: true }))
+
+            expect(mocks.deactivateActiveWorkingSet).not.toHaveBeenCalled()
+            expect(hotkeyMatches({ key: 'h', action: 'home' } as never, new KeyboardEvent('keydown', { key: 'h' }))).toBe(false)
+
+            settingsOpen.set(true)
+            const escape = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+            await keydown(escape)
+            expect(get(settingsOpen)).toBe(true)
+            expect(escape.defaultPrevented).toBe(false)
+        } finally {
+            settingsOpen.set(false)
+            host.remove()
+        }
     })
 
     it('waits for preset activation before reporting the hotkey switch', async () => {
@@ -237,6 +274,7 @@ describe('Escape', () => {
 })
 
 describe('mobile gesture ownership', () => {
+    afterEach(() => setAppLockInputBlocked(false))
     function gestures() {
         const handlers = new Map<string, (event: TouchEvent) => void>()
         vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
@@ -253,11 +291,12 @@ describe('mobile gesture ownership', () => {
         }
     }
 
-    it('ignores buttons, their SVG children, and editable ancestors without losing another finger', () => {
+    it('ignores buttons, their SVG children, sliders, and editable ancestors without losing another finger', () => {
         const dispatch = gestures()
         const parent = document.createElement('div')
         parent.innerHTML = '<button><svg><path/></svg></button><div contenteditable="true"><span>text</span></div>'
-        const targets = [parent.querySelector('button')!, parent.querySelector('path')!, parent.querySelector('span')!]
+            + '<div role="slider" tabindex="0"><b>50</b></div><input type="range">'
+        const targets = [parent.querySelector('button')!, parent.querySelector('path')!, parent.querySelector('span')!, parent.querySelector('b')!, parent.querySelector('input')!]
         for (const [identifier, target] of targets.entries()) {
             dispatch('touchstart', [{ identifier, clientX: 100, target }])
             expect(() => dispatch('touchend', [{ identifier, clientX: 0, target }])).not.toThrow()
@@ -268,6 +307,42 @@ describe('mobile gesture ownership', () => {
             { identifier: 11, clientX: 100, target: parent },
         ])
         dispatch('touchend', [{ identifier: 11, clientX: 0, target: parent }])
+        expect(get(mocks.MobileGUIStack)).toBe(1)
+    })
+
+    it('does not open the three-finger quick menu while locked', async () => {
+        let touchstart!: (event: Event) => void
+        vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
+            if (type === 'touchstart') touchstart = handler as typeof touchstart
+        })
+        initHotkey()
+        alertStore.set({ type: 'none', msg: '' })
+        setAppLockInputBlocked(true)
+        for (let index = 0; index < 3; index++) touchstart(new Event('touchstart'))
+        expect(get(alertStore).type).toBe('none')
+        setAppLockInputBlocked(false)
+        for (let index = 0; index < 3; index++) touchstart(new Event('touchstart'))
+        expect(get(alertStore).type).toBe('select')
+        alertStore.set({ type: 'none', msg: '' })
+        await Promise.resolve()
+    })
+
+    it('ignores lock-screen swipes and a touch that crosses the lock boundary', () => {
+        const dispatch = gestures()
+        const target = document.createElement('div')
+        dispatch('touchstart', [{ identifier: 1, clientX: 100, target }])
+        setAppLockInputBlocked(true)
+        dispatch('touchend', [{ identifier: 1, clientX: 0, target }])
+        expect(get(mocks.MobileGUIStack)).toBe(0)
+        dispatch('touchstart', [{ identifier: 2, clientX: 100, target }])
+        dispatch('touchend', [{ identifier: 2, clientX: 0, target }])
+        expect(get(mocks.MobileGUIStack)).toBe(0)
+        dispatch('touchstart', [{ identifier: 3, clientX: 100, target }])
+        setAppLockInputBlocked(false)
+        dispatch('touchend', [{ identifier: 3, clientX: 0, target }])
+        expect(get(mocks.MobileGUIStack)).toBe(0)
+        dispatch('touchstart', [{ identifier: 4, clientX: 100, target }])
+        dispatch('touchend', [{ identifier: 4, clientX: 0, target }])
         expect(get(mocks.MobileGUIStack)).toBe(1)
     })
 
@@ -282,6 +357,76 @@ describe('mobile gesture ownership', () => {
         dispatch('touchend', [{ identifier: 1, clientX: 0, target }])
         dispatch('touchend', [{ identifier: 1, clientX: 0, target }])
         expect(get(mocks.MobileGUIStack)).toBe(1)
+    })
+
+    it('leaves a swipe to a horizontally scrollable block while the block could scroll that way when the touch started', () => {
+        const dispatch = gestures()
+        mocks.MobileGUIStack.set(1)
+        const host = document.createElement('div')
+        host.innerHTML = '<pre style="overflow-x: auto"><span>wide</span></pre><pre style="overflow-x: auto; direction: rtl"><span>wide</span></pre>'
+        document.body.append(host)
+        const [ltr, rtl] = Array.from(host.querySelectorAll('pre'))
+        for (const block of [ltr, rtl]) {
+            Object.defineProperties(block, {
+                scrollWidth: { value: 300, configurable: true },
+                clientWidth: { value: 100, configurable: true },
+                scrollLeft: { value: 0, writable: true, configurable: true },
+            })
+        }
+        const swipe = (block: HTMLElement, from: number, to: number, scrolledTo = block.scrollLeft) => {
+            const target = block.querySelector('span')!
+            dispatch('touchstart', [{ identifier: 1, clientX: from, target }])
+            block.scrollLeft = scrolledTo
+            dispatch('touchend', [{ identifier: 1, clientX: to, target }])
+            return get(mocks.MobileGUIStack)
+        }
+        try {
+            // The block scrolls to its end during the swipe; it could scroll when the finger landed.
+            expect(swipe(ltr, 100, 0, 200)).toBe(1)
+            expect(swipe(ltr, 100, 0)).toBe(2)
+            expect(swipe(ltr, 0, 100)).toBe(2)
+            ltr.scrollLeft = 0
+            expect(swipe(ltr, 0, 100)).toBe(1)
+            expect(swipe(rtl, 0, 100)).toBe(1)
+            expect(swipe(rtl, 100, 0)).toBe(2)
+        } finally {
+            host.remove()
+        }
+    })
+
+    it('does not switch screens while text is selected or a list row is dragged', () => {
+        const dispatch = gestures()
+        const target = document.createElement('div')
+        target.textContent = 'Selectable text'
+        document.body.append(target)
+        const row = document.createElement('div')
+        document.body.append(row)
+        try {
+            document.getSelection()!.selectAllChildren(target)
+            dispatch('touchstart', [{ identifier: 1, clientX: 100, target }])
+            dispatch('touchend', [{ identifier: 1, clientX: 0, target }])
+            expect(get(mocks.MobileGUIStack)).toBe(0)
+            document.getSelection()!.removeAllRanges()
+
+            for (const className of ['risu-sort-held', 'sortable-chosen']) {
+                dispatch('touchstart', [{ identifier: 2, clientX: 100, target }])
+                row.classList.add(className)
+                dispatch('touchmove', [{ identifier: 2, clientX: 50, target }])
+                // The list drops the row on pointerup, which comes before touchend.
+                row.classList.remove(className)
+                dispatch('touchend', [{ identifier: 2, clientX: 0, target }])
+                expect(get(mocks.MobileGUIStack)).toBe(0)
+            }
+
+            dispatch('touchstart', [{ identifier: 3, clientX: 100, target }])
+            dispatch('touchmove', [{ identifier: 3, clientX: 50, target }])
+            dispatch('touchend', [{ identifier: 3, clientX: 0, target }])
+            expect(get(mocks.MobileGUIStack)).toBe(1)
+        } finally {
+            document.getSelection()!.removeAllRanges()
+            target.remove()
+            row.remove()
+        }
     })
 
     it('preserves horizontal navigation and ignores mostly vertical movement', () => {

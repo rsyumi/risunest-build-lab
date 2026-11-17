@@ -1,4 +1,3 @@
-use crate::server_sync::residency::RemotePayloadAccess;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,7 +52,18 @@ mod tests {
         fixture_with_cc_mime("application/octet-stream")
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Portrait {
+        Present,
+        MissingAlias,
+        MissingPayload,
+    }
+
     fn fixture_with_cc_mime(cc_mime: &str) -> Fixture {
+        fixture_with(cc_mime, Portrait::Present)
+    }
+
+    fn fixture_with(cc_mime: &str, portrait_state: Portrait) -> Fixture {
         let directory = TempDir::new().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let cas = PayloadCas::new(directory.path()).unwrap();
@@ -122,7 +132,18 @@ mod tests {
             .replace_add_characters(&staging, &[character])
             .unwrap();
         store
-            .replace_put_asset_aliases(&staging, &[portrait.clone(), cc.clone(), shared.clone()])
+            .replace_put_asset_aliases(&staging, &match portrait_state {
+                Portrait::Present => vec![portrait.clone(), cc.clone(), shared.clone()],
+                Portrait::MissingAlias => vec![cc.clone(), shared.clone()],
+                Portrait::MissingPayload => vec![
+                    AssetAlias {
+                        object_hash: Some(hex::encode(Sha256::digest(b"never stored"))),
+                        ..portrait.clone()
+                    },
+                    cc.clone(),
+                    shared.clone(),
+                ],
+            })
             .unwrap();
         store
             .replace_put_asset_owner_heads(
@@ -163,7 +184,11 @@ mod tests {
                 cc.object_hash.unwrap(),
                 shared.object_hash.unwrap(),
                 second.content_hash,
-                portrait.object_hash.unwrap(),
+                if portrait_state == Portrait::Present {
+                    portrait.object_hash.unwrap()
+                } else {
+                    hex::encode(Sha256::digest(FALLBACK_PORTRAIT))
+                },
             ],
         }
     }
@@ -233,6 +258,52 @@ mod tests {
     }
 
     #[test]
+    fn native_json_export_embeds_the_fallback_for_an_unreadable_portrait() {
+        for state in [Portrait::MissingAlias, Portrait::MissingPayload] {
+            let mut fixture = fixture_with("application/octet-stream", state);
+            let prepared = fixture
+                .store
+                .prepare_risu_save_export(fixture.revision)
+                .unwrap();
+            let owned = fixture.directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let destination = fixture.directory.path().join("character.json");
+            let job = JobRegistry::default()
+                .create(JobKind::ExportCharacterCard)
+                .unwrap();
+
+            export_character_json(
+                prepared,
+                "json-character",
+                fixture.metadata,
+                &owned,
+                &fixture.directory.path().join("handoffs"),
+                Some(&destination),
+                &job,
+            )
+            .unwrap_or_else(|error| panic!("{state:?}: {}", error.message));
+
+            let parse_root = fixture.directory.path().join("json-parse");
+            fs::create_dir(&parse_root).unwrap();
+            let parsed = parse_json_card(
+                &mut fs::read(&destination).unwrap().as_slice(),
+                &JobStaging::open(&parse_root).unwrap(),
+                &content_classification_limits(),
+                &|| false,
+            )
+            .unwrap();
+            assert_eq!(
+                parsed
+                    .payloads
+                    .iter()
+                    .map(|payload| payload.payload.sha256.clone())
+                    .collect::<Vec<_>>(),
+                fixture.payload_hashes
+            );
+        }
+    }
+
+    #[test]
     fn native_json_export_cancellation_and_importer_limit_preserve_the_destination() {
         for cancel in [true, false] {
             let mut fixture = fixture();
@@ -273,6 +344,49 @@ mod tests {
                 if cancel { "cancelled" } else { "payload-too-large" }
             );
             assert_eq!(fs::read(destination).unwrap(), b"previous JSON");
+        }
+
+        // A cancel requested while an asset only the Sync server holds downloads stops
+        // it, and an asset kept nowhere fails as missing.
+        use crate::server_sync::residency::test_remote;
+        for on_server in [true, false] {
+            let mut fixture = fixture();
+            let held = fixture.payload_hashes[0].clone();
+            let cas = PayloadCas::new(fixture.directory.path()).unwrap();
+            if on_server {
+                test_remote::keep_only_on_server(fixture.directory.path(), &held);
+            } else {
+                fs::remove_file(cas.object_path(&held).unwrap().unwrap()).unwrap();
+            }
+            let prepared = fixture
+                .store
+                .prepare_risu_save_export(fixture.revision)
+                .unwrap();
+            let owned = fixture.directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let job = JobRegistry::default()
+                .create(JobKind::ExportCharacterCard)
+                .unwrap();
+            let cancelling = job.clone();
+            test_remote::on_fetch(fixture.directory.path(), move || {
+                cancelling.request_cancel().unwrap();
+            });
+            let error = export_character_json(
+                prepared,
+                "json-character",
+                fixture.metadata,
+                &owned,
+                &fixture.directory.path().join("handoffs"),
+                None,
+                &job,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, if on_server { "cancelled" } else { "asset-missing" });
+            assert_eq!(
+                test_remote::fetched(fixture.directory.path()),
+                usize::from(on_server)
+            );
+            assert!(cas.stat_object(&held).unwrap().is_none());
         }
     }
 
@@ -450,8 +564,10 @@ mod tests {
     }
 }
 use super::content::JSON_CARD_MAX_METADATA_BYTES;
+use super::available_payload::{available_payload_size, open_available_payload};
 use super::error::{
-    cancelled, destination_error_with, invalid_input, io_error, job_error, store_error,
+    asset_missing, cancelled, destination_error_with, invalid_input, io_error, job_error,
+    store_error,
 };
 use super::{JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError};
 use crate::asset_repository::{owner_manifest_codec::OwnerManifestEntry, PayloadCas};
@@ -576,6 +692,7 @@ where
             &metadata,
             reader,
             &repository,
+            job,
         )?
     };
     validate_asset_source_sizes(
@@ -824,12 +941,36 @@ fn expected_card_assets(character: &Map<String, Value>) -> Result<Vec<Value>, Na
     Ok(assets)
 }
 
+/// The character image key when its payload can be read. An unset image, or one
+/// whose alias or payload is gone, exports the fallback portrait instead.
+pub(super) fn available_portrait_key<'a>(
+    character: &'a Value,
+    reader: &RevisionReadLease,
+    repository: &PayloadCas,
+    job: &JobControl,
+) -> Result<Option<&'a str>, NativeJobError> {
+    let Some(key) = character
+        .get("image")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let alias = export::pinned_asset_alias_if_present(&reader.connection, &reader.target, key)
+        .map_err(store_error)?;
+    let Some(hash) = alias.and_then(|alias| alias.object_hash) else {
+        return Ok(None);
+    };
+    Ok(available_payload_size(repository, &hash, job, io_error)?.map(|_| key))
+}
+
 pub(super) fn json_asset_sources(
     character: &Value,
     additional_entries: Option<&[OwnerManifestEntry]>,
     metadata: &Value,
     reader: &RevisionReadLease,
     repository: &PayloadCas,
+    job: &JobControl,
 ) -> Result<Vec<Option<JsonAssetSource>>, NativeJobError> {
     let assets = metadata
         .pointer("/data/assets")
@@ -867,12 +1008,8 @@ pub(super) fn json_asset_sources(
                 return Ok(None);
             }
             if uri == "ccdefault:" {
-                return match character
-                    .get("image")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                {
-                    Some(key) => cas_source(key, None, reader, repository).map(Some),
+                return match available_portrait_key(character, reader, repository, job)? {
+                    Some(key) => cas_source(key, None, reader, repository, job).map(Some),
                     None => Ok(Some(JsonAssetSource::FallbackPortrait)),
                 };
             }
@@ -880,7 +1017,7 @@ pub(super) fn json_asset_sources(
                 .checked_sub(cc_asset_count)
                 .filter(|offset| *offset < additional_asset_count)
                 .and_then(|offset| additional_entries.and_then(|entries| entries.get(offset)));
-            cas_source(uri, occurrence, reader, repository).map(Some)
+            cas_source(uri, occurrence, reader, repository, job).map(Some)
         })
         .collect()
 }
@@ -890,6 +1027,7 @@ fn cas_source(
     occurrence: Option<&OwnerManifestEntry>,
     reader: &RevisionReadLease,
     repository: &PayloadCas,
+    job: &JobControl,
 ) -> Result<JsonAssetSource, NativeJobError> {
     let alias =
         export::pinned_asset_alias(&reader.connection, &reader.target, key).map_err(store_error)?;
@@ -905,11 +1043,9 @@ fn cas_source(
                     "pinned character asset has no native payload: {key}"
                 ))
             })?;
-            let size = repository
-                .stat_available_object(&hash)
-                .map_err(io_error)?
+            let size = available_payload_size(repository, &hash, job, io_error)?
                 .ok_or_else(|| {
-                    invalid_input(format!("pinned character asset is missing: {key}"))
+                    asset_missing(format!("pinned character asset is missing: {key}"))
                 })?;
             (hash, size)
         }
@@ -1034,11 +1170,9 @@ fn write_data_uri<W: Write>(
                 mime,
             } => (
                 Box::new(
-                    repository
-                        .open_available_object(hash)
-                        .map_err(io_error)?
+                    open_available_payload(repository, hash, job, io_error)?
                         .ok_or_else(|| {
-                            invalid_input(format!("pinned character asset is missing: {key}"))
+                            asset_missing(format!("pinned character asset is missing: {key}"))
                         })?,
                 ),
                 hash.clone(),

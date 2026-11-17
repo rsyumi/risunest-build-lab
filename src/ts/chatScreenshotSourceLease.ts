@@ -304,7 +304,7 @@ export async function openChatScreenshotSourceLease(
                     chats: [emptyChat],
                     chatPage: 0,
                 } as character
-                return snapshotChatScreenshotCharacter(hydrated, emptyChat)
+                return snapshotChatScreenshotCharacter(hydrated, emptyChat, undefined)
             },
         }
 

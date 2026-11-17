@@ -55,7 +55,8 @@ impl Catalog {
         if input.read(&mut extra)? != 0 {
             return Err(Error::Invalid("stream object length mismatch"));
         }
-        spool.as_file().sync_all()?;
+        // Spools live in the catalog's temporary directory and are hashed again while the
+        // archive is written, which is synced as a whole.
         let path = spool.into_temp_path();
         if self.add_pinned_file(kind, key, metadata, &path, size, expected_hash, probe)? {
             // The catalog owns every stream spool until the archive writer has consumed it.
@@ -248,7 +249,6 @@ impl Catalog {
                 return Err(Error::Invalid("object hash collision"));
             }
         } else {
-            spool.as_file().sync_all()?;
             let destination = self.directory.path().join(&hash);
             spool
                 .persist_noclobber(&destination)

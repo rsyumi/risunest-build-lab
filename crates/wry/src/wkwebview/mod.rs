@@ -17,6 +17,7 @@ mod ios;
 
 mod class;
 pub use class::wry_web_view::WryWebView;
+pub use navigation::web_content_process_termination_reason;
 #[cfg(target_os = "macos")]
 use class::wry_web_view_parent::WryWebViewParent;
 use class::{
@@ -545,7 +546,10 @@ impl InnerWebView {
           webview.setInspectable(true);
         }
         // NOTE: Private API — `developerExtrasEnabled` is a private KVC key on WKPreferences.
-        // This enables the in-webview devtools
+        // This enables the in-webview devtools. iOS has none, and with the key set WebKit
+        // keeps the arguments of recent console messages alive, so iOS release builds
+        // leave it unset; Web Inspector turns it on when it attaches.
+        #[cfg(any(target_os = "macos", debug_assertions))]
         _preference.setValue_forKey(Some(&_yes), ns_string!("developerExtrasEnabled"));
       }
 

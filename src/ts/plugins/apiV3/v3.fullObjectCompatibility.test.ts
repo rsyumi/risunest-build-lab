@@ -7,6 +7,7 @@ const fixture = vi.hoisted(() => ({
     selectedIndex: 0,
     databaseAccessDependencies: null as null | { getSelectedCharacterId(): string | null },
     pluginPermissionReads: vi.fn(),
+    readImage: vi.fn(),
     permissionValues: new Map<string, unknown>(),
     replacers: new Map<string, Set<Function>>(),
     listeners: new Set<Function>(),
@@ -64,6 +65,7 @@ vi.mock('../plugins.svelte', async () => {
             getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
             key: vi.fn(), keys: vi.fn(), length: vi.fn(),
         },
+        readImage: fixture.readImage,
     })
     return host.pluginsModule({
         getV2PluginAPIs: () => apis,
@@ -107,6 +109,7 @@ vi.mock('../pluginDatabaseAccess', async () => (await import('./v3Host.testSuppo
 
 import { executePluginV3, loadV3Plugins, resetAllPluginPermissions, customV3ProviderMetaStore } from './v3.svelte'
 import { alertConfirm } from 'src/ts/alert'
+import { getInlayAsset } from 'src/ts/process/files/inlays'
 import { customProviderStore, pluginV2 } from '../plugins.svelte'
 import { get } from 'svelte/store'
 import { getPluginPermissionStore } from 'src/ts/storage/nativePluginPermissions'
@@ -352,5 +355,13 @@ describe('Plugin v3 runtime consent and ownership', () => {
         expect(customV3ProviderMetaStore).toEqual([])
         expect(pluginV2.providerOptions.has('provider')).toBe(false)
         expect(pluginV2.providers.has('provider')).toBe(false)
+    })
+
+    it('reads assets and Inlays behind the app\'s own reads', async () => {
+        const api = await start()
+        await api.readImage('portrait.png')
+        expect(fixture.readImage).toHaveBeenLastCalledWith('portrait.png', { background: true })
+        await api.readInlay('inlay-id')
+        expect(getInlayAsset).toHaveBeenLastCalledWith('inlay-id', { background: true })
     })
 })

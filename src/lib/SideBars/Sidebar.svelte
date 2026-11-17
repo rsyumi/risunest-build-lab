@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { imageAliases } from "src/ts/media/imageFormats"
     import {
     CharEmotion,
     DynamicGUI,
@@ -45,7 +46,8 @@
     import BaseRoundedButton from "../UI/BaseRoundedButton.svelte";
     import { getCharacterIndexObject, selectSingleFile } from "src/ts/util";
     import { v4 } from "uuid";
-    import { checkCharOrder, getFileSrc, saveAsset } from "src/ts/globalApi.svelte";
+    import { checkCharOrder, getFileSrc } from "src/ts/globalApi.svelte";
+    import { saveImage } from "src/ts/storage/database.svelte";
     import { alertInput, alertSelect } from "src/ts/alert";
     import SideChatList from "./SideChatList.svelte";
 
@@ -347,8 +349,34 @@
     }
   }
 
+  // One mark at a time: the gap or avatar that a drop at the pointer acts on.
+  let dropMark: { element: HTMLElement, className: string } | null = null
+  const clearDropMark = () => {
+    if(dropMark){
+      dropMark.element.classList.remove(dropMark.className)
+      dropMark = null
+    }
+  }
+  const markDrop = (element: HTMLElement, className: string) => {
+    if(dropMark?.element === element){
+      return
+    }
+    clearDropMark()
+    dropMark = { element, className }
+    element.classList.add(className)
+  }
+  // The mark goes once the drag is no longer over the marked element. A leave
+  // without relatedTarget, as touch drags send, checks what is under the point.
+  const releaseDropMark = (e:DragEvent) => {
+    const over = e.type === 'dragleave' ? e.relatedTarget ?? document.elementFromPoint(e.clientX, e.clientY) : e.target
+    if(dropMark && !(over instanceof Node && dropMark.element.contains(over))){
+      clearDropMark()
+    }
+  }
+
   const clearCurrentDrag = () => {
     currentDrag = null
+    clearDropMark()
   }
 
   $effect(() => {
@@ -357,11 +385,15 @@
     window.addEventListener('dragend', clearCurrentDrag)
     window.addEventListener('drop', clearCurrentDrag)
     window.addEventListener('blur', clearCurrentDrag)
+    window.addEventListener('dragover', releaseDropMark, true)
+    window.addEventListener('dragleave', releaseDropMark, true)
 
     return () => {
       window.removeEventListener('dragend', clearCurrentDrag)
       window.removeEventListener('drop', clearCurrentDrag)
       window.removeEventListener('blur', clearCurrentDrag)
+      window.removeEventListener('dragover', releaseDropMark, true)
+      window.removeEventListener('dragleave', releaseDropMark, true)
     }
   })
 
@@ -372,13 +404,38 @@
     return currentDrag
   }
 
-  const avatarDragOver = (e:DragEv) => {
-    if(!getCurrentSidebarDrag(e)){
+  // Whether createFolder changes the order when drag is dropped on the avatar at target.
+  const avatarDropActs = (drag:DragData, target:DragData) => {
+    if(target.folder || (drag.index === target.index && !drag.folder)){
+      return false
+    }
+    const order = DBState.db.characterOrder
+    const main = drag.folder ? (order[getFolderIndex(drag.folder)] as folder | undefined)?.data[drag.index] : order[drag.index]
+    const item = order[target.index]
+    if(typeof(main) !== 'string' || !item){
+      return false
+    }
+    // The last character of a folder dropped on that folder stays where it is.
+    return typeof(item) === 'string' || item.id !== drag.folder || drag.index < item.data.length - 1
+  }
+
+  // Only characters go into a folder; inserter ignores a folder dropped there.
+  const entersFolder = (drag:DragData) => !!drag.folder || typeof(DBState.db.characterOrder[drag.index]) === 'string'
+
+  const avatarDragOver = (ind:DragData, e:DragEv) => {
+    const drag = getCurrentSidebarDrag(e)
+    if(!drag){
       return
     }
     e.preventDefault()
     e.stopPropagation()
     e.dataTransfer.dropEffect = 'move'
+    if(avatarDropActs(drag, ind)){
+      markDrop(e.currentTarget, 'risu-sidebar-drop-target')
+    }
+    else{
+      clearDropMark()
+    }
   }
 
   const avatarDrop = (ind:DragData, e:DragEv) => {
@@ -557,15 +614,12 @@
       e.preventDefault()
       e.stopPropagation()
       e.dataTransfer.dropEffect = 'move'
-      e.currentTarget.classList.add('bg-green-500')
-    }} ondragleave={(e) => {
-      e.currentTarget.classList.remove('bg-green-500')
+      markDrop(e.currentTarget, 'risu-sidebar-drop-gap')
     }} ondrop={(e) => {
       const drag = getCurrentSidebarDrag(e)
       if(!drag){ return }
       e.preventDefault()
       e.stopPropagation()
-      e.currentTarget.classList.remove('bg-green-500')
       try {
         inserter(drag,{index:0})
       } finally {
@@ -580,7 +634,7 @@
         data-sidebar-drop
         ondragstart={(e) => {avatarDragStart({index:ind}, e)}}
         ondragend={clearCurrentDrag}
-        ondragover={avatarDragOver}
+        ondragover={(e) => {avatarDragOver({index:ind}, e)}}
         ondrop={(e) => {avatarDrop({index:ind}, e)}}
         ondragenter={preventAll}
       >
@@ -657,17 +711,13 @@
                       break;
                   
                     case 1:
-                      const folderImage = await selectSingleFile([
-                        'png',
-                        'jpg',
-                        'webp',
-                      ])
+                      const folderImage = await selectSingleFile(imageAliases, { image: true })
 
                       if(!folderImage) {
                         return
                       }
 
-                      const folderImageData = await saveAsset(folderImage.data)
+                      const folderImageData = await saveImage(folderImage.data)
 
                       oder.imgFile = folderImageData
                       oder.img = await getFileSrc(folderImageData)
@@ -717,19 +767,17 @@
             'bg-darkbg/20'
           }"></div>
           <div class="h-4 min-h-4 w-14 relative z-10" role="listitem" data-sidebar-drop ondragover={(e) => {
-            if(!getCurrentSidebarDrag(e)){ return }
+            const drag = getCurrentSidebarDrag(e)
+            if(!drag){ return }
             e.preventDefault()
             e.stopPropagation()
             e.dataTransfer.dropEffect = 'move'
-            e.currentTarget.classList.add('bg-green-500')
-          }} ondragleave={(e) => {
-            e.currentTarget.classList.remove('bg-green-500')
+            if(entersFolder(drag)){ markDrop(e.currentTarget, 'risu-sidebar-drop-gap') }
           }} ondrop={(e) => {
             const drag = getCurrentSidebarDrag(e)
             if(!drag){ return }
             e.preventDefault()
             e.stopPropagation()
-            e.currentTarget.classList.remove('bg-green-500')
             try {
               if(char.type === 'folder'){
                 inserter(drag,{index:0,folder:char.id})
@@ -746,7 +794,7 @@
               data-sidebar-drop
               ondragstart={(e) => {if(char.type === 'folder'){avatarDragStart({index: ind, folder:char.id}, e)}}}
               ondragend={clearCurrentDrag}
-              ondragover={avatarDragOver}
+              ondragover={(e) => {if(char.type === 'folder'){avatarDragOver({index: ind, folder:char.id}, e)}}}
               ondrop={(e) => {if(char.type === 'folder'){avatarDrop({index: ind, folder:char.id}, e)}}}
               ondragenter={preventAll}
             >
@@ -780,19 +828,17 @@
               </div>
             </div>
             <div class="h-4 min-h-4 w-14 relative z-20" role="listitem" data-sidebar-drop ondragover={(e) => {
-              if(!getCurrentSidebarDrag(e)){ return }
+              const drag = getCurrentSidebarDrag(e)
+              if(!drag){ return }
               e.preventDefault()
               e.stopPropagation()
               e.dataTransfer.dropEffect = 'move'
-              e.currentTarget.classList.add('bg-green-500')
-            }} ondragleave={(e) => {
-              e.currentTarget.classList.remove('bg-green-500')
+              if(entersFolder(drag)){ markDrop(e.currentTarget, 'risu-sidebar-drop-gap') }
             }} ondrop={(e) => {
               const drag = getCurrentSidebarDrag(e)
               if(!drag){ return }
               e.preventDefault()
               e.stopPropagation()
-              e.currentTarget.classList.remove('bg-green-500')
               try {
                 if(char.type === 'folder'){
                   inserter(drag,{index:ind+1,folder:char.id})
@@ -810,15 +856,12 @@
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
-        e.currentTarget.classList.add('bg-green-500')
-      })} ondragleave={(e) => {
-        e.currentTarget.classList.remove('bg-green-500')
-      }} ondrop={(e) => {
+        markDrop(e.currentTarget, 'risu-sidebar-drop-gap')
+      })} ondrop={(e) => {
         const drag = getCurrentSidebarDrag(e)
         if(!drag){ return }
         e.preventDefault()
         e.stopPropagation()
-        e.currentTarget.classList.remove('bg-green-500')
         try {
           inserter(drag,{index:ind+1})
         } finally {
@@ -1008,6 +1051,40 @@
 <style>
   .editMode {
     min-width: 6rem;
+  }
+  /* Marks are toggled from drag handlers, so the selectors stay global. Both reach
+     past the dragged avatar's card so they stay visible under it. */
+  :global(.risu-sidebar-drop-gap) {
+    width: 4.5rem;
+    background-color: var(--risu-theme-borderc);
+  }
+  :global(.risu-sidebar-drop-target .sidebar-avatar) {
+    outline: 2px solid var(--risu-theme-borderc);
+    outline-offset: 2px;
+  }
+  /* A held or dragged avatar shows it in its own shape, not as a box around the row. */
+  [data-sidebar-drag-id]:global(.risu-sort-held),
+  [data-sidebar-drag-id]:global(.risu-drag-source) {
+    background-color: transparent;
+    outline: none;
+    opacity: 1;
+  }
+  [data-sidebar-drag-id]:global(.risu-drag-source) > :global(*) {
+    opacity: 1;
+  }
+  [data-sidebar-drag-id]:global(.risu-sort-held) :global(.sidebar-avatar) {
+    box-shadow: 0 0 0 1px var(--risu-theme-borderc);
+  }
+  /* While its card follows the finger, the avatar stays behind dimmed. */
+  [data-sidebar-drag-id]:global(.risu-drag-source) :global(.sidebar-avatar) {
+    opacity: 0.45;
+  }
+  /* The card keeps the avatar's shape. */
+  :global(body > .risu-drag-card.avatar) {
+    background-color: transparent;
+    outline: none;
+    box-shadow: none;
+    filter: drop-shadow(0 6px 12px rgb(0 0 0 / 0.35));
   }
   @keyframes sidebar-transition {
     from {

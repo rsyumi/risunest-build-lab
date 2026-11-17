@@ -1,6 +1,7 @@
 import type { GenerationEndRecord, GenerationEndStatus } from '../process/generationEnd'
 import { responseRange } from '../responseVariants'
 import type { Message } from '../storage/database.svelte'
+import { readCurrentRevision } from '../storage/persistentDataStore'
 import { acquireCurrentRevisionWithRetry, withPersistentRevisionLease } from '../storage/persistentRecordIterator'
 import { findCharacterIndex, findChatIndex } from './conversationContext'
 import type { PinnedConversationPositionSource } from './pinnedConversationPosition'
@@ -67,7 +68,7 @@ export function createGenerationEndLocator(source: () => PinnedConversationPosit
         }))
         const lease = await acquireCurrentRevisionWithRetry(
             (revision) => store.acquireRevision(revision),
-            async () => (await store.readRoot()).revision,
+            () => readCurrentRevision(store),
         )
         return withPersistentRevisionLease(lease, async (reader) => {
             const characterIndex = await findCharacterIndex(reader, record.characterId)

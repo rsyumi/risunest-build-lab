@@ -523,6 +523,7 @@ async fn kept(
         now_ms: job.now_ms,
         unfinished: Vec::new(),
         cache_root: job.cache_root,
+        reads: Default::default(),
     };
     let roots = view.roots(cancel).await?;
     let identity = reachability::object_identity(root, &connected.handle)?;

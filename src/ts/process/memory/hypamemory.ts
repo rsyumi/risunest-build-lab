@@ -198,14 +198,8 @@ export class HypaProcesser{
             }
         }
 
-        let pending = texts.filter((v) => {
-            for(let i=0;i<this.vectors.length;i++){
-                if(this.vectors[i].content === v){
-                    return false
-                }
-            }
-            return true
-        })
+        const known = new Set(this.vectors.map((vector) => vector.content))
+        let pending = texts.filter((v) => !known.has(v))
 
         if(pending.length === 0){
             return

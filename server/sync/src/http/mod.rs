@@ -2,7 +2,7 @@
 mod admission_tests;
 mod lww;
 use crate::{
-    store::{Device, Store},
+    store::{admit_format, Device, Store},
     workload::{WorkKind, Workload},
     Error, Result,
 };
@@ -16,7 +16,7 @@ use axum::{
     Extension, Json, Router,
 };
 use http_body::Body as _;
-use risunest_sync_wire::{body, canonical, transfer, Sequence, MAX_METADATA_BYTES};
+use risunest_sync_wire::{body, canonical, library_format, transfer, Sequence, MAX_METADATA_BYTES};
 use serde::Deserialize;
 use std::{
     pin::Pin,
@@ -79,6 +79,17 @@ async fn compressible(mut response: Response) -> Response {
 }
 pub fn router(store: Arc<Store>) -> Router {
     router_with_workload(store, Workload::new())
+}
+
+/// Accepts connections with Nagle's algorithm off, so the last segment of a
+/// reply is not held until the client acknowledges the ones before it.
+pub fn listener(
+    listener: tokio::net::TcpListener,
+) -> impl axum::serve::Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr> {
+    use axum::serve::ListenerExt;
+    listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    })
 }
 
 pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
@@ -338,6 +349,25 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     }
     headers.get(name)?.to_str().ok()
 }
+/// The format level a request declares; released clients declare none.
+fn declared_format(headers: &HeaderMap) -> Result<Option<u64>> {
+    if !headers.contains_key(library_format::HEADER) {
+        return Ok(None);
+    }
+    header(headers, library_format::HEADER)
+        .and_then(|value| library_format::parse_header(value).ok())
+        .map(Some)
+        .ok_or(Error::new("invalid-library-format", 400))
+}
+/// Every authenticated reply names the library level and the highest level
+/// this server accepts, so a client can tell a server with the gate apart.
+fn insert_format_headers(store: &Store, headers: &mut HeaderMap) {
+    headers.insert(library_format::HEADER, store.library_format().into());
+    headers.insert(
+        library_format::MAX_HEADER,
+        crate::LIBRARY_FORMAT_MAX_LEVEL.into(),
+    );
+}
 fn values<'a>(headers: &'a HeaderMap, name: &str) -> impl Iterator<Item = &'a [u8]> {
     headers.get_all(name).iter().map(|value| value.as_bytes())
 }
@@ -514,6 +544,7 @@ pub(crate) async fn close_after_unread_body(request: Request, next: Next) -> Res
     response
 }
 async fn authorize(State(app): State<App>, request: Request, next: Next) -> Response {
+    let mut authenticated = false;
     let result = async {
         let token = header(request.headers(), "authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
@@ -523,6 +554,10 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
             .ok_or(Error::new("unauthorized", 401))?
             .to_owned();
         app.authenticate(&library, &token).await?;
+        authenticated = true;
+        // An early refusal; store operations check the level again themselves.
+        let declared = declared_format(request.headers())?;
+        admit_format(app.store.library_format(), declared)?;
         // DefaultBodyLimit caps consumed bytes but does not preflight a declared
         // oversized body. Reject it after authentication, before waiting for bytes.
         if request.headers().contains_key("content-length") {
@@ -565,7 +600,8 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         // Queued requests do not prevent maintenance from draining active work.
         let work = app.workload.begin(WorkKind::Request)?;
         // Registration can be revoked while a request waits for capacity.
-        let device = app.authenticate(&library, &token).await?;
+        let mut device = app.authenticate(&library, &token).await?;
+        device.format_level = declared;
         let mut request = request;
         request.extensions_mut().insert(device);
         if let Some(buffered) = &buffered {
@@ -610,7 +646,11 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         Ok::<_, Error>(response)
     }
     .await;
-    result.unwrap_or_else(IntoResponse::into_response)
+    let mut response = result.unwrap_or_else(IntoResponse::into_response);
+    if authenticated {
+        insert_format_headers(&app.store, response.headers_mut());
+    }
+    response
 }
 async fn head(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
     let head = blocking(move || app.store.head()).await?;
@@ -651,6 +691,7 @@ async fn missing(State(app): State<App>, body: Bytes) -> Result<Response> {
         return Err(Error::new("too-many-candidates", 400));
     }
     blocking(move || {
+        let paths = app.store.object_paths();
         let mut absent = Vec::new();
         for candidate in candidates {
             match app.store.object_size(&candidate.hash)? {
@@ -658,7 +699,7 @@ async fn missing(State(app): State<App>, body: Bytes) -> Result<Response> {
                 Some(size) if candidate.size != size.into() => {
                     return Err(Error::new("object-size-mismatch", 409))
                 }
-                Some(_) if !app.store.object_presence(&candidate.hash)? => {
+                Some(_) if !app.store.object_presence_in(&paths, &candidate.hash)? => {
                     absent.push(candidate.hash)
                 }
                 _ => (),
@@ -1229,6 +1270,17 @@ mod tests {
     use futures_util::StreamExt;
     use std::sync::Arc;
     use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn accepted_connections_send_without_waiting_for_acknowledgements() {
+        use axum::serve::Listener;
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = tcp.local_addr().unwrap();
+        let mut listener = super::listener(tcp);
+        let _client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (accepted, _) = listener.accept().await;
+        assert!(accepted.nodelay().unwrap());
+    }
 
     #[tokio::test]
     async fn exhausted_body_releases_its_guard_before_the_stream_is_dropped() {

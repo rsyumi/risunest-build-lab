@@ -427,16 +427,48 @@ export class HypaProcessorV2<TMetadata> {
       ? getContextProvider(this.options.model)
       : null;
 
-    const keys = await hypaCacheKeys(
-      ebdTexts.map((item) => ({
-        producer: "hypa-v2" as const,
-        content: item.content,
-        identity,
-        contextSuffix: ctxProvider
-          ? ctxProvider.getCacheKeySuffix(ctxGroups.get(item.id))
-          : "",
-      }))
-    );
+    // Items of one group share its text array, so its suffix is hashed once.
+    const suffixOf = new Map<string[] | undefined, string>();
+    const contextSuffix = (texts: string[] | undefined): string => {
+      let suffix = suffixOf.get(texts);
+      if (suffix === undefined) {
+        suffix = ctxProvider?.getCacheKeySuffix(texts) ?? "";
+        suffixOf.set(texts, suffix);
+      }
+      return suffix;
+    };
+    const inputs = ebdTexts.map((item) => ({
+      producer: "hypa-v2" as const,
+      content: item.content,
+      identity,
+      contextSuffix: contextSuffix(ctxGroups.get(item.id)),
+    }));
+    const keys = await hypaCacheKeys(inputs);
+
+    // Repeated text in one group gets a different vector at each position, so a
+    // group whose keys collide keys every chunk by its position.
+    const members = new Map<string[], number[]>();
+    ebdTexts.forEach((item, index) => {
+      const group = ctxGroups.get(item.id);
+      if (!group) return;
+      const indexes = members.get(group);
+      if (indexes) indexes.push(index);
+      else members.set(group, [index]);
+    });
+    const positional = [...members.values()]
+      .filter((indexes) => new Set(indexes.map((index) => keys[index])).size !== indexes.length)
+      .flatMap((indexes) => indexes.map((index, position) => ({ index, position })));
+    if (positional.length > 0) {
+      const positionalKeys = await hypaCacheKeys(
+        positional.map(({ index, position }) => ({
+          ...inputs[index],
+          contextSuffix: `${inputs[index].contextSuffix}|index:${position}`,
+        }))
+      );
+      positional.forEach(({ index }, i) => {
+        keys[index] = positionalKeys[i];
+      });
+    }
 
     return new Map(ebdTexts.map((item, index) => [item.id, keys[index]]));
   }

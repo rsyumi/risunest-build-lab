@@ -36,10 +36,23 @@ export const alertStore = {
     }
 }
 
+/** The export reason for a file that could not be fetched or found; other export failures keep their own text. */
+function exportFileFailureMessage(error: unknown): string | undefined {
+    const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+    const copy = language.risuNest.importDialog
+    return code === 'remote-asset-unavailable' ? copy.reasonRemoteAssetUnavailable
+        : code === 'asset-missing' ? copy.reasonAssetMissing : undefined
+}
+
 export function alertError(msg: string | Error) {
     console.error(msg)
     if (isInternalSaveFailure(msg)) {
         alertStoreImported.set({ 'type': 'error', 'msg': localSaveFailureMessage(msg) })
+        return
+    }
+    const exportFileFailure = exportFileFailureMessage(msg)
+    if (exportFileFailure) {
+        alertStoreImported.set({ 'type': 'error', 'msg': exportFileFailure })
         return
     }
     const db = getDatabase()
@@ -72,7 +85,7 @@ export function alertError(msg: string | Error) {
     let submsg = ''
 
     //check if it's a known error
-    if(msg.includes('Failed to fetch') || msg.includes("NetworkError when attempting to fetch resource.")){
+    if(msg.includes('Failed to fetch') || msg.includes("NetworkError when attempting to fetch resource.") || msg.includes('Load failed')){
         submsg =    db.usePlainFetch ? language.errors.networkFetchPlain :
                     !isTauri ? language.errors.networkFetchWeb : language.errors.networkFetch
     }

@@ -3,13 +3,14 @@
 //! screen can show the last diagnosis and a deep scan can resume after a restart.
 
 use super::{
-    current_time_ms, with_store_mutex_admitted, with_store_mutex_mut_admitted,
-    PersistentStoreState, RendererOperationGuard,
+    current_time_ms, with_store_and_snapshot_archive, with_store_mutex_admitted,
+    with_store_mutex_mut_admitted, PersistentStoreState, RendererOperationGuard,
 };
 use crate::data_health::journal;
 use crate::data_health::repair::{self, RepairAction, RepairCandidate, RepairPreview};
 use crate::data_health::{codes, read_result, write_result, DeepProgress, ScanDepth, ScanResult};
 use crate::local_backup::CancellationProbe;
+use crate::persistent_store::snapshot::KeepCount;
 use crate::persistent_store::{DataHealthReader, StoreError, StoreResult};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -365,10 +366,17 @@ pub(crate) fn pds_data_health_repair_apply(
     health: State<'_, DataHealthState>,
     selection: Vec<String>,
     snapshot: bool,
+    keep_count: Option<u32>,
     expected_revision: i64,
     expected_scanned_at: i64,
 ) -> Result<RepairApplied, StoreError> {
-    logged("pds_data_health_repair_apply", apply_repair(&state, &health, &selection, snapshot, expected_revision, expected_scanned_at))
+    logged("pds_data_health_repair_apply", (|| {
+        let snapshot = match snapshot {
+            true => Some(KeepCount::requested(keep_count)?),
+            false => None,
+        };
+        apply_repair(&state, &health, &selection, snapshot, expected_revision, expected_scanned_at)
+    })())
 }
 
 #[derive(serde::Serialize)]
@@ -466,7 +474,7 @@ fn apply_repair(
     state: &PersistentStoreState,
     health: &DataHealthState,
     selection: &[String],
-    snapshot: bool,
+    snapshot: Option<KeepCount>,
     expected_revision: i64,
     expected_scanned_at: i64,
 ) -> StoreResult<RepairApplied> {
@@ -484,13 +492,19 @@ fn apply_repair(
     // The snapshot is kept before anything changes, so it holds the library the reader selected
     // against rather than the repaired one.
     let snapshot = match snapshot {
-        true => Some(
-            with_store_mutex_mut_admitted(state, &operation_guard, |store| {
-                store.snapshot_create("data-health-repair")
+        Some(keep) => Some(
+            with_store_and_snapshot_archive(state, &operation_guard, |store, mut archive| {
+                store.lww_recover_intents()?;
+                crate::persistent_store::snapshot::create_in_archive(
+                    store,
+                    &mut archive,
+                    "data-health-repair",
+                    keep,
+                )
             })?
             .id,
         ),
-        false => None,
+        None => None,
     };
     let (revision, journal) = with_store_mutex_mut_admitted(state, &operation_guard, |store| {
         store.apply_repair(diagnosis.revision, &preview.selected, now)

@@ -125,16 +125,27 @@ export function startStreamingSmoke() {
       await tick();
     },
   };
+  let regexFixtureStarted = false;
+  const startRegexFixture = async () => {
+    if (regexFixtureStarted) return;
+    regexFixtureStarted = true;
+    await unmount(fixture);
+  };
   Object.assign(window, {
     __streamingSmoke: {
       ...api,
       viewport: viewportProbe,
       measureParserContext,
+      regexTimeLimit: (counts?: number[], sizes?: number[], repeats?: number, rows?: number, workload?: import('./regexTimeLimitProbe').RegexProbeWorkload) => import('./regexTimeLimitProbe')
+        .then(({ runRegexTimeLimitProbe }) => runRegexTimeLimitProbe(startRegexFixture, counts, sizes, repeats, rows, workload)),
+      regexTimeout: () => import('./regexTimeLimitProbe').then(({ verifyRegexTimeoutResponsiveness }) => verifyRegexTimeoutResponsiveness()),
       parserScreen: (assets: number, baseline = false) => import('./parserScreenProbe')
         .then(({ runParserScreenProbe }) => runParserScreenProbe(assets, baseline, () => unmount(fixture))),
       checkPersistenceReload,
       run: (profile = "smoke") =>
-        profile === "asset-bytes" || profile === "asset-bytes-legacy"
+        profile === 'regex-time-limit' || profile === 'regex-cbs'
+          ? import('./regexTimeLimitProbe').then(({ runRegexTimeLimitProbe }) => runRegexTimeLimitProbe(startRegexFixture, undefined, undefined, undefined, undefined, profile === 'regex-cbs' ? 'cbs' : 'mixed'))
+          : profile === "asset-bytes" || profile === "asset-bytes-legacy"
             ? import('../native-assets/suite').then(async ({ runNativeAssetMeasurements, verifyConcurrentNativeByteWriters }) => {
               const { SqlitePersistentDataStore } = await import('../../src/ts/storage/sqlitePersistentDataStore')
               const store = new SqlitePersistentDataStore()

@@ -16,8 +16,11 @@ import {
 } from './generationConversationOperation'
 import type { requestDataResponse } from './request/request'
 import { consumeStreamingDisplayStream } from './streamingDisplayStream'
+import { beginDisplayWork } from '../displayRecovery.svelte'
 import { historyLength } from './historyWindowIndex'
 import type { ConversationCommitObserver } from './conversationOperationContext'
+import type { GenerationDiagnosticTrace, GenerationDiagnosticPhase, GenerationDiagnosticOutcome, GenerationFailureReason } from '../generationDiagnostics'
+import { createGenerationCheckpoints, type GenerationCheckpointPersistence } from './generationCheckpoints'
 
 export interface GenerationResponseProcessingOptions {
     onConversationCommit?: ConversationCommitObserver
@@ -63,10 +66,13 @@ export interface GenerationResponseCallbacks {
 }
 
 export interface ApplyGenerationResponseOptions {
+    diagnostics?: GenerationDiagnosticTrace
     response: requestDataResponse
     abortSignal: AbortSignal
     continueGeneration: boolean
     sayingCharacterId: string
+    /** The character whose chat receives the response. */
+    ownerCharacterId: string
     generationId: string
     generationInfo: MessageGenerationInfo
     promptInfo: MessagePresetInfo
@@ -75,6 +81,8 @@ export interface ApplyGenerationResponseOptions {
     ttsAutoSpeech(): boolean
     operation: GenerationResponseOperationContext
     callbacks: GenerationResponseCallbacks
+    /** Saves the applied output locally before later output stages; without it nothing is checkpointed. */
+    checkpoint?: GenerationCheckpointPersistence
 }
 
 export interface GenerationResponseApplication {
@@ -115,6 +123,9 @@ export async function applyGenerationResponse(
         return message !== null && target.commitMessage(update(message))
     }
     const hasOutputOwnership = () => getOutputTarget()?.isOwned() ?? false
+    const checkpoints = options.checkpoint
+        ? createGenerationCheckpoints({ ...options.checkpoint, isOwned: hasOutputOwnership, diagnostics: options.diagnostics })
+        : null
     const onConversationCommit: ConversationCommitObserver = (commit) => {
         // The receipt proves that this callback committed from our captured version.
         // An unrelated mutation still leaves the old locator invalid.
@@ -128,6 +139,30 @@ export async function applyGenerationResponse(
         legacyFallbackTarget?.release()
         outputTarget = null
     }
+    const aggregateOutput = options.response.type === 'multiline' && options.response.result.length > 1
+    const phases: GenerationDiagnosticPhase[] = [
+        ...(aggregateOutput ? ['output-application'] as const : ['semantic-output', 'inlay', 'tts'] as const),
+        'current-chat-parser', 'output-trigger', 'output-listener',
+    ]
+    const startedPhases = new Set<GenerationDiagnosticPhase>()
+    const openPhases = new Set<GenerationDiagnosticPhase>()
+    const beginPhase = (phase: GenerationDiagnosticPhase) => {
+        if (aggregateOutput && (phase === 'semantic-output' || phase === 'inlay' || phase === 'tts')) return
+        if (startedPhases.has(phase)) return
+        startedPhases.add(phase)
+        openPhases.add(phase)
+        options.diagnostics?.phase(phase, 'enter')
+    }
+    const endPhase = (
+        phase: GenerationDiagnosticPhase,
+        outcome: GenerationDiagnosticOutcome = options.abortSignal.aborted ? 'aborted' : 'ok',
+        reason?: GenerationFailureReason,
+    ) => {
+        if (!openPhases.delete(phase)) return
+        options.diagnostics?.phase(phase, 'exit', { outcome, reason })
+    }
+    let responseFailed = false
+    let streamFailed = false
     let handedOff = false
     let result = ''
     let emoChanged = false
@@ -141,7 +176,14 @@ export async function applyGenerationResponse(
         }
 
         if (options.response.type === 'streaming') {
-            const reader = options.response.result.getReader()
+            const streamReader = options.response.result.getReader()
+            const reader = {
+                read: () => streamReader.read().catch((error: unknown) => {
+                    streamFailed = true
+                    throw error
+                }),
+                cancel: () => streamReader.cancel(),
+            }
             const targetChat = options.operation.getTargetChat()
             if (!targetChat) return null
             outputTarget = captureGenerationConversationOperation({
@@ -168,16 +210,13 @@ export async function applyGenerationResponse(
             const prefix = options.continueGeneration ? initialOutput.data : ''
             const outputMessageId = outputTarget.messageId
             const performanceMode = options.streamingDisplayOptimizationMode()
-            if (targetChat.id) setStreamingConversation(targetChat.id, performanceMode)
-            targetChat.isStreaming = true
-            targetChat.activeStreamingDisplayOptimizationMode = performanceMode
-            options.operation.incrementReloadKeys()
             const processStreamingSnapshot = async (
                 snapshot: string,
                 cache: 'normal' | 'bypass',
                 signal: AbortSignal,
             ) => {
                 try {
+                    beginPhase('semantic-output')
                     return await options.callbacks.processOutput(
                         prefix + snapshot,
                         outputTarget!.absoluteIndex,
@@ -196,8 +235,20 @@ export async function applyGenerationResponse(
                     throw error
                 }
             }
+            // Streaming renders into the chat, which a recovery record covers.
+            const displayWork = beginDisplayWork(targetChat.id
+                ? { characterId: options.ownerCharacterId, conversationId: targetChat.id }
+                : null)
             let streamCompleted = false
             try {
+                if (targetChat.id) setStreamingConversation(targetChat.id, performanceMode)
+                // The session records the flags, so a save before the first streamed edit covers the response.
+                outputTarget.commitMetadata({
+                    isStreaming: true,
+                    activeStreamingDisplayOptimizationMode: performanceMode,
+                })
+                options.operation.incrementReloadKeys()
+                if (displayWork.ready) await displayWork.ready
                 const streamResult = await consumeStreamingDisplayStream({
                     mode: performanceMode,
                     reader,
@@ -225,6 +276,7 @@ export async function applyGenerationResponse(
                         options.callbacks.markResponseApplied()
                         emoChanged = processed.emoChanged
                         options.operation.incrementReloadKeys()
+                        checkpoints?.applied()
                     },
                     processPreview: async ({ value }, context) => {
                         if (!context.canCommit()) return
@@ -233,27 +285,38 @@ export async function applyGenerationResponse(
                         )) return
                         options.callbacks.markResponseApplied()
                         options.operation.incrementReloadKeys()
+                        checkpoints?.applied()
                     },
+                    beforeCompletion: checkpoints ? () => checkpoints.checkpoint() : undefined,
                 })
                 streamCompleted = streamResult.completed
             } finally {
+                checkpoints?.stop()
+                displayWork.release()
                 if (targetChat.id) clearStreamingConversation(targetChat.id)
-                targetChat.isStreaming = false
-                targetChat.activeStreamingDisplayOptimizationMode = undefined
+                outputTarget.commitMetadata({
+                    isStreaming: false,
+                    activeStreamingDisplayOptimizationMode: undefined,
+                })
                 options.operation.incrementReloadKeys()
             }
 
             if (!streamCompleted) return null
+            endPhase('semantic-output')
 
             if (!outputTarget.isOwned()) return null
+            beginPhase('current-chat-parser')
             let currentChat = options.callbacks.runCurrentChatParser(targetChat)
+            endPhase('current-chat-parser')
             options.operation.publishTargetChat(currentChat)
             if (!outputTarget.refresh()) return null
+            beginPhase('output-trigger')
             const triggerResult = await options.callbacks.runOutputTrigger(
                 currentChat,
                 onConversationCommit,
             )
             if (!outputTarget.isOwned()) return null
+            endPhase('output-trigger')
             if (triggerResult?.chat) currentChat = triggerResult.chat
             if (triggerResult?.sendAIprompt) resendChat = true
             outputTarget.release()
@@ -275,6 +338,7 @@ export async function applyGenerationResponse(
             if (!outputTarget || !outputTarget.isOwned()) return null
             const outputMessage = outputTarget.snapshot()
             if (outputMessage) {
+                beginPhase('inlay')
                 const inlay = options.callbacks.runInlay(outputMessage.data)
                 if (!outputTarget.commitData(inlay.text)) return null
                 if (inlay.promise) {
@@ -282,14 +346,21 @@ export async function applyGenerationResponse(
                     if (!outputTarget.commitData(inlayData)) return null
                 }
             }
+            endPhase('inlay')
             const outputChat = options.operation.getTargetChat()
             if (!outputChat || !outputTarget.isOwned()) return null
+            beginPhase('output-listener')
             await options.callbacks.runOutputListeners(
                 outputChat,
                 outputTarget.absoluteIndex,
             )
             if (!outputTarget.isOwned()) return null
-            if (options.ttsAutoSpeech()) await options.callbacks.speak(result)
+            endPhase('output-listener')
+            if (options.ttsAutoSpeech()) {
+                beginPhase('tts')
+                await options.callbacks.speak(result)
+                endPhase('tts')
+            }
         } else {
             const messages = options.response.type === 'success'
                 ? [['char', options.response.result]] as const
@@ -298,6 +369,7 @@ export async function applyGenerationResponse(
                     : []
             const multilineRerolls: string[] = []
             let outputMessageId: string | undefined
+            if (aggregateOutput) beginPhase('output-application')
             for (let index = 0; index < messages.length; index++) {
                 const message = messages[index]
                 const messageText = message[1]
@@ -322,6 +394,7 @@ export async function applyGenerationResponse(
                 }
                 let processed: Awaited<ReturnType<GenerationResponseCallbacks['processOutput']>>
                 try {
+                    beginPhase('semantic-output')
                     processed = await options.callbacks.processOutput(messageText, messageIndex, {
                         cache: 'normal',
                         signal: options.abortSignal,
@@ -399,10 +472,12 @@ export async function applyGenerationResponse(
                     throw error
                 }
 
+                if (index === messages.length - 1) endPhase('semantic-output')
                 if (options.removeIncompleteResponse()) {
                     processed.data = options.callbacks.trimIncompleteResponse(processed.data)
                 }
                 result = processed.data
+                beginPhase('inlay')
                 const inlay = options.callbacks.runInlay(result)
                 result = inlay.text
                 emoChanged = processed.emoChanged
@@ -421,6 +496,8 @@ export async function applyGenerationResponse(
                     )
                         return null
                     options.callbacks.markResponseApplied()
+                    await checkpoints?.checkpoint()
+                    if (!outputTarget.isOwned()) return null
                     if (inlay.promise) {
                         const inlayData = await inlay.promise
                         if (!outputTarget.commitData(inlayData)) return null
@@ -451,6 +528,8 @@ export async function applyGenerationResponse(
                     generationHadOperation = true
                     if (!outputTarget.isOwned()) return null
                     options.callbacks.markResponseApplied()
+                    await checkpoints?.checkpoint()
+                    if (!outputTarget.isOwned()) return null
                     if (inlay.promise) {
                         const inlayData = await inlay.promise
                         if (!outputTarget.commitData(inlayData)) return null
@@ -460,10 +539,16 @@ export async function applyGenerationResponse(
                 } else {
                     multilineRerolls.push(result)
                 }
+                if (index === messages.length - 1) endPhase('inlay')
                 options.operation.incrementReloadKeys()
-                if (options.ttsAutoSpeech()) await options.callbacks.speak(result)
+                if (options.ttsAutoSpeech()) {
+                    beginPhase('tts')
+                    await options.callbacks.speak(result)
+                    if (index === messages.length - 1) endPhase('tts')
+                }
             }
 
+            if (aggregateOutput) endPhase('output-application')
             if (multilineRerolls.length > 1) {
                 const message = outputTarget?.snapshot()
                 if (
@@ -476,14 +561,18 @@ export async function applyGenerationResponse(
             const outputChat = options.operation.getTargetChat()
             if (!outputChat || !isOwnerCurrent()) return null
             if (outputTarget && !outputTarget.isOwned()) return null
+            beginPhase('current-chat-parser')
             let currentChat = options.callbacks.runCurrentChatParser(outputChat)
+            endPhase('current-chat-parser')
             options.operation.publishTargetChat(currentChat)
             if (!getOutputTarget()?.refresh()) return null
+            beginPhase('output-trigger')
             const triggerResult = await options.callbacks.runOutputTrigger(
                 currentChat,
                 onConversationCommit,
             )
             if (!hasOutputOwnership()) return null
+            endPhase('output-trigger')
             if (triggerResult?.sendAIprompt) resendChat = true
             const previousChat = currentChat
             const nextChat = triggerResult?.chat ?? currentChat
@@ -504,11 +593,13 @@ export async function applyGenerationResponse(
                     messageId: outputMessageId,
                 })
                 if (!outputTarget || !outputTarget.isOwned()) return null
+                beginPhase('output-listener')
                 await options.callbacks.runOutputListeners(
                     currentChat,
                     outputTarget.absoluteIndex,
                 )
                 if (!outputTarget.isOwned()) return null
+                endPhase('output-listener')
             }
         }
 
@@ -523,7 +614,21 @@ export async function applyGenerationResponse(
         }
         handedOff = true
         return application
+    } catch (error) {
+        responseFailed = true
+        throw error
     } finally {
+        const outcome: GenerationDiagnosticOutcome = options.abortSignal.aborted ? 'aborted'
+            : responseFailed || options.response.type === 'fail' ? 'failed'
+            : handedOff ? 'ok' : 'stale'
+        const reason = outcome !== 'failed' ? undefined : streamFailed ? 'stream-error' : 'error'
+        for (const phase of openPhases) endPhase(phase, outcome, reason)
+        for (const phase of phases) {
+            if (startedPhases.has(phase)) continue
+            // A stream cut before its first snapshot still fails the output it carried.
+            if (reason === 'stream-error' && phase === 'semantic-output') options.diagnostics?.phase(phase, 'exit', { outcome, reason })
+            else options.diagnostics?.phase(phase, 'exit', { outcome: 'skipped' })
+        }
         if (!handedOff) release()
     }
 }

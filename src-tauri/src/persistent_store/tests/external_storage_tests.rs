@@ -458,6 +458,36 @@ fn external_capture_never_discards_a_missing_cache_owned_by_a_pending_job() {
 }
 
 #[test]
+fn a_pinned_capture_is_found_after_a_link_moved_the_data_root() {
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (directory, mut store, _) = capture_fixture();
+    let first = capture_library(&mut store, "destination", &Never).unwrap();
+    let first_id = first.id.clone();
+    let tx = store.connection.transaction().unwrap();
+    external::prepare_backup(&tx, "pending-backup", "destination", "repository", &first_id, "history-point").unwrap();
+    tx.commit().unwrap();
+    drop(first);
+    // The row a run with the data root at its earlier location wrote.
+    let stored: String = store
+        .connection
+        .query_row("SELECT catalog_path FROM external_storage_capture_files WHERE capture_id=?1", [&first_id], |row| row.get(0))
+        .unwrap();
+    let spool = store.repository_root().join("external-storage").canonicalize().unwrap();
+    let earlier = directory.path().join("earlier").join("RisuNestData").join("external-storage")
+        .join(std::path::Path::new(&stored).strip_prefix(&spool).unwrap());
+    store
+        .connection
+        .execute("UPDATE external_storage_capture_files SET catalog_path=?1 WHERE capture_id=?2", rusqlite::params![earlier.to_string_lossy(), first_id])
+        .unwrap();
+    assert_eq!(store.reopen_external_capture(&first_id).unwrap().id, first_id);
+}
+
+#[test]
 fn external_capture_reopens_a_pinned_old_revision_and_gc_keeps_only_needed_cache() {
     struct Never;
     impl crate::local_backup::CancellationProbe for Never {
@@ -665,8 +695,9 @@ fn a_transfer_capture_serves_local_recovery_only_once_it_is_completed() {
     assert_eq!(crate::server_sync::residency::test_remote::fetched(root), 1);
     // The conflict store is the external root's own, not one nested in it.
     let external = root.join("external-storage");
-    assert!(!external.join("objects").join("content.sqlite").exists());
-    assert!(!external.join("objects").join("objects").exists());
+    assert!(external.join("content.sqlite").is_file());
+    assert!(!external.join("content-files").join("content.sqlite").exists());
+    assert!(!external.join("content-files").join("content-files").exists());
 }
 
 /// Flips one byte of a held payload, keeping its length.
@@ -876,6 +907,72 @@ fn external_capture_projects_only_changed_records_at_the_pinned_snapshot() {
         1
     );
     store.release_revision(&lease).unwrap();
+}
+
+#[test]
+fn external_capture_pages_a_conversation_without_cached_pages_as_its_cached_pages() {
+    use crate::external_storage::capture::CaptureCatalog;
+    use crate::logical_records::{encode_logical_record_key, LogicalRecordLocator};
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (directory, mut store, _) = capture_fixture();
+    let external = directory.path().join("external-storage");
+    let generation = active_generation(&store.connection).unwrap();
+    let (character_id, conversation_id): (String, String) = store
+        .connection
+        .query_row(
+            "SELECT character_id,conversation_id FROM message_page_indexes WHERE generation=?1 LIMIT 1",
+            [&generation],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    // The same values stored as texts that are not their canonical encodings.
+    let rewritten = store
+        .connection
+        .execute(
+            "UPDATE messages SET value=' '||value||char(10)
+             WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",
+            params![generation, character_id, conversation_id],
+        )
+        .unwrap();
+    assert!(rewritten > 0);
+    let key = encode_logical_record_key(&LogicalRecordLocator::Conversation {
+        character_id: character_id.clone(),
+        conversation_id: conversation_id.clone(),
+    })
+    .unwrap();
+    let pages = |store: &mut PersistentStore, name: &str| -> Vec<(String, i64)> {
+        let mut catalog = CaptureCatalog::create(&external.join(name), &external, None).unwrap();
+        store
+            .prepare_content_capture(name, "consumer", 1)
+            .unwrap()
+            .project(&mut catalog, &Never)
+            .unwrap();
+        let mut statement = catalog
+            .db
+            .prepare("SELECT hash,bytes FROM dependencies WHERE record=?1 ORDER BY hash")
+            .unwrap();
+        let rows = statement
+            .query_map([&key], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows
+    };
+    let cached = pages(&mut store, "cached");
+    assert!(!cached.is_empty());
+    store
+        .connection
+        .execute(
+            "DELETE FROM message_page_indexes WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",
+            params![generation, character_id, conversation_id],
+        )
+        .unwrap();
+    assert_eq!(pages(&mut store, "uncached"), cached);
 }
 
 #[test]

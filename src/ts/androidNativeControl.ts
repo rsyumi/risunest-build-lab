@@ -124,8 +124,6 @@ function installAndroidNativeControl(): void {
         requestRestart: () => control.notify('lifecycle.requestRestart'),
     }
     const generation: AndroidGenerationKeepAliveBridge = {
-        begin: () => control.request<boolean>('generation.begin'),
-        end: () => control.request<boolean>('generation.end'),
         notificationsEnabled: () => control.request<boolean>('generation.notificationsEnabled'),
         requestNotifications: () => control.request<void>('generation.requestNotifications'),
         openNotificationSettings: () => control.request<boolean>('generation.openNotificationSettings'),
@@ -137,7 +135,9 @@ function installAndroidNativeControl(): void {
         notify: body => control.request<boolean>('notification.completion', body.slice(0, 4096)),
     }
     window.RisuBackgroundTasks = {
-        begin: kind => control.request<string | null>('background.begin', kind),
+        begin: (id, kind, deferred, userInitiated) => deferred
+            ? control.request<string>('background.defer', id, kind)
+            : control.request<string>('background.begin', id, kind, String(userInitiated)),
         progress: (id, percent) => control.request('background.progress', id, String(percent)),
         end: id => control.request('background.end', id),
     }

@@ -32,7 +32,7 @@ import type {
     PersistentConversationMetadata,
     PluginStorageMutation,
 } from './persistentDataStore'
-import { RevisionConflictError } from './persistentDataStore'
+import { readCurrentRevision, RevisionConflictError } from './persistentDataStore'
 import {
     SaveCoordinator,
     PersistentMutationFencedError,
@@ -54,6 +54,7 @@ import {
     type PersistentScopedReplacementOptions,
     type PreparedUnitIntent,
     type SaveCoordinatorClock,
+    type SaveCoordinatorDependencies,
     type WindowedConversationPersistenceAuthority,
 } from './saveCoordinator'
 import {
@@ -347,6 +348,7 @@ export interface PersistentDataRuntimeDependencies {
     prepareDatabase(database: Database): Promise<Database>
     /** Gives a stored root read by a refresh the same preparation boot applies. */
     prepareRoot?(root: PersistentRoot): Promise<PersistentRoot>
+    deletedCharacterAssets?: SaveCoordinatorDependencies['deletedCharacterAssets']
 }
 
 export interface PersistentActivatedLibraryGuard {
@@ -400,6 +402,12 @@ export interface PersistentDataRuntime {
     markPersistentDataDirty(estimatedBytes: number): void
     flushPendingData(reason: string): Promise<void>
     flushPendingDataLocally(reason: string): Promise<void>
+    /** A local flush at a generation checkpoint; false when a storage failure took the background save path. */
+    flushPendingDataLocallyForCheckpoint(reason: string): Promise<boolean>
+    /** Whether complete conversations are saved against immutable captured values. */
+    capturesImmutableCharacters(): boolean
+    /** Unacknowledged conversation mutation events and the age of the oldest, for diagnostics. */
+    pendingConversationMutationDiagnostics(): { pendingEvents: number; unacknowledgedMs?: number }
     acknowledgeGenerationCompletion(expectedAuthorityEpoch?: number): Promise<void>
     commitCharacterAddition(
         request: CharacterAdditionRequest,
@@ -473,7 +481,15 @@ export interface PersistentDataRuntime {
         conversationId: string,
         patch: import('./conversationBinding').ConversationBindingPatch,
         publish: (committedPatch: import('./conversationBinding').ConversationBindingPatch) => void,
+        expected?: import('./conversationBinding').ConversationBindingPatch,
     ): Promise<void>
+    /** Edits fields of a character's own record without reading its conversations; see `SaveCoordinator.mutateCharacterDetailFields`. */
+    mutateCharacterDetailFields(
+        characterId: string,
+        reason: string,
+        mutate: import('./saveCoordinator').CharacterDetailFieldsMutation,
+        readResident: import('./saveCoordinator').ResidentCharacterRecord,
+    ): Promise<boolean>
     mutatePersistentCharacterDetail(
         characterId: string,
         reason: string,
@@ -698,6 +714,7 @@ export function createPersistentDataRuntime(
         onPersistenceIdle: () => workingSet.scheduleSelectedConversationDemotion(),
         onFlushPromise: dependencies.onFlushPromise,
         onBackgroundError: dependencies.onBackgroundError,
+        deletedCharacterAssets: dependencies.deletedCharacterAssets,
         onLocalSaveFailure: dependencies.onLocalSaveFailure,
         onWorkingSetRefreshRequired: (revision) => {
             if (revision === null) pendingRefreshChangeSet = null
@@ -966,19 +983,19 @@ export function createPersistentDataRuntime(
                         coordinator.assertDestructiveReplacementFence(owner)
                         const reconciledRevision = await activatedLibraryGuard?.lifecycle?.beforeRefresh()
                         coordinator.assertDestructiveReplacementFence(owner)
-                        const latest = await dependencies.store.readRoot()
+                        const latestRevision = await readCurrentRevision(dependencies.store)
                         coordinator.assertDestructiveReplacementFence(owner)
                         const minimum = Math.max(
                             minimumRevision,
                             coordinator.pendingWorkingSetRefreshRevision ?? minimumRevision,
                             typeof reconciledRevision === 'number' ? reconciledRevision : minimumRevision,
                         )
-                        if (latest.revision < minimum) {
-                            throw new RevisionConflictError(minimum, latest.revision)
+                        if (latestRevision < minimum) {
+                            throw new RevisionConflictError(minimum, latestRevision)
                         }
-                        return refreshCommittedWorkingSet(latest.revision, owner, {
+                        return refreshCommittedWorkingSet(latestRevision, owner, {
                             ...options,
-                            changeSet: latest.revision === minimumRevision ? options?.changeSet : undefined,
+                            changeSet: latestRevision === minimumRevision ? options?.changeSet : undefined,
                         })
                     } catch (error) {
                         return requireCommittedRefresh(minimumRevision, error)
@@ -1265,8 +1282,8 @@ export function createPersistentDataRuntime(
                 },
                 async abortUnchanged() {
                     if (activatedLibraryGuard !== guard || guard.ready) throw new PersistentMutationFencedError()
-                    const latest = await dependencies.store.readRoot()
-                    if (latest.revision !== token.revision || coordinator.revision !== token.revision) {
+                    const latestRevision = await readCurrentRevision(dependencies.store)
+                    if (latestRevision !== token.revision || coordinator.revision !== token.revision) {
                         throw new PersistentMutationFencedError()
                     }
                     coordinator.finishActivatedLibraryGuard(owner)
@@ -1278,8 +1295,8 @@ export function createPersistentDataRuntime(
             const guard = activatedLibraryGuard
             if (!guard) throw new PersistentMutationFencedError()
             coordinator.assertActivatedLibraryGuard(guard.owner, token)
-            const latest = await dependencies.store.readRoot()
-            const projected = await projectRefreshedWorkingSet(latest.revision, {selectedCharacterId:null, selectedConversationId:null, activeCharacterIds:new Set()}, {wholeLibrary:true, root:true, presets:true, pluginStorage:true, characterIds:[], conversations:[]})
+            const latestRevision = await readCurrentRevision(dependencies.store)
+            const projected = await projectRefreshedWorkingSet(latestRevision, {selectedCharacterId:null, selectedConversationId:null, activeCharacterIds:new Set()}, {wholeLibrary:true, root:true, presets:true, pluginStorage:true, characterIds:[], conversations:[]})
             if (projected.deferred) throw new Error('Activated library projection is incomplete')
             coordinator.assertActivatedLibraryGuard(guard.owner, token)
             const rootBefore = canonicalClone(dependencies.state.captureRoot())
@@ -1287,11 +1304,11 @@ export function createPersistentDataRuntime(
             dependencies.state.replaceDatabase(projected.database, new Set(), true)
             dependencies.state.restoreSelection?.(null, null)
             dependencies.state.afterRemoteApply?.()
-            workingSet.installCommittedWorkingSet(dependencies.state.captureWorkingSetDatabase?.() ?? projected.database, latest.revision, projected.windowedMetadata)
+            workingSet.installCommittedWorkingSet(dependencies.state.captureWorkingSetDatabase?.() ?? projected.database, latestRevision, projected.windowedMetadata)
             applyInstalledRootChanges(rootBefore)
-            await commitContentCursor(latest.revision, true)
+            await commitContentCursor(latestRevision, true)
             guard.ready = true
-            return {kind:'committed', revision:latest.revision, projection:'applied'}
+            return {kind:'committed', revision:latestRevision, projection:'applied'}
         },
         async applyLwwReceive(request) {
             const staged = canonicalClone(request)
@@ -1422,6 +1439,10 @@ export function createPersistentDataRuntime(
         flushPendingData: (reason) => coordinator.flushPendingData(reason),
         flushPendingDataLocally: (reason) =>
             coordinator.flushPendingDataLocally(reason),
+        flushPendingDataLocallyForCheckpoint: (reason) =>
+            coordinator.flushPendingDataLocallyForCheckpoint(reason),
+        capturesImmutableCharacters: () => coordinator.capturesImmutableCharacters,
+        pendingConversationMutationDiagnostics: () => coordinator.pendingConversationMutationDiagnostics,
         async acknowledgeGenerationCompletion(expectedAuthorityEpoch = coordinator.storageAuthorityEpoch) {
             coordinator.assertPersistentMutationAllowed(expectedAuthorityEpoch)
             await coordinator.flushPendingDataLocally('generation-completion')
@@ -1546,8 +1567,8 @@ export function createPersistentDataRuntime(
                     let abortedUnchanged = false
                     if (!committed) {
                         try {
-                            const unchanged = await dependencies.store.readRoot()
-                            if (unchanged.revision !== pause.fence.revision || coordinator.revision !== pause.fence.revision) throw new PersistentMutationFencedError()
+                            const unchangedRevision = await readCurrentRevision(dependencies.store)
+                            if (unchangedRevision !== pause.fence.revision || coordinator.revision !== pause.fence.revision) throw new PersistentMutationFencedError()
                             await plugins.restartPluginsAfterAuthorityReplacement()
                             await pause.abortUnchanged(async () => { await binding.assertAuthority() })
                             abortedUnchanged = true
@@ -1582,14 +1603,19 @@ export function createPersistentDataRuntime(
             conversationId,
             patch,
             publish,
+            expected,
         ) =>
             coordinator.mutateConversationBinding(
                 characterId,
                 conversationId,
                 patch,
                 publish,
+                expected,
             ),
         expirePersistentTrash: (now) => coordinator.expirePersistentTrash(now),
+        // A windowed selection is not promoted: the mutation reads no conversation.
+        mutateCharacterDetailFields: (characterId, reason, mutate, readResident) =>
+            coordinator.mutateCharacterDetailFields(characterId, reason, mutate, readResident),
         mutatePersistentCharacterDetail: (characterId, reason, mutate) =>
             withCompleteCharacter(characterId, () => coordinator.mutatePersistentCharacterDetail(
                 characterId,
@@ -1699,9 +1725,9 @@ export function createPersistentDataRuntime(
                     if (!options?.verifyStoreRevision || coordinator.revision > heldRevision) return finish()
                     releasing = (async () => {
                         try {
-                            const latest = await dependencies.store.readRoot()
-                            if (latest.revision > coordinator.revision) coordinator.markCommittedWorkingSetRefreshRequired(
-                                latest.revision, new Error('Native commit completed without a working-set acknowledgement'))
+                            const latestRevision = await readCurrentRevision(dependencies.store)
+                            if (latestRevision > coordinator.revision) coordinator.markCommittedWorkingSetRefreshRequired(
+                                latestRevision, new Error('Native commit completed without a working-set acknowledgement'))
                         } catch (error) {
                             coordinator.markCommittedWorkingSetRefreshRequired(coordinator.revision, error)
                         } finally { finish() }

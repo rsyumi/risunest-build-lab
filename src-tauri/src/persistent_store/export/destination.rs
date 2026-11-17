@@ -134,6 +134,10 @@ destination_controlled_writer!(
     write_dataset_destination_controlled,
     SourceKind::Dataset
 );
+destination_controlled_writer!(
+    write_gallery_destination_controlled,
+    SourceKind::Gallery
+);
 
 trait DestinationFileSystem {
     type Source: Read;
@@ -248,6 +252,7 @@ enum SourceKind {
     CharacterCard,
     RisuModule,
     Dataset,
+    Gallery,
 }
 
 impl SourceKind {
@@ -264,6 +269,7 @@ impl SourceKind {
             Self::CharacterCard => Some(&["character.json", "character.png"]),
             Self::RisuModule => Some(&["module.risum"]),
             Self::Dataset => Some(&["dataset.json"]),
+            Self::Gallery => Some(&["gallery-output.bin"]),
         }
     }
 }
@@ -515,7 +521,7 @@ fn close_file(file: File) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "kernel32")]
@@ -555,7 +561,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)
 }
 

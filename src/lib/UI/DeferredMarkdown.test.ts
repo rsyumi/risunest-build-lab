@@ -40,7 +40,7 @@ describe('DeferredMarkdown', () => {
     test('reports neutral content failure for a non-chat renderer', async () => {
         vi.mocked(ParseMarkdown).mockRejectedValueOnce(new Error('synthetic render'))
         const target = document.createElement('div'); document.body.append(target)
-        mounted = mount(DeferredMarkdown, { target, props: { data: 'Synthetic help text' } })
+        mounted = mount(DeferredMarkdown, { target, props: { data: 'Synthetic help text', root: target } })
         const { language } = await import('src/lang')
         await vi.waitFor(() => expect(target.textContent).toContain(language.contentRenderFailed))
         expect(target.textContent).not.toContain(language.chatDataLoadFailed)
@@ -60,9 +60,10 @@ describe('DeferredMarkdown', () => {
         const target = document.createElement('div')
         document.body.append(target)
 
-        mounted = mount(DeferredMarkdown, { target, props: { data: 'shared-inlay' } })
+        mounted = mount(DeferredMarkdown, { target, props: { data: 'shared-inlay', root: target } })
         await vi.waitFor(() => expect(target.querySelector('img')?.getAttribute('src')).toBe('blob:deferred-markdown'))
         expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledWith('shared-inlay')
+        expect(target.querySelector('img')?.parentElement).toBe(target)
 
         await unmount(mounted)
         mounted = undefined

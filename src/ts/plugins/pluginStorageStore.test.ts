@@ -11,8 +11,10 @@ import {
     type PluginStorageValueQuery,
 } from '../storage/persistentDataStore'
 import { createLeaseStub, createStoreStub } from '../storage/persistentDataStore.testSupport'
+import { UNOWNED_PLUGIN_OWNER } from './pluginOwner'
 import {
     createPluginStorageStore,
+    dropStaleColdPluginReferences,
     observePluginStorageValue,
     notifyPluginStorageAuthorityReplacement,
     registerPluginStorageLifecycle,
@@ -457,12 +459,14 @@ describe('plugin storage V3 residency', () => {
             zero: { byteSize: 1, value: 0 },
             memory: { byteSize: 8, value: { ok: true } },
         }, 1)
+        store.readRevision = vi.fn(async () => 4)
 
         await expect(storage.forOwner(OWNER).snapshot()).resolves.toEqual({
             memory: { ok: true },
             zero: 0,
         })
         expect(store.acquireRevision).toHaveBeenCalledWith(4)
+        expect(store.readRoot).not.toHaveBeenCalled()
     })
 
     it('retries a transient pinned snapshot release without duplicating successful cleanup', async () => {
@@ -608,4 +612,19 @@ it.each([false, true])('disposes an inventory deletion observer even after failu
     advancePluginStorageRemoteChanges([JSON.stringify(['plugin', owner, 'key'])])
     expect(reload).not.toHaveBeenCalled()
     setPluginStorageReloadHandler(() => {})
+})
+
+it('drops stale unowned cold plugin storage references once and keeps every other value', async () => {
+    const { storage, store, mutate } = harness({
+        _coldpluginIndex: { value: 'cold-index', byteSize: 12 },
+        _coldplugin: { value: { memory: 'cold-memory' }, byteSize: 25 },
+        memory: { value: 'kept', byteSize: 6 },
+    })
+    await dropStaleColdPluginReferences(store, storage)
+    await dropStaleColdPluginReferences(store, storage)
+    expect(mutate.mock.calls.map(([mutations]) => mutations)).toEqual([[
+        { type: 'delete', owner: UNOWNED_PLUGIN_OWNER, key: '_coldpluginIndex' },
+        { type: 'delete', owner: UNOWNED_PLUGIN_OWNER, key: '_coldplugin' },
+    ]])
+    expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'memory'))?.value).toBe('kept')
 })

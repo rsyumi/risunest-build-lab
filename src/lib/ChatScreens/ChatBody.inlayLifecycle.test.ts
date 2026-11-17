@@ -66,7 +66,7 @@ import {
     type DeferredInlayMarkerRegistry,
 } from 'src/ts/process/files/inlayRenderSource'
 import ChatBodyInlayHarness from './ChatBodyInlayHarness.test.svelte'
-import { displayRowsToRefresh, noteChatVariableRead, registerDisplayRow } from 'src/ts/process/scriptVariableReads'
+import { displayRowsToRefresh, markDisplayRowsForRebuild, noteChatVariableRead, registerDisplayRow } from 'src/ts/process/scriptVariableReads'
 import type { ParseMarkdownRenderContext } from 'src/ts/parser/parser.svelte'
 import { maxTextUnitLength } from 'src/ts/parser/boundedTextUnits'
 
@@ -209,6 +209,8 @@ describe('ChatBody deferred inlay lifecycle', () => {
         bytes.resolve({ data: new Blob(['first']), type: 'image', name: 'synthetic.png' })
         await vi.waitFor(() => expect(target.querySelector('img')?.getAttribute('src')).toBe('blob:first'))
         expect(settled).toHaveBeenCalledOnce()
+        // Plugins and custom CSS select the rendered markup as direct children of the text root.
+        expect(target.querySelector('img')?.parentElement).toBe(target.firstElementChild)
     })
 
     test('learns beta image dimensions after identical markup reuses the displayed DOM', async () => {
@@ -687,6 +689,50 @@ describe('ChatBody deferred inlay lifecycle', () => {
         expect(
             revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:first'),
         ).toHaveLength(1)
+    })
+
+    test('rebuilds identical HTML and its inlays after a script rebuilds the row, keeping thoughts open', async () => {
+        const settled = vi.fn()
+        inlayMocks.getInlayAssetBlob.mockResolvedValue({
+            data: new Blob(['first']),
+            type: 'image',
+            name: 'first.png',
+        })
+        parserMocks.ParseMarkdown.mockImplementation(async (message: string, ...args: unknown[]) => {
+            const context = args[4] as { deferredInlays?: DeferredInlayMarkerRegistry } | undefined
+            return '<details data-risu-thought><summary>Thought</summary>thinking</details><input type="checkbox">' +
+                renderDeferredInlaySourceMarkup(message, imageSource, context?.deferredInlays)
+        })
+        const row = registerDisplayRow(() => 0)
+        try {
+            mounted = mount(ChatBodyInlayHarness, {
+                target,
+                props: { onDisplaySettled: settled, displayRow: row },
+            })
+            await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce())
+            const panel = target.querySelector('input')!
+            const image = target.querySelector('img')
+            panel.checked = true
+            target.querySelector('details')!.open = true
+
+            // A refresh for a variable change keeps the open panel.
+            ;(mounted as { reload(): void }).reload()
+            await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(2))
+            expect(target.querySelector('input')).toBe(panel)
+
+            markDisplayRowsForRebuild(0)
+            ;(mounted as { reload(): void }).reload()
+            await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(3))
+            expect(target.querySelector('input')).not.toBe(panel)
+            expect(target.querySelector('input')?.checked).toBe(false)
+            expect(target.querySelector('details')?.open).toBe(true)
+            expect(target.querySelector('img')).not.toBe(image)
+            expect(target.querySelector('img')?.getAttribute('src')).toBe('blob:first')
+            expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledTimes(2)
+            expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:first')
+        } finally {
+            row.dispose()
+        }
     })
 
     test('retains displayed HTML through superseded parses and ignores their late results', async () => {
@@ -1402,10 +1448,10 @@ describe('ChatBody deferred inlay lifecycle', () => {
             }),
             expect.any(AbortSignal),
         )
+        expect(vi.mocked(translateHTML).mock.calls[0][5]).not.toHaveProperty('liveProjection')
     })
 
-    test('passes a bounded live parser projection with absolute and projected indices', async () => {
-        parserMocks.ParseMarkdown.mockResolvedValue('<span>projected</span>')
+    function boundedLiveProjection() {
         const capture = minimalCaptureContext()
         capture.parserContext.historyOffset = 4
         capture.parserContext.character.chats[0].message = [
@@ -1433,13 +1479,17 @@ describe('ChatBody deferred inlay lifecycle', () => {
                 parserContext: capture.parserContext,
             },
         }
+        return parserProjection
+    }
 
+    test('passes a bounded live parser projection with absolute and projected indices', async () => {
+        parserMocks.ParseMarkdown.mockResolvedValue('<span>projected</span>')
         mounted = mount(ChatBodyInlayHarness, {
             target,
             props: {
                 idx: 6,
                 name: 'Projected Character',
-                parserProjection: parserProjection as any,
+                parserProjection: boundedLiveProjection() as any,
             },
         })
 
@@ -1457,6 +1507,25 @@ describe('ChatBody deferred inlay lifecycle', () => {
                 }),
             }),
         ])
+    })
+
+    test('translates a bounded live projection as a row of the live chat', async () => {
+        chatState.db = { autoTranslate: true, translatorType: 'mock', legacyTranslation: false }
+        parserMocks.ParseMarkdown.mockResolvedValue('<span>projected</span>')
+        const { translateHTML } = await import('src/ts/translator/translator')
+        vi.mocked(translateHTML).mockResolvedValue('<span>translated</span>')
+        mounted = mount(ChatBodyInlayHarness, {
+            target,
+            props: {
+                idx: 6,
+                name: 'Projected Character',
+                parserProjection: boundedLiveProjection() as any,
+                initialTranslated: true,
+            },
+        })
+
+        await vi.waitFor(() => expect(translateHTML).toHaveBeenCalled())
+        expect(vi.mocked(translateHTML).mock.calls[0][5]).toMatchObject({ liveProjection: true, projectedChatID: 2 })
     })
 
     test('does not report capture settled after a pending body is destroyed', async () => {

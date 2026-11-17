@@ -60,7 +60,7 @@ impl Store {
         let Some((id, device)) = job else {
             return Ok(false);
         };
-        match self.finish_upload(&Device { id: device }, &id) {
+        match self.finish_upload(&Device::resumed(device), &id) {
             Ok(_) => {
                 self.db()?
                     .execute("DELETE FROM upload_jobs WHERE upload=?1", [&id])?;

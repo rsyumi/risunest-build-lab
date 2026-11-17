@@ -13,6 +13,7 @@ import type { Attachment } from "svelte/attachments"
 import { mount, unmount, type Snippet } from "svelte"
 import PopupList from "src/lib/UI/PopupList.svelte"
 import { indexCharactersById } from "./characterIndex"
+import { imageAliases, ImageFormatError, requireImage, selectedImageFormat } from './media/imageFormats'
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 
 export interface Messagec extends Message{
@@ -48,24 +49,35 @@ export function checkNullish(data:any){
 }
 
 const domSelect = true
-export function selectSingleFile(ext:string[]){
-    return withLibraryFileSelection(() => readSingleFile(ext))
+export function selectSingleFile(ext:string[], options: { image?: boolean } = {}){
+    return withLibraryFileSelection(async () => {
+        try {
+            const file = await readSingleFile(ext, options)
+            if (file && options.image) requireImage(file.data)
+            return file
+        } catch (error) {
+            if (!options.image || !(error instanceof ImageFormatError)) throw error
+            const { alertError } = await import('./alert')
+            void alertError(error.message)
+            return null
+        }
+    })
 }
 
-async function readSingleFile(ext:string[]){
+async function readSingleFile(ext:string[], options: { image?: boolean }){
     if (isTauriMobile) {
         const { selectNativeFileData } = await import('./storage/nativeFileSelection')
-        return (await selectNativeFileData({ accept: fileAccept(ext) }))[0] ?? null
+        return (await selectNativeFileData({ accept: fileAccept(ext), image: options.image }))[0] ?? null
     }
     if(domSelect){
-        const v = await selectFileByDom(ext, 'single')
+        const v = await selectFileByDom(ext, 'single', options)
         const file = v[0]
         if (!file) return null
         return {name: file.name,data:await readFileAsUint8Array(file)}
     }
 
     const selected = await open({
-        filters: [{
+        filters: fileAccept(ext) === '*' ? undefined : [{
             name: ext.join(', '),
             extensions: ext
         }]
@@ -79,26 +91,53 @@ async function readSingleFile(ext:string[]){
     }
 }
 
-export function selectMultipleFile(ext:string[]){
-    return withLibraryFileSelection(() => readMultipleFiles(ext))
+export function selectMultipleFile(ext:string[], options: { image?: boolean; failures?: string[] } = {}){
+    return withLibraryFileSelection(async () => {
+        const errors = options.failures ?? []
+        const reportFrom = errors.length
+        const files = await readMultipleFiles(ext, options, errors)
+        if (!files) return files
+        return mapSelectedFiles(files, async file => {
+            if (options.image) requireImage(file.data)
+            else if (ext.some(alias => imageAliases.includes(alias))) selectedImageFormat(file.data, file.name)
+            return file
+        }, errors, reportFrom)
+    })
 }
 
-async function readMultipleFiles(ext:string[]){
+export async function mapSelectedFiles<T, F extends { name: string }>(files: F[], consume: (file: F) => Promise<T>, errors: string[] = [], reportFrom = errors.length): Promise<T[]> {
+    const results: T[] = []
+    for (const file of files) {
+        try { results.push(await consume(file)) }
+        catch (error) { errors.push(`${file.name}: ${error instanceof Error ? error.message : String(error)}`) }
+    }
+    if (errors.length > reportFrom) {
+        const { alertError } = await import('./alert')
+        void alertError(errors.slice(reportFrom).join('\n'))
+    }
+    return results
+}
+
+async function readMultipleFiles(ext:string[], options: { image?: boolean }, errors: string[]){
     if (isTauriMobile) {
         const { selectNativeFileData } = await import('./storage/nativeFileSelection')
-        return selectNativeFileData({ accept: fileAccept(ext), multiple: true })
+        const files = await selectNativeFileData({ accept: fileAccept(ext), multiple: true, image: options.image,
+            onRejected: (file, error) => errors.push(`${file.name}: ${error.message}`),
+        })
+        return files
     }
     if(!isTauri){
-        const v = await selectFileByDom(ext, 'multiple')
+        const v = await selectFileByDom(ext, 'multiple', options)
         let arr:{name:string, data:Uint8Array}[] = []
         for(const file of v){
-            arr.push({name: file.name,data:await readFileAsUint8Array(file)})
+            try { arr.push({name: file.name,data:await readFileAsUint8Array(file)}) }
+            catch (error) { errors.push(`${file.name}: ${error instanceof Error ? error.message : String(error)}`) }
         }
         return arr
     }
 
     const selected = await open({
-        filters: [{
+        filters: fileAccept(ext) === '*' ? undefined : [{
             name: ext.join(', '),
             extensions: ext,
         }],
@@ -107,7 +146,8 @@ async function readMultipleFiles(ext:string[]){
     if (Array.isArray(selected)) {
         let arr:{name:string, data:Uint8Array}[] = []
         for(const file of selected){
-            arr.push({name: await basename(file),data:await readFile(file)})
+            try { arr.push({name: await basename(file),data:await readFile(file)}) }
+            catch (error) { errors.push(`${file.split(/[\\/]/).at(-1)}: ${error instanceof Error ? error.message : String(error)}`) }
         }
         return arr
     } else if (selected === null) {
@@ -182,17 +222,18 @@ export function getUserIconProtrait(){
     }
 }
 
-function fileAccept(allowedExtensions: string[]): string {
+export function fileAccept(allowedExtensions: string[]): string {
     return getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*'
         ? '*' : allowedExtensions.map(ext => `.${ext}`).join(',')
 }
 
-export function selectFileByDom(allowedExtensions:string[], multiple:'multiple'|'single' = 'single') {
+export function selectFileByDom(allowedExtensions:string[], multiple:'multiple'|'single' = 'single', options: { image?: boolean } = {}) {
     const acceptAll = (getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*')
     return selectDomFiles({
         accept: acceptAll ? '*' : allowedExtensions.map(ext => `.${ext}`).join(','),
         multiple: multiple === 'multiple',
-    }).then(files => acceptAll ? files : files.filter(file =>
+        image: options.image,
+    }).then(files => acceptAll || options.image ? files : files.filter(file =>
         allowedExtensions.includes(file.name.split('.').pop().toLowerCase()),
     ))
 }

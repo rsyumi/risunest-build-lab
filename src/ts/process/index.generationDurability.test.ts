@@ -70,8 +70,7 @@ const harness = vi.hoisted(() => {
     }))
     const setChatToIndex = vi.fn(async (chat: any) => structuredClone(chat))
     const flushPendingData = vi.fn(async () => undefined)
-    const generationKeepAliveBegin = vi.fn(() => true)
-    const generationKeepAliveEnd = vi.fn()
+    const backgroundSettle = vi.fn()
 
     return {
         store,
@@ -102,8 +101,7 @@ const harness = vi.hoisted(() => {
         resolvePosition,
         setChatToIndex,
         flushPendingData,
-        generationKeepAliveBegin,
-        generationKeepAliveEnd,
+        backgroundSettle,
         isLastCharPunctuation: vi.fn(() => true),
     }
 })
@@ -172,7 +170,8 @@ vi.mock('../plugins/pluginDatabaseAccess', () => ({
 }))
 vi.mock('../plugins/pinnedConversationPosition', async () => (await import('./tests/sendChatTestHarness')).pinnedConversationPositionModule(harness.resolvePosition))
 vi.mock('./presetChain', async () => (await import('./tests/sendChatTestHarness')).presetChainModule())
-vi.mock('./generationState', () => ({
+vi.mock('./generationState', async importOriginal => ({
+    ...await importOriginal<typeof import('./generationState')>(),
     doingChat: harness.doingChat,
     reserveGeneration: () => {
         if (harness.generationReservation || harness.doingChat.value()) return null
@@ -181,6 +180,7 @@ vi.mock('./generationState', () => ({
         harness.doingChat.set(true)
         let released = false
         return {
+            background: { signal: new AbortController().signal, progress() {}, settle: harness.backgroundSettle, takeExpiry: () => false, async end() {} },
             isCurrent: () => !released && harness.generationReservation === token,
             release: (options?: { preserveBusy?: boolean }) => {
                 if (released) return
@@ -196,10 +196,6 @@ vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./
     acknowledgeGenerationCompletion: harness.acknowledge,
     drainDeferredLwwReceives: harness.drainDeferredReceives,
     flushPendingData: harness.flushPendingData,
-}))
-vi.mock('../androidGenerationKeepAlive', () => ({
-    beginAndroidGenerationKeepAlive: harness.generationKeepAliveBegin,
-    endAndroidGenerationKeepAlive: harness.generationKeepAliveEnd,
 }))
 
 import { sendChat } from './index.svelte'
@@ -352,7 +348,6 @@ beforeEach(() => {
     harness.stableDiff.mockResolvedValue(undefined)
     harness.embeddingAddText.mockResolvedValue(undefined)
     harness.embeddingSearch.mockResolvedValue([['happy', 1]])
-    harness.generationKeepAliveBegin.mockReturnValue(true)
     harness.notificationRequest.mockResolvedValue('granted')
     harness.projectChatOutput.mockImplementation(async (input: any) => ({
         char: structuredClone(input.liveCharacter),
@@ -800,7 +795,7 @@ describe('sendChat generation durability control flow', () => {
         expect(harness.notificationConstruct).not.toHaveBeenCalled()
     })
 
-    it('releases the generation keep-alive token after success, exception, and early return', async () => {
+    it('settles the generation background once with the outcome of success, exception, and early return', async () => {
         harness.requests.push(success('Kept alive'))
         await expect(sendChat()).resolves.toBe(true)
 
@@ -810,8 +805,6 @@ describe('sendChat generation durability control flow', () => {
         harness.doingChat.set(false)
         await expect(sendChat({ preview: true })).resolves.toBe(true)
 
-        expect(harness.generationKeepAliveBegin).toHaveBeenCalledTimes(3)
-        expect(harness.generationKeepAliveEnd).toHaveBeenCalledWith(true)
-        expect(harness.generationKeepAliveEnd).toHaveBeenCalledTimes(3)
+        expect(harness.backgroundSettle.mock.calls).toEqual([[true], [false], [false]])
     })
 })

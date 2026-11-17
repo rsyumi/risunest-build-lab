@@ -18,8 +18,13 @@ function damagedRecordInstruction(ko: boolean, folder: string | undefined): stri
 /** The app stylesheet resets buttons to bare text, so the buttons carry the panel buttons' look. */
 const STARTUP_BUTTON_CLASS = 'rounded-md border border-darkborderc bg-darkbutton px-4 py-2 text-textcolor hover:bg-selected disabled:cursor-not-allowed disabled:opacity-50'
 
+export interface AppCleanupEntryDependencies {
+    /** Runs once the reset page covers the window, which never shows library content. */
+    onPanelShown?: () => void
+}
+
 /** This entry must remain independent of application storage and plugins. */
-export async function appCleanupBeforeBootstrap(): Promise<void> {
+export async function appCleanupBeforeBootstrap(dependencies: AppCleanupEntryDependencies = {}): Promise<void> {
     if (!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return
     let status: AppCleanupStatus | undefined
     try {
@@ -68,6 +73,8 @@ export async function appCleanupBeforeBootstrap(): Promise<void> {
             ? ko ? '시스템 자격 증명 저장소를 열 수 없습니다. Linux에서는 키링을 실행하고 잠금을 해제한 후 다시 시도해주세요.' : 'The system credential store is unavailable. On Linux, start and unlock the keyring, then retry.'
             : code === 'secret-index-unavailable' || code === 'cleanup-journal-unavailable' || code === 'cleanup-files-busy-or-denied'
             ? ko ? '삭제할 파일에 접근할 수 없습니다. 파일 권한과 저장 공간을 확인한 후 다시 시도해주세요.' : 'The files could not be accessed. Check file permissions and free space, then retry.'
+            : code === 'cleanup-data-root-in-use'
+            ? ko ? '같은 데이터 폴더를 사용하는 다른 프로필이 실행 중이어서 데이터 삭제를 완료하지 못했습니다. 다시 시도해주세요.' : 'Another profile that uses the same data folder was running, so local data deletion could not finish. Please retry.'
             : code === 'cleanup-path-redirected' || code === 'cleanup-path-overlap' || code === 'cleanup-root-overlaps-install'
             ? ko ? '현재 저장 경로에서는 로컬 데이터를 삭제할 수 없습니다.' : 'Local data cannot be deleted from the current storage location.'
             : ko ? '데이터 삭제를 완료하지 못했습니다. 다시 시도해주세요.' : 'Local data deletion could not finish. Please retry.'
@@ -105,6 +112,7 @@ export async function appCleanupBeforeBootstrap(): Promise<void> {
     host.append(panel)
     document.getElementById('preloading')?.remove()
     document.body.append(host)
+    dependencies.onPanelShown?.()
     if (status?.pending && status.error !== null) showFailure(status.error)
     else await retry()
     await new Promise<never>(() => {})

@@ -391,7 +391,15 @@ fn prepare_section_source_rows(
         if hex::encode(digest) != file.content_sha256 {
             return Err(corrupt("section entry hash differs"));
         }
-        let entry = SectionEntry::decode(&bytes).map_err(corrupt)?;
+        let entry = match SectionEntry::decode_known(&bytes).map_err(corrupt)? {
+            Ok(entry) => entry,
+            // A value form from a later build is skipped; its objects stay unused.
+            Err(unknown) if unknown.key == file.key => {
+                spool.skip_backup_entry(&unknown, &digest).map_err(preparation_error)?;
+                continue;
+            }
+            Err(_) => return Err(corrupt("section entry names another section or key")),
+        };
         if entry.kind != source.kind || entry.key != file.key {
             return Err(corrupt("section entry names another section or key"));
         }
@@ -771,12 +779,20 @@ mod tests {
         let large_json = format!("{{\n  \"zeta\": \"{}\",\n  \"alpha\": [1, 2.50, 1e2]\n}}", "y".repeat(70_000));
         let edge_string = "e".repeat(risunest_external_storage_format::section::MAX_INLINE_VALUE_BYTES);
         let large_setting = serde_json::json!({ "history": "h".repeat(70_000) });
+        let part = vec![0u8, 255, 128];
+        let part_hash = risunest_sync_wire::hash(&part);
+        let structured = format!(
+            "#risunest-structured:1\n{{\"parts\":[\"p:{part_hash}\"],\"bytes\":3,\"nodes\":[{{\"type\":\"ArrayBuffer\",\"offset\":0,\"byteLength\":3}}],\"root\":{{\"ref\":0}},\"pad\":\"{}\"}}",
+            "p".repeat(5_000));
         {
             let device = source.device_store_mut().expect("open source device store");
+            crate::persistent_store::device_store::plugin_values::structure::put_part(device.connection(), &part)
+                .expect("store structure part");
             device.write_plugin_device_values(&owner, &[
                 PluginDeviceMutation::Set { space: "string".into(), key: quoted_key.clone(), value: large_string.clone() },
                 PluginDeviceMutation::Set { space: "json".into(), key: "history".into(), value: large_json.clone() },
                 PluginDeviceMutation::Set { space: "string".into(), key: "edge".into(), value: edge_string.clone() },
+                PluginDeviceMutation::Set { space: "json".into(), key: "structured".into(), value: structured.clone() },
             ]).expect("write large plugin values");
             assert!(device.write_plugin_device_values(&owner, &[PluginDeviceMutation::Set {
                 space: "string".into(), key: "k".repeat(513), value: "small".into(),
@@ -799,7 +815,7 @@ mod tests {
             .filter(|source| source.kind == wire::CatalogEntryKind::SectionObject)
             .map(|source| source.byte_length).collect::<BTreeSet<_>>();
         assert_eq!(objects(SectionKind::LocalPlugins),
-            BTreeSet::from([large_string.len() as u64, large_json.len() as u64]));
+            BTreeSet::from([large_string.len() as u64, large_json.len() as u64, structured.len() as u64, part.len() as u64]));
         assert_eq!(objects(SectionKind::LocalSettings), BTreeSet::from([stored_setting.len() as u64]));
         assert!(objects(SectionKind::Hypa).is_empty());
 
@@ -821,9 +837,12 @@ mod tests {
             ("string", quoted_key.as_str(), &large_string),
             ("json", "history", &large_json),
             ("string", "edge", &edge_string),
+            ("json", "structured", &structured),
         ] {
             assert_eq!(device.read_plugin_device_value(&owner, space, key).unwrap().as_ref(), Some(expected));
         }
+        assert_eq!(device.connection().query_row::<Vec<u8>, _, _>(
+            "SELECT body FROM message_page_objects WHERE hash=?1", [&part_hash], |row| row.get(0)).unwrap(), part);
         let restored_setting: String = device.connection().query_row(
             "SELECT value FROM device_settings WHERE key='risuNestDeviceSettings'", [], |row| row.get(0),
         ).unwrap();
@@ -917,6 +936,41 @@ mod tests {
         let mut corrupt = sources.clone();
         corrupt[1].content_fingerprint[0] ^= 1;
         assert!(prepare_received_backup_sections(&corrupt, spool.path(), &Cancellation::default()).is_err());
+    }
+
+    #[test]
+    fn a_plugin_value_form_from_a_later_build_is_skipped_and_still_fingerprinted() {
+        let spool = tempfile::tempdir().expect("create spool");
+        let mut plugin = capture_section(
+            SectionKind::LocalPlugins,
+            &[plugin_row("token", "kept", 0, "")],
+            false,
+            Sequence::from(0u64),
+            Sequence::from(0u64),
+            Sequence::from(0u64),
+            &spool.path().join("plugins"),
+            &Cancellation::default(),
+        )
+        .expect("capture backup plugin section");
+        let known = plugin.content_fingerprint;
+        let key = risunest_external_storage_format::section::local_plugin_entry_key("plugin-a", "json", "later").unwrap();
+        let later = serde_json::to_vec(&serde_json::json!({
+            "codec": risunest_external_storage_format::section::SECTION_CODEC, "kind": "local-plugins", "key": key,
+            "value": { "localPlugin": { "space": "json", "later": [1] } }, "version": null,
+        })).unwrap();
+        let path = spool.path().join("later-entry");
+        fs::write(&path, &later).unwrap();
+        plugin.sources.push(SectionSource {
+            kind: wire::CatalogEntryKind::SectionEntry, key, content_sha256: hex::encode(hash(&later)),
+            byte_length: later.len() as u64, path, offset: Some(0),
+        });
+        plugin.sources.sort_by(|a, b| (a.kind as u8, &a.key).cmp(&(b.kind as u8, &b.key)));
+        plugin.content_fingerprint = captured_section_fingerprint(SectionKind::LocalPlugins, &plugin.sources).unwrap();
+        let prepared = prepare_received_backup_sections(std::slice::from_ref(&plugin), spool.path(), &Cancellation::default())
+            .expect("prepare a section with a later value form");
+        assert_eq!((prepared[0].len(), prepared[0].skipped()), (1, 1));
+        plugin.content_fingerprint = known;
+        assert!(prepare_received_backup_sections(&[plugin], spool.path(), &Cancellation::default()).is_err());
     }
 
     #[test]

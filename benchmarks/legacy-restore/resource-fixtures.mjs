@@ -17,8 +17,9 @@ try {
 
 const [axis, sizeText, destination] = process.argv.slice(2);
 const size = Number(sizeText);
-assert.ok(['encrypted-database', 'attachment', 'record', 'assets'].includes(axis));
-assert.ok((axis === 'record' ? [1, 8, 32] : axis === 'assets' ? [64, 256] : [100, 300, 600]).includes(size));
+assert.ok(['encrypted-database', 'attachment', 'record', 'assets', 'messages'].includes(axis));
+assert.ok((axis === 'record' ? [1, 8, 32] : axis === 'assets' ? [64, 256] : axis === 'messages' ? [100_000]
+  : [100, 300, 600]).includes(size));
 assert.ok(destination, 'Pass a new synthetic fixture directory');
 const directory = path.resolve(destination);
 await mkdir(directory);
@@ -36,13 +37,36 @@ const remember = character => {
 };
 const file = await open(database, 'wx');
 try {
-  await file.writeFile(header);
+  if (axis !== 'messages') await file.writeFile(header);
   if (axis === 'record') {
     const character = { type: 'character', chaId: 'synthetic-000000', name: 'Synthetic record', chats: [
       { id: 'chat-000000', name: 'Synthetic chat', message: [{ role: 'user', chatId: 'synthetic-message', data: 'r'.repeat(size * 1024 * 1024) }] },
     ] };
     remember(character);
     await file.writeFile(pack.encode({ username: 'Synthetic memory fixture', characters: [character], botPresets: [] }));
+  } else if (axis === 'messages') {
+    // Block RisuSave streams character blocks, so each message passes through the native message spool.
+    // One chat of 1,000 short messages per character keeps per-message costs dominant.
+    const block = (type, name, value) => {
+      const payload = Buffer.from(JSON.stringify(value));
+      const prefix = Buffer.alloc(7 + name.length);
+      prefix.writeUInt8(type);
+      prefix.writeUInt8(name.length, 2);
+      prefix.write(name, 3, 'latin1');
+      prefix.writeUInt32LE(payload.length, 3 + name.length);
+      return Buffer.concat([prefix, payload]);
+    };
+    const ids = Array.from({ length: size / 1000 }, (_, index) => `synthetic-${String(index).padStart(6, '0')}`);
+    await file.writeFile(Buffer.from('RISUSAVE\0', 'latin1'));
+    await file.writeFile(block(1, 'root', { username: 'Synthetic memory fixture', __directory: ids }));
+    for (const [index, chaId] of ids.entries()) {
+      const message = Array.from({ length: 1000 }, (_, slot) => ({ role: slot % 2 === 0 ? 'user' : 'char',
+        chatId: `synthetic-message-${index}-${String(slot).padStart(4, '0')}`,
+        data: `synthetic message ${index} ${slot} `.repeat(32).slice(0, 512) }));
+      const character = { type: 'character', chaId, name: `Synthetic ${index}`, chats: [{ id: `chat-${index}`, name: 'Synthetic chat', message }] };
+      remember(character);
+      await file.writeFile(block(2, chaId, character));
+    }
   } else {
     const plan = fixture.planFixture(axis === 'encrypted-database' ? size * 1_000_000 : 2_500_000);
     for (const packet of fixture.fixturePackets(plan)) await file.writeFile(packet);

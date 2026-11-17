@@ -111,7 +111,7 @@ function harness(options: {
                 async readConversationWindow({ characterId, conversationId, startIndex, limit }) {
                     const selected = messages.slice(startIndex, startIndex + limit)
                     return {
-                        revision: 4,
+                        revision: target.storeRevision,
                         value: {
                             characterId,
                             conversationId,
@@ -131,7 +131,7 @@ function harness(options: {
                     kind: 'windowed',
                     characterId: CHARACTER_ID,
                     conversationId: CONVERSATION_ID,
-                    storeRevision: 4,
+                    storeRevision: target.storeRevision,
                     totalMessages: messages.length,
                     sessionToken: 'session',
                     persistedSessionVersion: 0,
@@ -176,6 +176,7 @@ function harness(options: {
         maxProjectionMessages: options.maxProjectionMessages ?? 6,
     }
     return {
+        target,
         resolver: createSelectedConversationLiveParserProjectionResolver(dependencies),
         dependencies,
         messages,
@@ -295,6 +296,78 @@ describe('selected conversation live parser projection', () => {
         expect(testHarness.pinReleases).toHaveBeenCalledTimes(2)
     })
 
+    test.each([true, false])('renews a retained projection on its next pass after a silent revision advance (resident %s)', async (resident) => {
+        const h = await cachedHarness({}, 7, 1)
+        const onStale = vi.fn()
+        const selectedRow = resident ? h.source.snapshot().rowAt(7)! : row(7, h.messages[7])
+        const retained = await h.resolver.resolve({ row: selectedRow, totalMessages: 8, onStale })
+        if (retained.kind !== 'bounded') throw new Error('Expected bounded projection')
+        const changed = vi.fn()
+        const unsubscribe = h.source.subscribe(changed)
+        changed.mockClear()
+        h.target.storeRevision = 5
+        h.source.advanceUnchangedRevision(5)
+        expect(changed).not.toHaveBeenCalled()
+        expect(onStale).not.toHaveBeenCalled()
+        await expect(retained.context.parserContext.prepareHistory!('{{previouschatlog::0}}', 7, false)).rejects.toThrow()
+        expect(onStale).toHaveBeenCalledOnce()
+        const fresh = await h.resolver.resolve({ row: selectedRow, totalMessages: 8 })
+        if (fresh.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect((await fresh.context.parserContext.prepareHistory!('{{previouschatlog::0}}', 7, false)).row(0)?.data).toBe('message-0')
+        unsubscribe()
+        h.source.dispose()
+    })
+
+    test('notifies a revision advance during an in-flight row resolve before rejecting it', async () => {
+        const h = await cachedHarness({}, 7, 1)
+        h.dependencies.parserSource = () => '{{previouschatlog::0}}'
+        h.reads.mockImplementationOnce(async (query) => {
+            const result = await h.readWindow(query)
+            h.target.storeRevision = 5
+            h.source.advanceUnchangedRevision(5)
+            return result
+        })
+        const controller = new AbortController()
+        const onStale = vi.fn(() => controller.abort())
+        await expect(h.resolver.resolve({ row: h.source.snapshot().rowAt(7)!, totalMessages: 8,
+            signal: controller.signal, onStale })).rejects.toThrow()
+        expect(onStale).toHaveBeenCalledOnce()
+        expect(controller.signal.aborted).toBe(true)
+        expect(await h.resolver.resolve({ row: h.source.snapshot().rowAt(7)!, totalMessages: 8 })).toMatchObject({ revision: 5 })
+        h.source.dispose()
+    })
+
+    test('notifies a revision advance during initial greeting preparation before rejecting it', async () => {
+        const h = await cachedHarness({}, 7, 1)
+        h.reads.mockImplementationOnce(async (query) => {
+            const result = await h.readWindow(query)
+            h.target.storeRevision = 5
+            h.source.advanceUnchangedRevision(5)
+            return result
+        })
+        const controller = new AbortController()
+        const onStale = vi.fn(() => controller.abort())
+        await expect(h.resolver.acquireConversationStart!({ greeting: '{{previouschatlog::0}}', totalMessages: 8,
+            signal: controller.signal, onStale })).rejects.toThrow()
+        expect(onStale).toHaveBeenCalledOnce()
+        expect(controller.signal.aborted).toBe(true)
+        const lease = await h.resolver.acquireConversationStart!({ greeting: '{{previouschatlog::0}}', totalMessages: 8 })
+        expect(lease!.projection!.context.parserContext.historyAccess!.row(0)?.data).toBe('message-0')
+        lease?.release()
+        h.source.dispose()
+    })
+
+    test.each([false, true])('prepares greeting gaps with an optimistic total (later pass %s)', async (later) => {
+        const h = await cachedHarness({}, 7, 1)
+        h.source.applyOptimisticRange(8, 0, [message(8, 'pending tail')])
+        const lease = await h.resolver.acquireConversationStart!({ greeting: later ? 'plain' : '{{previouschatlog::0}}', totalMessages: 9 })
+        const parser = lease!.projection!.context.parserContext
+        const access = later ? await parser.prepareHistory!('{{previouschatlog::0}}', -1, false) : parser.historyAccess!
+        expect(access.row(0)?.data).toBe('message-0')
+        lease?.release()
+        h.source.dispose()
+    })
+
     test('fences an in-flight gap read after an unchanged revision advance and renews at the new revision', async () => {
         const testHarness = await cachedHarness({}, 7, 1)
         testHarness.dependencies.parserSource = () => '{{previouschatlog::0}}'
@@ -372,8 +445,16 @@ describe('selected conversation live parser projection', () => {
             expect(testHarness.releases()).toBe(1)
         },
     )
-    test('keeps a plain greeting windowed and prepares it again when a later pass reads a skipped edit', async () => {
+    test.each(['history', 'revision'] as const)('keeps a plain greeting windowed and prepares it again when a later pass meets a skipped %s change', async (change) => {
         const testHarness = await cachedHarness({ metadataOnly: true })
+        const runtime = testHarness.dependencies.runtime
+        const captureTarget = runtime.captureSelectedConversationTarget
+        const captureAuthority = runtime.captureSelectedConversationAuthority
+        const snapshot = testHarness.source.snapshot.bind(testHarness.source)
+        let revision = 4
+        runtime.captureSelectedConversationTarget = () => ({ ...captureTarget()!, storeRevision: revision })
+        runtime.captureSelectedConversationAuthority = () => ({ ...captureAuthority()!, storeRevision: revision })
+        vi.spyOn(testHarness.source, 'snapshot').mockImplementation(() => ({ ...snapshot(), storeRevision: revision }))
         const controller = new AbortController()
         const onStale = vi.fn()
         const lease = await testHarness.resolver.acquireConversationStart!({
@@ -386,7 +467,8 @@ describe('selected conversation live parser projection', () => {
         expect(testHarness.acquire).not.toHaveBeenCalled()
         expect(testHarness.forbiddenHistoryReads()).toBe(0)
         // The greeting read no row, so refreshes skip this edit until a later pass reads it.
-        testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        if (change === 'history') testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        else revision = 5
         const prepareHistory = lease!.projection!.context.parserContext.prepareHistory!
         await expect(prepareHistory('{{lastmessage}}', -1, false)).rejects.toThrow('Chat parser history projection became stale')
         expect(onStale).toHaveBeenCalledOnce()
@@ -400,12 +482,23 @@ describe('selected conversation live parser projection', () => {
         expect(onStale).toHaveBeenCalledTimes(2)
     })
 
-    test('asks a row to prepare again only when its later pass fails on changed history', async () => {
+    test.each(['history', 'revision', 'unpinned revision'] as const)('asks a row to prepare again only when its later pass fails on a changed %s', async (change) => {
         const testHarness = await cachedHarness()
+        const runtime = testHarness.dependencies.runtime
+        const captureTarget = runtime.captureSelectedConversationTarget
+        const captureAuthority = runtime.captureSelectedConversationAuthority
+        const snapshot = testHarness.source.snapshot.bind(testHarness.source)
+        let revision = 4
+        runtime.captureSelectedConversationTarget = () => ({ ...captureTarget()!, storeRevision: revision })
+        runtime.captureSelectedConversationAuthority = () => ({ ...captureAuthority()!, storeRevision: revision })
+        vi.spyOn(testHarness.source, 'snapshot').mockImplementation(() => ({ ...snapshot(), storeRevision: revision }))
         const controller = new AbortController()
         const onStale = vi.fn()
+        const row = testHarness.source.snapshot().rowAt(5)!
+        // Without a viewport source the row reads its history from storage and keeps no resident rows.
+        if (change === 'unpinned revision') runtime.getActiveConversationViewportSource = () => null
         const result = await testHarness.resolver.resolve({
-            row: testHarness.source.snapshot().rowAt(5)!,
+            row,
             totalMessages: 8,
             signal: controller.signal,
             onStale,
@@ -416,7 +509,9 @@ describe('selected conversation live parser projection', () => {
         testHarness.reads.mockRejectedValueOnce(new Error('Synthetic read failure'))
         await expect(prepareHistory('{{previouschatlog::0}}', 5, false)).rejects.toThrow('Synthetic read failure')
         expect(onStale).not.toHaveBeenCalled()
-        testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        if (change === 'history') testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        // A storage-only commit, such as a character edit while a response streams, changes no row.
+        else revision = 5
         await expect(prepareHistory('{{lastmessage}}', 5, false)).rejects.toThrow('Chat parser history projection became stale')
         expect(onStale).toHaveBeenCalledOnce()
         controller.abort()
@@ -475,7 +570,7 @@ describe('selected conversation live parser projection', () => {
         expect(testHarness.releases()).toBe(1)
     })
 
-    test.each(['{{history}}', '{{previouschatlog::0}}', '{{previouscharchat}}'])(
+    test.each(['{{history}}', '{{previouschatlog::0}}', '{{previouscharchat}}', '{#history}}', '{#previouscharchat}}', '{#lastmessage}}'])(
         'prepares greeting history expressions without reading the metadata-only shell: %s',
         async (greeting) => {
             const testHarness = harness({ metadataOnly: true })
@@ -483,12 +578,13 @@ describe('selected conversation live parser projection', () => {
                 greeting,
                 totalMessages: 8,
             })
-            expect(testHarness.acquire).toHaveBeenCalledTimes(greeting === '{{history}}' ? 1 : 0)
+            expect(testHarness.acquire).toHaveBeenCalledTimes(greeting.includes('history') ? 1 : 0)
             if (greeting === '{{previouschatlog::0}}') expect(lease?.projection?.context.parserContext.historyAccess?.row(0)?.data).toBe('message-0')
-            if (greeting === '{{previouscharchat}}') expect(lease?.projection?.context.parserContext.historyAccess?.previous('char', 8, 1)[0]?.data).toBe('message-6')
+            if (greeting.includes('previouscharchat')) expect(lease?.projection?.context.parserContext.historyAccess?.previous('char', 8, 1)[0]?.data).toBe('message-6')
+            if (greeting.includes('lastmessage')) expect(lease?.projection?.context.parserContext.historyAccess?.row(7)?.data).toBe('message-7')
             expect(testHarness.forbiddenHistoryReads()).toBe(0)
             lease!.release()
-            expect(testHarness.releases()).toBe(greeting === '{{history}}' ? 1 : 0)
+            expect(testHarness.releases()).toBe(greeting.includes('history') ? 1 : 0)
         },
     )
 

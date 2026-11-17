@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onDestroy, tick } from 'svelte'
+    import { onDestroy, tick, untrack } from 'svelte'
     import { ParseMarkdown } from 'src/ts/parser/parser.svelte'
     import { language } from 'src/lang'
     import {
@@ -13,6 +13,8 @@
 
     interface Props {
         data: string
+        /** The parent element holding only this markdown, which renders as its direct children. */
+        root: HTMLElement | null | undefined
         character?: MarkdownCharacter
         mode?: MarkdownMode
         chatID?: number
@@ -20,10 +22,13 @@
         signal?: AbortSignal
         preservePendingContent?: boolean
         scriptContext?: Parameters<typeof ParseMarkdown>[5]['scriptContext']
+        /** A parse started after this changes rebuilds identical markup instead of keeping its DOM. */
+        rebuildRevision?: number
     }
 
     let {
         data,
+        root,
         character = null,
         mode = 'normal',
         chatID = -1,
@@ -31,8 +36,8 @@
         signal,
         preservePendingContent = false,
         scriptContext,
+        rebuildRevision = 0,
     }: Props = $props()
-    let root = $state<HTMLElement>()
     let displayedHtml = $state('')
     let displayEpoch = $state(0)
     let failed = $state(false)
@@ -54,6 +59,7 @@
             release: () => {},
             disposed: false,
             settled: false,
+            rebuildRevision: untrack(() => rebuildRevision),
             promise: ParseMarkdown(data, character, mode, chatID, conditions, {
                 deferredInlays: registry,
                 signal: controller.signal,
@@ -85,7 +91,8 @@
             return
         }
         const previous = displayedJob
-        const retainMarkup = html === displayedHtml && previous?.settled
+        const retainMarkup =
+            html === displayedHtml && previous?.settled && job.rebuildRevision === previous.rebuildRevision
         if (retainMarkup) {
             job.release = previous.release
             previous.release = () => {}
@@ -139,11 +146,9 @@
 
 </script>
 
-<span style="display:contents" bind:this={root}>
-    {#key displayEpoch}
-        {@html displayedHtml}
-    {/key}
-    {#if failed}
-        <span class="text-textcolor2 italic" role="alert">{language.contentRenderFailed}</span>
-    {/if}
-</span>
+{#key displayEpoch}
+    {@html displayedHtml}
+{/key}
+{#if failed}
+    <span class="text-textcolor2 italic" role="alert">{language.contentRenderFailed}</span>
+{/if}

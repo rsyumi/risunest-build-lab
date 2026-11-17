@@ -9,12 +9,14 @@
 
     import Suggestion from './Suggestion.svelte';
     import { createLiveChatParserIndirections, createLiveChatParserSource } from 'src/ts/liveDisplayParserLease';
-    import { CameraIcon, ChevronDownIcon, ChevronUpIcon, ChevronsDownIcon, ChevronsUpIcon, DatabaseIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon } from "@lucide/svelte";
-    import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore } from "../../ts/stores.svelte";
+    import { CameraIcon, ChevronDownIcon, ChevronUpIcon, ChevronsDownIcon, ChevronsUpIcon, DatabaseIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon, CompassIcon, ChevronRightIcon } from "@lucide/svelte";
+    import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore, onboardingModalStore, moduleScopeMenuOpen } from "../../ts/stores.svelte";
     import { onDestroy } from 'svelte';
     import { ChatComposerState, chatScreenState, type SubmittedChatComposer } from '../../ts/ui/chatScreenState.svelte';
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
     import { getDeviceSettings } from 'src/ts/storage/deviceSettings';
+    import { forgetDisplayRecovery, isDisplayRecoveryMarked, type DisplayRecoveryTarget } from 'src/ts/displayRecovery.svelte';
+    import { requestScriptDisplayRefresh } from 'src/ts/process/scriptDisplayRefresh';
     import { shouldSendMessage } from 'src/ts/ui/messageSendKey';
     import { type Chat as ChatRecord, type Database, type character, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
@@ -43,6 +45,7 @@
     import Chats from './Chats.svelte';
     import Button from '../UI/GUI/Button.svelte';
     import PluginDefinedIcon from '../Others/PluginDefinedIcon.svelte';
+    import { getActiveOnboarding, isOnboardingPending } from 'src/ts/onboarding';
     import { getActiveConversationSession, getPersistentDataRuntime } from '../../ts/storage/persistentDataRuntime.svelte';
     import type { ActiveConversationSession } from '../../ts/storage/activeConversationSession';
     import {
@@ -112,7 +115,6 @@
     const loadPlaygroundMenu = () => import('../Playground/PlaygroundMenu.svelte').then(m => m.default);
     
     interface Props {
-        openModuleList?: boolean;
         openChatList?: boolean;
         customStyle?: string;
     }
@@ -128,7 +130,7 @@
     let showNewMessageButton = $state(false)
     let chatsInstance: ChatViewportHandle | undefined = $state()
     let isScrollingToMessage = $state(false)
-    let { openModuleList = $bindable(false), openChatList = $bindable(false), customStyle = '' }: Props = $props();
+    let { openChatList = $bindable(false), customStyle = '' }: Props = $props();
     const persistentRuntime = getPersistentDataRuntime()
     const selectedConversationOperations = createSelectedConversationOperations({
         captureSelectedConversationTarget: () =>
@@ -159,6 +161,12 @@
             : null
     })
     const composer = $derived(composerOwner ? chatScreenState.getComposer(composerOwner) : emptyComposer)
+    const displayRecoveryChat = $derived(isDisplayRecoveryMarked(composerOwner) ? composerOwner : null)
+    function turnDisplayBackOn(target: DisplayRecoveryTarget) {
+        void forgetDisplayRecovery((chat) =>
+            chat.characterId === target.characterId && chat.conversationId === target.conversationId)
+        requestScriptDisplayRefresh({ all: true })
+    }
     function captureComposerInput(): SubmittedChatComposer {
         return composerOwner
             ? chatScreenState.captureComposer(composerOwner)
@@ -990,6 +998,8 @@
             }
         } catch (error) {
             if (!chatScreenState.matchesComposer(snapshot)) return
+            if (reverse) snapshot.composer.text = input
+            else snapshot.composer.translation = input
             if (!inputTranslationFailed) alertError(error)
             inputTranslationFailed = true
         }
@@ -1091,7 +1101,7 @@
         source: character,
         chat: ChatRecord,
     ) {
-        const character = snapshotChatScreenshotCharacter(source, chat)
+        const character = snapshotChatScreenshotCharacter(source, chat, DBState.db.authorNotePresets)
         const database = {
             characters: [character],
             mainPrompt: DBState.db.mainPrompt,
@@ -1467,10 +1477,23 @@
             {/await}
         {/if}
     {:else}
+        {#if displayRecoveryChat}
+            <div class="pointer-events-none absolute inset-x-0 top-2 z-40 flex justify-center px-4" data-display-recovery>
+                <div class="pointer-events-auto flex max-w-full items-center gap-3 rounded-lg border border-borderc bg-bgcolor px-3 py-2 text-sm shadow-lg" role="status">
+                    <span class="min-w-0">{language.risuNest.displayRecovery.notice}</span>
+                    <button
+                        class="shrink-0 rounded-lg border border-borderc px-3 py-1 hover:bg-darkbg"
+                        onclick={() => turnDisplayBackOn(displayRecoveryChat)}
+                    >
+                        {language.risuNest.displayRecovery.turnBackOn}
+                    </button>
+                </div>
+            </div>
+        {/if}
         <div
             class="absolute right-3 z-40 flex flex-col divide-y divide-darkborderc/60 overflow-hidden rounded-lg border border-darkborderc/60 bg-bgcolor/80 shadow-lg backdrop-blur-sm transition-[opacity,visibility] duration-300"
-            class:opacity-0={!scrollNavVisible || openMenu}
-            class:invisible={!scrollNavVisible || openMenu}
+            class:opacity-0={DBState.db.risunestScrollNavigation === false || !scrollNavVisible || openMenu}
+            class:invisible={DBState.db.risunestScrollNavigation === false || !scrollNavVisible || openMenu}
             style:bottom="{scrollNavBottom}px"
             data-chat-scroll-nav
             onpointerenter={() => {
@@ -1722,6 +1745,22 @@
                 </div>
             {/if}
 
+            {#if isOnboardingPending(currentCharacter, currentCharacter?.chats[currentCharacter.chatPage])}
+                <div class="mx-4 my-2 flex justify-center">
+                    <button
+                        class="w-full max-w-xl flex items-center gap-3 px-4 py-3 rounded-md border border-darkborderc bg-darkbg text-left text-textcolor hover:bg-selected transition-colors"
+                        onclick={() => { onboardingModalStore.open = true }}
+                    >
+                        <CompassIcon size={20} class="shrink-0 text-textcolor2" />
+                        <span class="flex flex-col min-w-0 flex-1">
+                            <span class="text-sm font-semibold">{language.onboardingAvailable}</span>
+                            <span class="text-xs text-textcolor2">{language.onboardingAvailableDesc}</span>
+                        </span>
+                        <ChevronRightIcon size={18} class="shrink-0 text-textcolor2" />
+                    </button>
+                </div>
+            {/if}
+
             {#if chatFoldedStateMessageIndex.index !== -1}
                 <button class="w-full flex justify-center max-w-full p-4">
                     <Button className="max-w-xl w-full" onclick={() => {
@@ -1887,13 +1926,22 @@
 
 
                     <div class="flex items-center cursor-pointer hover:text-green-500 transition-colors" onclick={() => {
-                        DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].modules ??= []
-                        openModuleList = true
+                        moduleScopeMenuOpen.set(true)
                         openMenu = false
                     }}>
                         <PackageIcon />
                         <span class="ml-2">{language.modules}</span>
                     </div>
+
+                    {#if getActiveOnboarding(currentCharacter)}
+                        <div class="flex items-center cursor-pointer hover:text-green-500 transition-colors" onclick={() => {
+                            onboardingModalStore.open = true
+                            openMenu = false
+                        }}>
+                            <CompassIcon />
+                            <span class="ml-2">{language.onboarding}</span>
+                        </div>
+                    {/if}
 
                     {#if DBState.db.sideMenuRerollButton}
                         <div class="flex items-center cursor-pointer hover:text-green-500 transition-colors" onclick={reroll}>
@@ -1909,8 +1957,15 @@
     {/if}
 </div>
 
-{#if additionalFloatingActionButtons.length > 0}
+{#if additionalFloatingActionButtons.length > 0 || getActiveOnboarding(currentCharacter)?.floatingButton}
     <div class="fixed top-4 right-4 flex flex-col gap-3 z-50">
+        {#if getActiveOnboarding(currentCharacter)?.floatingButton}
+            <button class="bg-blue-500 text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2 hover:bg-blue-600 transition-colors" title={language.onboarding} aria-label={language.onboarding} onclick={() => {
+                onboardingModalStore.open = true
+            }}>
+                <CompassIcon size={20} />
+            </button>
+        {/if}
         {#each additionalFloatingActionButtons as button}
             <button class="bg-blue-500 text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2 hover:bg-blue-600 transition-colors" onclick={() => {
                 button.callback()

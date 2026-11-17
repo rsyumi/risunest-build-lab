@@ -96,3 +96,46 @@ test('history CBS callbacks resolve the captured character instead of global sel
 
     expect(result).toBe('captured-character-value')
 })
+
+test('history CBS callbacks read the selected owner without visiting the rest of the library', () => {
+    const callbacks = new Map<string, RegisterCallback>()
+    const visited: number[] = []
+    const library = ['first', 'second', 'selected'].map((name) => ({
+        chaId: `character-${name}`,
+        chatPage: 0,
+        chats: [{
+            fmIndex: -1,
+            message: [{ role: 'char', data: `${name}-value` }],
+        }],
+        firstMessage: `${name}-first`,
+    }))
+    const operationDatabase = {
+        characters: new Proxy(library, {
+            get(target, property, receiver) {
+                if (typeof property === 'string' && /^\d+$/.test(property)) visited.push(Number(property))
+                return Reflect.get(target, property, receiver)
+            },
+        }),
+    } as unknown as Database
+    registerCBS({
+        ...defaultCBSRegisterArg,
+        getDatabase: () => operationDatabase,
+        getSelectedCharID: () => 2,
+        registerFunction: ({ name, callback, alias }) => {
+            if (callback === 'doc_only') return
+            for (const key of [name, ...alias]) callbacks.set(key, callback)
+        },
+    })
+
+    const result = callbacks.get('previouscharchat')!('', {
+        chatID: -1,
+        db: operationDatabase,
+        chara: library[2],
+        selectedCharacterId: 'character-selected',
+        rmVar: false,
+        cbsConditions: {},
+    } as matcherArg, [], null)
+
+    expect(result).toBe('selected-value')
+    expect(new Set(visited)).toEqual(new Set([2]))
+})

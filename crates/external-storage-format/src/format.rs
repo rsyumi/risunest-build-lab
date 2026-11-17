@@ -25,6 +25,11 @@ pub struct Descriptor {
     pub repository_id: String,
     pub encrypted: bool,
     pub publication_strategy: Option<Strategy>,
+    /// The library format level of a repository used for sync. Absent means
+    /// level 1, and such a descriptor encodes exactly as before levels existed,
+    /// while builds that predate levels cannot decode one that carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_level: Option<u64>,
 }
 impl Descriptor {
     pub fn decode(bytes: &[u8]) -> Result<Self> {
@@ -36,12 +41,33 @@ impl Descriptor {
         descriptor.validate()?;
         Ok(descriptor)
     }
+    /// The format level a descriptor declares, read without the strict
+    /// decode, so a later level that adds fields still reports its level.
+    pub fn declared_format_level(bytes: &[u8]) -> Option<u64> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        value.get("formatLevel")?.as_u64()
+    }
+    /// This descriptor at `level`.
+    pub fn with_format_level(mut self, level: u64) -> Result<Self> {
+        self.format_level = Some(level);
+        self.validate()?;
+        Ok(self)
+    }
+    /// Whether both name the same repository, whatever their levels.
+    pub fn same_repository(&self, other: &Self) -> bool {
+        Self { format_level: None, ..self.clone() } == Self { format_level: None, ..other.clone() }
+    }
+    /// The level, 1 for a descriptor without one.
+    pub fn level(&self) -> u64 {
+        self.format_level.unwrap_or(1)
+    }
     pub fn new(repository_id: String, strategy: Option<Strategy>) -> Result<Self> {
         let descriptor = Self {
             schema: SCHEMA.into(),
             repository_id,
             encrypted: true,
             publication_strategy: strategy,
+            format_level: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -51,6 +77,9 @@ impl Descriptor {
             || !self.encrypted
             || self.repository_id.is_empty()
             || self.repository_id.len() > 128
+            || self.format_level.is_some_and(|level| {
+                level < 2 || level > (1 << 53) - 1 || self.publication_strategy.is_none()
+            })
         {
             return Err(FormatError("invalid-descriptor"));
         }
@@ -97,6 +126,26 @@ mod tests {
         // A device section selection is no longer part of repository identity,
         // so a strategy-carrying repository accepts every device's choice.
         assert!(Descriptor::new("repository".into(), Some(Strategy::Sequential)).is_ok());
+    }
+    #[test]
+    fn a_format_level_is_written_only_when_set_and_read_tolerantly() {
+        let plain = Descriptor::new("repository".into(), Some(Strategy::Cas)).unwrap();
+        let bytes = serde_json::to_vec(&plain).unwrap();
+        assert_eq!(
+            bytes,
+            br#"{"schema":"risunest.external-storage/v1","repositoryId":"repository","encrypted":true,"publicationStrategy":"cas"}"#
+        );
+        assert_eq!(Descriptor::declared_format_level(&bytes), None);
+        let leveled = plain.clone().with_format_level(2).unwrap();
+        let bytes = serde_json::to_vec(&leveled).unwrap();
+        assert_eq!(Descriptor::decode(&bytes).unwrap(), leveled);
+        assert!(leveled.same_repository(&plain) && leveled != plain);
+        assert_eq!((leveled.level(), plain.level()), (2, 1));
+        let later = br#"{"schema":"risunest.external-storage/v1","repositoryId":"repository","encrypted":true,"publicationStrategy":"cas","formatLevel":3,"next":true}"#;
+        assert_eq!(Descriptor::declared_format_level(later), Some(3));
+        assert!(Descriptor::decode(later).is_err());
+        assert!(plain.clone().with_format_level(1).is_err());
+        assert!(Descriptor::new("repository".into(), None).unwrap().with_format_level(2).is_err());
     }
 }
 

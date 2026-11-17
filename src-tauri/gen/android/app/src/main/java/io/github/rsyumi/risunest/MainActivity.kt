@@ -1,5 +1,6 @@
 package io.github.rsyumi.risunest
 
+import android.app.Activity
 import android.app.AlertDialog
 import android.content.ComponentCallbacks2
 import android.content.Context
@@ -21,6 +22,7 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
 import androidx.core.content.IntentCompat
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
@@ -53,6 +55,7 @@ private const val ROOT_BACK_EVENT = "risunest-root-back"
 private const val ROOT_BACK_REPLY_TIMEOUT_MILLIS = 1_000L
 private const val NATIVE_LIFECYCLE_EVENT = "risu-native-lifecycle"
 private const val OPENED_FILES_EVENT = "risu-opened-files"
+private const val START_REASON = "start"
 private const val STOP_REASON = "stop"
 private const val TRIM_MEMORY_REASON = "trim-memory"
 private const val EXIT_REASON = "exit"
@@ -323,15 +326,20 @@ private data class PendingLegacyBackupSource(
 )
 
 internal class LifecycleFlushDispatcher(
-  private val dispatch: (String) -> Unit,
+  private val dispatch: (reason: String, trimLevel: Int?) -> Unit,
 ) {
+  /** The app is on screen again; the page records it without a flush. */
+  fun onStart() {
+    dispatch(START_REASON, null)
+  }
+
   fun onStop() {
-    dispatch(STOP_REASON)
+    dispatch(STOP_REASON, null)
   }
 
   fun onTrimMemory(level: Int) {
     if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
-      dispatch(TRIM_MEMORY_REASON)
+      dispatch(TRIM_MEMORY_REASON, level)
     }
   }
 }
@@ -532,41 +540,15 @@ internal fun requestPostNotificationsIfNeeded(
   postToMain(launchRequest)
 }
 
-internal fun beginGenerationKeepAlive(
-  notificationsEnabled: () -> Boolean,
-  startService: () -> Boolean,
-): Boolean {
-  if (!notificationsEnabled()) return false
-  return startService()
-}
-
-internal class GenerationKeepAliveOwner {
-  private var closed = false
-
-  @Synchronized
-  fun begin(startGeneration: () -> Boolean): Boolean {
-    if (closed) return false
-    return startGeneration()
-  }
-
-  @Synchronized
-  fun end(stopGeneration: () -> Boolean): Boolean {
-    if (closed) return false
-    return stopGeneration()
-  }
-
-  @Synchronized
-  fun teardown(
-    removeJavascriptBridge: () -> Unit,
-    stopGeneration: () -> Unit,
-  ) {
-    if (closed) return
-    closed = true
-    try {
-      removeJavascriptBridge()
-    } finally {
-      stopGeneration()
-    }
+/** The page loses its bridge before its holds end, so it cannot begin one after teardown. */
+internal fun teardownBackgroundWork(
+  removeJavascriptBridge: () -> Unit,
+  stopBackgroundWork: () -> Unit,
+) {
+  try {
+    removeJavascriptBridge()
+  } finally {
+    stopBackgroundWork()
   }
 }
 
@@ -575,6 +557,8 @@ private val postNotificationsRequestedInProcess = AtomicBoolean(false)
 class MainActivity : TauriActivity(), RendererRecoveryHost {
   @androidx.annotation.Keep
   private external fun cancelIncompleteBoot()
+  @androidx.annotation.Keep
+  private external fun recordRendererExit(didCrash: Boolean)
 
   private fun finishForUserExit() {
     runCatching { cancelIncompleteBoot() }.onFailure { Log.e(TAG, "Boot cancellation failed", it) }
@@ -591,6 +575,14 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   @androidx.annotation.Keep
   fun cleanupWebviewStatus(): Int = webviewCleanup.status()
+
+  @androidx.annotation.Keep
+  private external fun appLockReply(id: Long, response: String)
+
+  private val appLock = AndroidAppLock(this, ::appLockReply)
+
+  @androidx.annotation.Keep
+  fun appLockCommand(id: Long, operation: String, payload: String) = appLock.command(id, operation, payload)
 
   private val backNavigationPolicy = BackNavigationPolicy()
   private var lifecycleWebView: WebView? = null
@@ -613,8 +605,14 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       restart = { if (!coldRestartDispatcher.restart()) finishAndRemoveTask() },
     )
   }
-  private val generationKeepAliveOwner = GenerationKeepAliveOwner()
   private val mainHandler = Handler(Looper.getMainLooper())
+  private val pageKeptActive = PageKeptActivePolicy(
+    apply = ::setWebViewKeptActive,
+    keepService = { GenerationForegroundService.keepService(this) },
+    postDelayed = { task, delay -> mainHandler.postDelayed(task, delay) },
+    removeCallbacks = { task -> mainHandler.removeCallbacks(task) },
+  )
+  private val heldObserver: (Boolean) -> Unit = pageKeptActive::onHeldChanged
   private val safScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val portableSourceOwner = PortableSourceOwner()
   private val safSourcePickFlow = SafSourcePickFlow { block -> safScope.launch { block() } }
@@ -641,6 +639,9 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       AndroidSafAtomicPublisher,
     )
   }
+  private val safDestinationReceipts by lazy {
+    SafDestinationReceiptStore(File(filesDir, "native-file-jobs/android-saf-receipts"), AndroidSafAtomicPublisher)
+  }
   private val safDestinationPicker = registerForActivityResult(
     object : ActivityResultContracts.CreateDocument("application/octet-stream") {
       override fun createIntent(context: Context, input: String): Intent =
@@ -655,6 +656,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val legacyBackupSourcePicker = registerForActivityResult(
     ActivityResultContracts.OpenDocument(),
     ::onLegacyBackupSourceSelected,
+  )
+  private val contentSourcePicker = registerForActivityResult(
+    ActivityResultContracts.OpenMultipleDocuments(),
+    ::onDocumentSourcesSelected,
   )
   private var notificationPermissionResult: CompletableDeferred<Boolean>? = null
   private val postNotificationsPermissionLauncher = registerForActivityResult(
@@ -692,7 +697,36 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
   private var exitFlushSequence = 0L
 
+  private companion object {
+    private var permissionDelegateInstalled = false
+
+    fun installPermissionDelegate() {
+      if (permissionDelegateInstalled) return
+      ActivityCompat.setPermissionCompatDelegate(object : ActivityCompat.PermissionCompatDelegate {
+        override fun requestPermissions(activity: Activity, permissions: Array<String>, requestCode: Int): Boolean {
+          if (activity !is MainActivity || requestCode < 0) return false
+          val permission = permissions.singleOrNull() ?: return false
+          if (permission != android.Manifest.permission.CAMERA &&
+            !(Build.VERSION.SDK_INT >= 33 && permission == android.Manifest.permission.POST_NOTIFICATIONS)) return false
+          activity.validateRequestPermissionsRequestCode(requestCode)
+          activity.appLock.beginOwnedPermission(requestCode)
+          try {
+            activity.requestPermissions(permissions, requestCode)
+          } catch (error: Exception) {
+            activity.appLock.finishOwnedPermission(requestCode)
+            throw error
+          }
+          return true
+        }
+
+        override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?): Boolean = false
+      })
+      permissionDelegateInstalled = true
+    }
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
+    installPermissionDelegate()
     consumedOpenedFileFingerprint = savedInstanceState?.getString(OPENED_FILE_FINGERPRINT_STATE)
     savedInstanceState?.let { state ->
       state.getString(BACKUP_SOURCE_REQUEST_STATE)
@@ -740,9 +774,11 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
     showRendererRecoveryWarning()
     diagnoseWebViewProvider()
+    GenerationForegroundService.observeHeld(heldObserver)
   }
 
   override fun recoverRenderer(webView: WebView, didCrash: Boolean): Boolean {
+    runCatching { recordRendererExit(didCrash) }
     frontendReady.cancel()
     commitBridge?.close()
     commitBridge = null
@@ -758,6 +794,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         safScope.launch(Dispatchers.IO) { PortableSourceNative.retireUnclaimed(portableSourceOwner) }
         cancelUnclaimedReservedDestination()
         retireSafDestinationRenderer()
+        // The lost page owned every background hold and cannot end them.
+        GenerationForegroundService.stopAll(this)
       },
       destroyView = webView::destroy,
       clearReference = {
@@ -789,6 +827,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
     frontendReady = AndroidFrontendReady()
     lifecycleWebView = webView
+    appLock.attach(webView)
     exitListenerReady = false
     deliveredLegacyPaths.clear()
     exitWaitDialog?.dismiss()
@@ -838,6 +877,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
           if (lifecycleWebView !== webView) return
+          if (appLock.backgroundForBack()) return
           val pressedAt = SystemClock.elapsedRealtime()
           if (webView.canGoBack()) {
             navigateBack(webView, canGoBack = true, pressedAt)
@@ -876,20 +916,75 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
 
+  override fun onStart() {
+    super.onStart()
+    GenerationForegroundService.setVisible(this, true)
+    lifecycleFlushDispatcher.onStart()
+  }
+
   override fun onStop() {
+    appLock.onStop()
+    // Promote first, so a hold the hide flush begins starts protected.
+    if (!isFinishing) GenerationForegroundService.setVisible(this, false)
     lifecycleFlushDispatcher.onStop()
     super.onStop()
   }
 
   override fun onResume() {
     super.onResume()
+    pageKeptActive.onResumedChanged(true)
+    appLock.onResume()
     rendererRestartGate.onResume()
     dispatchNotificationStateRefresh()
   }
 
   override fun onPause() {
+    appLock.onPause()
     rendererRestartGate.onPause()
+    pageKeptActive.onResumedChanged(false)
     super.onPause()
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    appLock.onWindowFocusChanged(hasFocus)
+  }
+
+  @androidx.annotation.RequiresApi(29)
+  override fun onTopResumedActivityChanged(isTopResumedActivity: Boolean) {
+    super.onTopResumedActivityChanged(isTopResumedActivity)
+    appLock.onTopResumedActivityChanged(isTopResumedActivity)
+  }
+
+  override fun onUserLeaveHint() {
+    appLock.onUserLeaveHint()
+    super.onUserLeaveHint()
+  }
+
+  @Suppress("DEPRECATION")
+  override fun startActivityForResult(intent: Intent, requestCode: Int, options: Bundle?) {
+    val owned = requestCode >= 0 && (intent.action in setOf(
+      Intent.ACTION_OPEN_DOCUMENT, Intent.ACTION_CREATE_DOCUMENT, Intent.ACTION_GET_CONTENT,
+      Intent.ACTION_OPEN_DOCUMENT_TREE, "android.app.action.CONFIRM_DEVICE_CREDENTIAL",
+    ) || intent.component?.packageName == packageName)
+    if (owned) appLock.beginOwnedActivity(requestCode)
+    try {
+      super.startActivityForResult(intent, requestCode, options)
+    } catch (error: Exception) {
+      if (owned) appLock.finishOwnedActivity(requestCode)
+      throw error
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    appLock.finishOwnedActivity(requestCode)
+    super.onActivityResult(requestCode, resultCode, data)
+  }
+
+  override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+    appLock.finishOwnedPermission(requestCode)
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
   }
 
   private fun dispatchNotificationStateRefresh() {
@@ -931,6 +1026,9 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   override fun onDestroy() {
+    // Detached first, so ending the holds below posts no release after this activity is gone.
+    GenerationForegroundService.stopObservingHeld(heldObserver)
+    appLock.close()
     exitWaitDialog?.dismiss()
     exitWaitDialog = null
     notificationPermissionResult?.cancel()
@@ -950,14 +1048,14 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     safSourceCancellations.clear()
     safDestinationCancellations.clear()
     safProgressThrottle.clearAll()
-    generationKeepAliveOwner.teardown(
+    teardownBackgroundWork(
       removeJavascriptBridge = {
         controlBridge?.close()
         controlBridge = null
         safControlBridge?.close()
         safControlBridge = null
       },
-      stopGeneration = { GenerationForegroundService.stopAll(this) },
+      stopBackgroundWork = { GenerationForegroundService.stopAll(this) },
     )
     lifecycleWebView = null
     super.onDestroy()
@@ -968,9 +1066,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     super.onTrimMemory(level)
   }
 
-  private fun dispatchLifecycleFlush(reason: String) {
+  private fun dispatchLifecycleFlush(reason: String, trimLevel: Int? = null) {
+    val level = trimLevel?.let { ",trimLevel:$it" } ?: ""
     lifecycleWebView?.evaluateJavascript(
-      "window.dispatchEvent(new CustomEvent('$NATIVE_LIFECYCLE_EVENT',{detail:{reason:'$reason'}}));",
+      "window.dispatchEvent(new CustomEvent('$NATIVE_LIFECYCLE_EVENT',{detail:{reason:'$reason'$level}}));",
       null,
     )
   }
@@ -1017,7 +1116,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   private fun onFrontendReady() {
     val webView = lifecycleWebView ?: return
-    if (!frontendReady.markReady()) return
+    if (!frontendReady.onDocumentReady { GenerationForegroundService.stopAll(this) }) return
     safScope.launch {
       val replay = withContext(Dispatchers.IO) {
         replayLegacyOpenedFiles(File(cacheDir, "opened_files"), deliveredLegacyPaths)
@@ -1055,15 +1154,15 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       "lifecycle.onFlushHold" -> lifecycleCommands.onFlushHold(args[0])
       "lifecycle.requestExit" -> lifecycleCommands.requestExit()
       "lifecycle.requestRestart" -> lifecycleCommands.requestRestart()
-      "background.begin" -> GenerationForegroundService.beginTask(this, args[0]) { id ->
+      "background.begin", "background.defer" -> GenerationForegroundService.beginTask(
+        this, args[0], args[1], deferred = method == "background.defer", userInitiated = args.getOrNull(2) == "true",
+      ) { id ->
         lifecycleWebView?.evaluateJavascript(
           "window.dispatchEvent(new CustomEvent('risunest-background-expired',{detail:'$id'}));", null,
         )
       }
       "background.progress" -> GenerationForegroundService.taskProgress(args[0], args[1].toInt())
       "background.end" -> GenerationForegroundService.endTask(this, args[0])
-      "generation.begin" -> generationCommands.begin()
-      "generation.end" -> generationCommands.end()
       "generation.notificationsEnabled" -> generationCommands.notificationsEnabled()
       "generation.requestNotifications" -> requestCompletionNotifications()
       "notification.enabled" -> CompletionNotifications.enabled(this)
@@ -1147,17 +1246,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   private inner class GenerationKeepAliveBridge {
-    fun begin(): Boolean = generationKeepAliveOwner.begin {
-      beginGenerationKeepAlive(
-        notificationsEnabled = { GenerationForegroundService.notificationsEnabled(this@MainActivity) },
-        startService = { GenerationForegroundService.start(this@MainActivity) },
-      )
-    }
-
-    fun end(): Boolean = generationKeepAliveOwner.end {
-      GenerationForegroundService.stop(this@MainActivity)
-    }
-
     fun notificationsEnabled(): Boolean = GenerationForegroundService.notificationsEnabled(this@MainActivity)
 
     fun openNotificationSettings(): Boolean = runCatching {
@@ -1304,7 +1392,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             importDestination = importDestination,
           )
           launchSafSourcePicker(
-            launch = { legacyBackupSourcePicker.launch(arrayOf("*/*")) },
+            launch = {
+              if (content) contentSourcePicker.launch(arrayOf("*/*"))
+              else legacyBackupSourcePicker.launch(arrayOf("*/*"))
+            },
             onFailure = {
               pendingLegacyBackupSource = null
               safSourceCancellations.remove(requestId, cancellation)
@@ -1360,7 +1451,11 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         var sourceKind = SafDestinationSourceKind.RISU_SAVE
         try {
           reconcileSafDestination()
-          if (reservationKind != null && loadSafDestinationState() != null) {
+          // Recovered receipts wait for their owner without blocking a new export.
+          val pendingState = synchronized(safDestinationStateLock) {
+            loadSafDestinationState()?.takeUnless { safDestinationRendererSession.hasRecovered(it.requestId) }
+          }
+          if (reservationKind != null && pendingState != null) {
             throw SafDestinationException("destination-busy", emptyList(), "Another Android SAF destination is pending")
           }
           val source = if (reservationKind != null) null else {
@@ -1397,6 +1492,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           )
           withContext(Dispatchers.IO) {
             synchronized(safDestinationStateLock) {
+              keepRecoveredSafReceipt(loadSafDestinationState(), requestId, safDestinationRendererSession, safDestinationReceipts)
               saveSafDestinationState(state)
               safDestinationRendererSession.own(requestId, rendererGeneration)
             }
@@ -1540,7 +1636,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
     fun acknowledgeExport(requestId: String): Boolean = synchronized(safDestinationStateLock) {
       if (safDestinationRendererSession.hasRecovered(requestId)) {
-        return@synchronized safDestinationRendererSession.acknowledge(requestId, loadSafDestinationState(), ::clearSafDestinationState)
+        return@synchronized runCatching { safDestinationReceipts.clear(requestId) }.getOrDefault(false) &&
+          safDestinationRendererSession.acknowledge(requestId, loadSafDestinationState(), ::clearSafDestinationState)
       }
       acknowledgeSafDestinationExport(
         requestId,
@@ -1677,10 +1774,12 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     lifecycleWebView?.evaluateJavascript(androidBackupSourcePickedScript(requestId, batch), null)
   }
 
-  private fun onLegacyBackupSourceSelected(uri: Uri?) {
+  private fun onLegacyBackupSourceSelected(uri: Uri?) = onDocumentSourcesSelected(listOfNotNull(uri))
+
+  private fun onDocumentSourcesSelected(uris: List<Uri>) {
     val pending = pendingLegacyBackupSource ?: return
     pendingLegacyBackupSource = null
-    if (uri == null) {
+    if (uris.isEmpty()) {
       finishLegacyBackupSourcePick(pending, SafSpoolBatch(emptyList(), emptyList()))
       return
     }
@@ -1688,23 +1787,23 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       val copyContext = currentCoroutineContext()
       val batch = try {
         val store = safSpoolStore()
-        val source = withContext(Dispatchers.IO) {
+        val sources = withContext(Dispatchers.IO) {
           store.cleanupStale()
-          val (displayName, totalBytes) = runCatching { resolveSourceMetadata(uri) }
-            .getOrElse {
-              safeSafDisplayName(uri.lastPathSegment ?: "opened-file") to null
-            }
-          contentResolverSource(uri, displayName, totalBytes)
+          uris.map { uri ->
+            val (displayName, totalBytes) = runCatching { resolveSourceMetadata(uri) }
+              .getOrElse {
+                safeSafDisplayName(uri.lastPathSegment ?: "opened-file") to null
+              }
+            contentResolverSource(uri, displayName, totalBytes)
+          }
         }
-        if (!(if (pending.content) isNativeContentSource(source.displayName) else source.displayName.endsWith(".bin", ignoreCase = true))) {
-          SafSpoolBatch(
-            emptyList(),
-            listOf(SafSpoolFailure(source.displayName, "unsupported-source")),
-          )
+        val (supported, unsupported) = partitionDocumentSources(sources, pending.content)
+        if (supported.isEmpty()) {
+          SafSpoolBatch(emptyList(), unsupported)
         } else {
           spoolOpenedFilesOnIo(
             store,
-            listOf(source),
+            supported,
             importDestination = pending.importDestination,
             isCancelled = { pending.cancellation.get() || !copyContext.isActive },
             onProgress = { progress ->
@@ -1720,7 +1819,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
                 },
               )
             },
-          )
+          ).let { spooled -> SafSpoolBatch(spooled.ready, unsupported + spooled.failures) }
         }
       } catch (error: Exception) {
         SafSpoolBatch(
@@ -1973,23 +2072,27 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   private suspend fun reconcileSafDestination() {
-    val record = withContext(Dispatchers.IO) {
+    val records = withContext(Dispatchers.IO) {
       synchronized(safDestinationStateLock) {
-        val current = loadSafDestinationState() ?: return@synchronized null
-        runCatching {
-          safDestinationRendererSession.reconcile(
-            current,
-            System.currentTimeMillis(),
-            ::saveSafDestinationState,
-            { terminal -> !terminal.exportBound || !terminal.copyStarted ||
-              prepareRecoveredRisuSaveAcknowledgement(filesDir, terminal.exportId) },
-            ::clearSafDestinationState,
-            retainJournal = !frontendReady.isReady,
-          )
-        }.onFailure { Log.e(TAG, "Android SAF recovery failed", it) }.getOrNull()
+        fun recover(record: SafDestinationRecord, save: (SafDestinationRecord) -> Unit) =
+          runCatching {
+            safDestinationRendererSession.reconcile(
+              record,
+              System.currentTimeMillis(),
+              save,
+              { terminal -> !terminal.exportBound || !terminal.copyStarted ||
+                prepareRecoveredRisuSaveAcknowledgement(filesDir, terminal.exportId) },
+              requiresPublicationProof = { terminal ->
+                requiresRisuSavePublicationProof(filesDir, terminal.exportId, terminal.sourceKind)
+              },
+            )
+          }.onFailure { Log.e(TAG, "Android SAF recovery failed", it) }.getOrNull()
+        runCatching { safDestinationReceipts.loadAll() }.getOrDefault(emptyList())
+          .mapNotNull { recover(it, safDestinationReceipts::save) } +
+          listOfNotNull(loadSafDestinationState()?.let { recover(it, ::saveSafDestinationState) })
       }
     }
-    record?.let { dispatchSafDestination(it, destinationMessage(it)) }
+    for (record in records) dispatchSafDestination(record, destinationMessage(record))
   }
 
   private suspend fun finalizeSafDestination(

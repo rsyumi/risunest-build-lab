@@ -120,23 +120,188 @@ fn schema_configures_the_documented_sqlite_profile() {
     );
 }
 
+fn commit_snapshot_plugin(store: &mut PersistentStore, body_bytes: usize) -> Value {
+    use crate::persistent_store::lww::UnitMutation;
+    use risunest_sync_wire::{payload_value, unit::UnitKey};
+    let mut plugin=json!({"name":"synthetic-snapshot-plugin","script":"","version":"3.0","enabled":false});
+    let overhead=payload_value::encode(&plugin).unwrap().len();
+    plugin["script"]=json!("x".repeat(body_bytes-overhead));
+    assert_eq!(payload_value::encode(&plugin).unwrap().len(),body_bytes);
+    store.commit(&WorkingSetCommit {
+        expected_revision:store.revision().unwrap(),
+        unit_mutations:Some(vec![
+            UnitMutation::Set {key:UnitKey::new(&["record","plugins","synthetic-snapshot-plugin"]).unwrap(),value:plugin.clone()},
+            UnitMutation::Set {key:UnitKey::new(&["order","plugins"]).unwrap(),value:json!(["synthetic-snapshot-plugin"])},
+        ]),
+        ..Default::default()
+    }).unwrap();
+    plugin
+}
+
 #[test]
 fn snapshots_create_list_and_restore_before_reopen() {
-    let (directory, mut store, database) = open_fixture();
-    let snapshot=store.snapshot_create("contract-test").unwrap();
-    assert!(snapshot.bytes>0);
-    assert_eq!(store.snapshot_list().unwrap().len(),1);
-    store.commit(&WorkingSetCommit {root:Some(json!({"username":"Changed after snapshot"})),..empty_working_set_commit(1)}).unwrap();
-    let stage=store.snapshot_restore_stage(&snapshot.id,"contract-restore").unwrap();
-    let authority=store.lww_binding_authority().unwrap();
-    let receipt=store.snapshot_restore_activate(&stage.staging_id,2,authority).unwrap();
-    assert_eq!(receipt.revision,3);
+    let metadata_bound=risunest_sync_wire::MAX_METADATA_BYTES;
+    for plugin_bytes in [0,metadata_bound-1,metadata_bound+1,5*metadata_bound] {
+        let (directory, mut store, mut database) = open_fixture();
+        if plugin_bytes>0 {
+            database["plugins"]=json!([commit_snapshot_plugin(&mut store,plugin_bytes)]);
+        }
+        if plugin_bytes==5*metadata_bound {
+            let username="u".repeat(metadata_bound+1);
+            store.commit(&WorkingSetCommit {
+                unit_mutations:Some(vec![crate::persistent_store::lww::UnitMutation::Set {
+                    key:risunest_sync_wire::unit::UnitKey::new(&["root","username"]).unwrap(),value:json!(username),
+                }]),
+                ..empty_working_set_commit(store.revision().unwrap())
+            }).unwrap();
+            database["username"]=json!(username);
+        }
+        let snapshot=store.snapshot_create("contract-test").unwrap();
+        assert!(snapshot.bytes>0);
+        assert_eq!(store.snapshot_list().unwrap().len(),1);
+        store.commit(&WorkingSetCommit {root:Some(json!({"username":"Changed after snapshot"})),..empty_working_set_commit(store.revision().unwrap())}).unwrap();
+        let revision=store.revision().unwrap();
+        let stage=store.snapshot_restore_stage(&snapshot.id,"contract-restore")
+            .unwrap_or_else(|error|panic!("plugin bytes={plugin_bytes}: {error}"));
+        let authority=store.lww_binding_authority().unwrap();
+        let receipt=store.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
+        assert_eq!(receipt.revision,revision+1);
+        assert!(store.materialize(None).unwrap()==database,"restored data differs, plugin bytes={plugin_bytes}");
+        drop(store);
+        let restored=PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(restored.revision().unwrap(),receipt.revision);
+        assert!(restored.materialize(None).unwrap()==database,"reopened data differs, plugin bytes={plugin_bytes}");
+        assert!(restored.snapshot_list().unwrap().iter().any(|s|s.id==snapshot.id));
+    }
+}
+
+#[test]
+fn snapshot_restore_recovers_large_units_without_cached_bodies() {
+    let (_source_directory,mut source,mut expected)=open_fixture();
+    expected["plugins"]=json!([commit_snapshot_plugin(&mut source,risunest_sync_wire::MAX_METADATA_BYTES-1)]);
+    let snapshot=source.snapshot_create("uncached-plugin").unwrap();
+    let (directory,mut target,_)=open_fixture();
+    let source_archive=Archive::open(&source.snapshots_dir).unwrap();
+    let scratch=source_archive.scratch().unwrap();
+    source_archive.restore(&snapshot.id,&scratch.path).unwrap();
+    let mut target_archive=Archive::open(&target.snapshots_dir).unwrap();
+    let imported=target_archive.insert(&scratch.path,source.revision().unwrap(),"uncached-plugin",Default::default()).unwrap();
+    drop(target_archive);
+    drop(source_archive);
+    let stage=target.snapshot_restore_stage(&imported.id,"uncached-plugin").unwrap();
+    target.snapshot_restore_activate(&stage.staging_id,target.revision().unwrap(),target.lww_binding_authority().unwrap()).unwrap();
+    assert_eq!(target.materialize(None).unwrap(),expected);
+    drop(target);
+    let reopened=PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(reopened.materialize(None).unwrap(),expected);
+}
+
+#[test]
+fn snapshot_restore_stages_large_message_manifests_and_archive_metadata() {
+    use risunest_external_storage_format::message_pages::{MessageManifest,ManifestPage,MANIFEST_SCHEMA,MAX_PAGE_BYTES};
+    use risunest_sync_wire::{descriptor::RecordDescriptor,unit::{UnitKey,UnitValue}};
+    let (_directory,mut store,database)=open_fixture();
+    let mut archive=Archive::open(&store.snapshots_dir).unwrap();
+    let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive,super::super::snapshot::KeepCount::MAX).unwrap();
+    let source=Connection::open(&scratch.path).unwrap();
+    source.execute_batch("BEGIN").unwrap();
+    let (mut units,mut bodies,large)=super::super::external_capture::large_metadata_fixture();
+    // One indivisible page can occur repeatedly without materializing the logical history.
+    let page=risunest_external_storage_format::logical_records::encode_message_page(&[json!({"role":"user","data":"x".repeat(MAX_PAGE_BYTES)})]).unwrap();
+    let manifest=MessageManifest {schema:MANIFEST_SCHEMA.into(),message_count:9500u64.into(),pages:vec![ManifestPage {hash:page.hash.clone(),message_count:1,byte_length:page.size.into()};9500]}.encode().unwrap();
+    assert!(manifest.bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES);
+    let mut descriptor=RecordDescriptor::content(manifest.hash.clone());
+    descriptor.dependencies=vec![page.hash.clone()];
+    units.insert(UnitKey::new(&["messages","synthetic-character","synthetic-chat"]).unwrap(),UnitValue::object(descriptor).unwrap());
+    bodies.insert(manifest.hash.clone(),manifest.bytes.clone());
+    bodies.insert(page.hash,page.bytes);
+    let archived:super::super::archive::ArchivedObject=serde_json::from_slice(&bodies[&large[0]]).unwrap();
+    for hash in archived.object_roots().collect::<std::collections::BTreeSet<_>>() {
+        source.execute("INSERT INTO asset_objects VALUES(?1,1,0)",[hash]).unwrap();
+    }
+    for (hash,body) in &bodies {super::super::message_pages::put_object(&source,hash,body).unwrap();}
+    for (key,value) in &units {
+        source.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)",params![key.as_str(),serde_json::to_string(value).unwrap()]).unwrap();
+    }
+    source.execute_batch("COMMIT").unwrap();
+    drop(source);
+    let snapshot=archive.insert(&scratch.path,store.revision().unwrap(),"large-originals",Default::default()).unwrap();
+    drop(archive);
+    let stage=store.snapshot_restore_stage(&snapshot.id,"large-originals").unwrap();
+    for (key,value) in &units {
+        let staged:String=store.connection.query_row("SELECT value FROM replacement_source_units WHERE generation=?1 AND layer=0 AND key=?2",params![stage.staging_id,key.as_str()],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<UnitValue>(&staged).unwrap(),*value);
+    }
+    for hash in [&large[0],&manifest.hash] {assert_eq!(store.lww_object_body(hash).unwrap().unwrap(),bodies[hash]);}
+    store.snapshot_restore_abort(&stage.staging_id).unwrap();
     assert_eq!(store.materialize(None).unwrap(),database);
-    drop(store);
-    let restored=PersistentStore::open(directory.path()).unwrap();
-    assert_eq!(restored.revision().unwrap(),receipt.revision);
-    assert_eq!(restored.materialize(None).unwrap(),database);
-    assert!(restored.snapshot_list().unwrap().iter().any(|s|s.id==snapshot.id));
+}
+
+#[test]
+fn snapshot_restore_rejects_damaged_large_units_and_oversized_reference_pages() {
+    use risunest_sync_wire::{descriptor::{RecordDescriptor,ReferencePage},unit::{UnitKey,UnitValue}};
+    for (damage,expected_error) in [
+        ("missing","unit-object-body-required"),
+        ("hash","message object hash mismatch"),
+        ("noncanonical","invalid-large-unit"),
+        ("reference-page","Backup reference tree integrity failed"),
+    ] {
+        let (directory,mut store,_)=open_fixture();
+        commit_snapshot_plugin(&mut store,risunest_sync_wire::MAX_METADATA_BYTES+1);
+        let expected=store.materialize(None).unwrap();
+        let revision=store.revision().unwrap();
+        let clock=serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+        let mut archive=Archive::open(&store.snapshots_dir).unwrap();
+        let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive,super::super::snapshot::KeepCount::MAX).unwrap();
+        let source=Connection::open(&scratch.path).unwrap();
+        let key=UnitKey::new(&["record","plugins","synthetic-snapshot-plugin"]).unwrap();
+        let encoded:String=source.query_row("SELECT value FROM snapshot_original_units WHERE key=?1",[key.as_str()],|row|row.get(0)).unwrap();
+        let UnitValue::Object {descriptor,..}=serde_json::from_str(&encoded).unwrap() else {panic!("large plugin must have a body")};
+        match damage {
+            "missing"=>{source.execute("DELETE FROM message_page_objects WHERE hash=?1",[&descriptor.object_hash]).unwrap();},
+            "hash"=>{
+                source.execute("DELETE FROM message_page_objects WHERE hash=?1",[&descriptor.object_hash]).unwrap();
+                source.execute("INSERT INTO message_page_objects(hash,body) VALUES(?1,?2)",params![descriptor.object_hash,b"{}".as_slice()]).unwrap();
+            },
+            "noncanonical"=>{
+                let mut body:Vec<u8>=source.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[&descriptor.object_hash],|row|row.get(0)).unwrap();
+                body.push(b' ');
+                let hash=risunest_sync_wire::hash(&body);
+                super::super::message_pages::put_object(&source,&hash,&body).unwrap();
+                let value=UnitValue::object(RecordDescriptor::content(hash)).unwrap();
+                source.execute("UPDATE snapshot_original_units SET value=?2 WHERE key=?1",params![key.as_str(),serde_json::to_string(&value).unwrap()]).unwrap();
+            },
+            "reference-page"=>{
+                let page=ReferencePage::Relations {keys:(0..17).map(|i|format!("{i:02}{}","x".repeat(risunest_sync_wire::MAX_KEY_BYTES-2))).collect()};
+                let body=risunest_sync_wire::canonical::encode(&page).unwrap();
+                assert!(body.len()>risunest_sync_wire::MAX_METADATA_BYTES);
+                let hash=risunest_sync_wire::hash(&body);
+                super::super::message_pages::put_object(&source,&hash,&body).unwrap();
+                let mut descriptor=RecordDescriptor::content(descriptor.object_hash);
+                descriptor.relation_root=Some(hash);
+                let value=UnitValue::object(descriptor).unwrap();
+                source.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)",params![UnitKey::new(&["future","synthetic"]).unwrap().as_str(),serde_json::to_string(&value).unwrap()]).unwrap();
+            },
+            _=>unreachable!(),
+        }
+        drop(source);
+        let snapshot=archive.insert(&scratch.path,store.revision().unwrap(),"damaged-originals",Default::default()).unwrap();
+        drop(archive);
+        for _ in 0..2 {
+            match store.snapshot_restore_stage(&snapshot.id,"damaged-originals") {
+                Err(StoreError::Validation {message})=>assert_eq!(message,expected_error,"{damage}"),
+                Err(error)=>panic!("unexpected error for {damage}: {error:?}"),
+                Ok(_)=>panic!("damaged snapshot was accepted: {damage}"),
+            }
+            assert_eq!(store.materialize(None).unwrap(),expected);
+            assert_eq!(store.revision().unwrap(),revision);
+            assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
+            assert_eq!(store.snapshot_restore_leftovers().unwrap(),(Vec::new(),Vec::new()));
+        }
+        drop(store);
+        let reopened=PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.materialize(None).unwrap(),expected);
+    }
 }
 
 #[test]
@@ -367,6 +532,8 @@ fn asset_gc_dry_run_keeps_leased_generation_roots_until_release() {
     store
         .commit_asset_alias(&replacement, first.revision)
         .unwrap();
+    // An alias nothing uses holds nothing, so a character uses this one.
+    super::asset_catalog_gc_tests::add_synthetic_character(&mut store, "leased-holder", "assets/leased.bin");
     store
         .asset_object_catalog()
         .register(
@@ -486,6 +653,35 @@ fn asset_gc_dry_run_scans_plugin_references_without_retaining_unreferenced_objec
     }
 }
 
+/// GC fails as busy, without waiting, while a capture defers the inventory or another
+/// operation holds the snapshot archive, and the renderer and server sync both see it as busy.
+#[test]
+fn asset_gc_fails_busy_while_a_capture_or_another_archive_holder_runs() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let store = PersistentStore::open(directory.path()).expect("open persistent store");
+    let deferral = store.active_readers.defer_asset_inventory();
+    assert_eq!(store.asset_gc_dry_run(128, None, 0, 0).map(|_| ()), Err(StoreError::AssetInventoryBusy));
+    drop(deferral);
+
+    let (store, held_result) = std::thread::scope(|scope| {
+        let held = Archive::open(&store.snapshots_dir).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let gc = scope.spawn(move || {
+            sent.send(store.asset_gc_dry_run(128, None, 0, 0).map(|_| ())).unwrap();
+            store
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        (gc.join().unwrap(), result)
+    });
+    let error = held_result.expect("GC returned without waiting for the archive").unwrap_err();
+    assert_eq!(error, StoreError::AssetInventoryBusy);
+    // The storage screen reads this code to ask for a retry instead of offering the data check.
+    assert_eq!(serde_json::to_value(&error).unwrap(), serde_json::json!({ "code": "library-operation-busy" }));
+    assert_eq!(crate::server_sync::SyncError::from(error).code, "library-operation-busy");
+    assert!(store.asset_gc_dry_run(128, None, 0, 0).is_ok());
+}
+
 #[test]
 fn asset_gc_dry_run_keeps_detached_export_roots_until_reader_release() {
     use super::asset_object_catalog::AssetObjectRegistration;
@@ -518,6 +714,8 @@ fn asset_gc_dry_run_keeps_detached_export_roots_until_reader_release() {
     store
         .commit_asset_alias(&replacement, first.revision)
         .unwrap();
+    // An alias nothing uses holds nothing, so a character uses this one.
+    super::asset_catalog_gc_tests::add_synthetic_character(&mut store, "detached-holder", "assets/detached.bin");
     store
         .asset_object_catalog()
         .register(
@@ -555,6 +753,94 @@ fn asset_gc_dry_run_keeps_detached_export_roots_until_reader_release() {
         released.potential_delete_hashes,
         vec![original_payload.content_hash]
     );
+}
+
+#[test]
+fn gallery_file_lease_reads_only_the_selected_alias_and_keeps_its_bytes_until_release() {
+    use super::asset_object_catalog::AssetObjectRegistration;
+
+    for (kind, explicit_release) in [("asset", true), ("inlay", false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let selected = cas.prepare_bytes(b"selected original bytes").unwrap();
+        let unrelated = cas.prepare_bytes(b"unrelated original bytes").unwrap();
+        let replacement = cas.prepare_bytes(b"replacement bytes").unwrap();
+        let alias = AssetAlias {
+            key: if kind == "asset" { "assets/selected.png" } else { "inlay-selected" }.into(),
+            object_hash: Some(selected.content_hash.clone()),
+            kind: kind.into(),
+            size: selected.byte_size as i64,
+            mime: "image/png".into(),
+            name: "Selected".into(),
+            ext: "png".into(),
+            inlay_type: (kind == "inlay").then(|| "image".into()),
+            width: None,
+            height: None,
+            metadata: json!({}),
+        };
+        let first = store.commit_asset_alias(&alias, 0).unwrap();
+        let other = AssetAlias {
+            key: if kind == "asset" { "assets/unrelated.png" } else { "inlay-unrelated" }.into(),
+            object_hash: Some(unrelated.content_hash.clone()),
+            size: unrelated.byte_size as i64,
+            ..alias.clone()
+        };
+        let revision = store.commit_asset_alias(&other, first.revision).unwrap().revision;
+        let generation = super::active_generation(&store.connection).unwrap();
+        let body = json!({ "unrelated": vec!["synthetic library body"; 4096] }).to_string();
+        store.connection.execute("UPDATE root SET value=?1 WHERE generation=?2", params![body, generation]).unwrap();
+        store.asset_object_catalog().register(&[
+            AssetObjectRegistration { object_hash: selected.content_hash.clone(), byte_size: selected.byte_size },
+            AssetObjectRegistration { object_hash: unrelated.content_hash.clone(), byte_size: unrelated.byte_size },
+            AssetObjectRegistration { object_hash: replacement.content_hash.clone(), byte_size: replacement.byte_size },
+        ], 0).unwrap();
+
+        let scans = snapshot::ASSET_ROOT_SCANS.with(|count| count.get());
+        let mut prepared = store.prepare_gallery_file_export(revision, kind, &alias.key).unwrap();
+        assert_eq!(snapshot::ASSET_ROOT_SCANS.with(|count| count.get()), scans,
+            "one gallery file must not scan unrelated library bodies");
+        assert_eq!(store.active_readers.active_count(), 1);
+        assert!(matches!(store.prepare_gallery_file_export(revision + 1, kind, &alias.key),
+            Err(StoreError::RevisionConflict { .. })));
+        assert!(store.prepare_gallery_file_export(revision, "invalid", &alias.key).is_err());
+        assert_eq!(store.active_readers.active_count(), 1);
+
+        let rewritten = AssetAlias {
+            object_hash: Some(replacement.content_hash.clone()),
+            size: replacement.byte_size as i64,
+            ext: "webp".into(),
+            ..alias.clone()
+        };
+        let revision = store.commit_asset_alias(&rewritten, revision).unwrap().revision;
+        let revision = store.commit_asset_alias(&AssetAlias {
+            key: other.key.clone(),
+            ..rewritten
+        }, revision).unwrap().revision;
+        store.delete_asset_alias(kind, &alias.key, revision).unwrap();
+        assert!(store.read_asset_alias(kind, &alias.key, None).unwrap().is_none());
+        let pinned = prepared.reader().unwrap();
+        let pinned_alias = super::super::gallery::pinned_gallery_alias(
+            &pinned.connection, &pinned.target, kind, &alias.key,
+        ).unwrap().unwrap();
+        assert_eq!(pinned_alias.object_hash.as_deref(), Some(selected.content_hash.as_str()));
+        assert_eq!(pinned_alias.ext, "png");
+
+        let collected = store.asset_gc_delete_page(16, None, 100, 10).unwrap().report;
+        assert!(collected.blockers.is_empty(), "{kind}: {:?}", collected.blockers);
+        assert_eq!(collected.deleted_hashes, [unrelated.content_hash.clone()], "{kind}");
+        assert_eq!(cas.read_object(&selected.content_hash).unwrap().unwrap(), b"selected original bytes");
+        assert!(cas.read_object(&unrelated.content_hash).unwrap().is_none());
+        if explicit_release { prepared.release_reader().unwrap(); }
+        drop(prepared);
+        assert_eq!(store.active_readers.active_count(), 0);
+        assert!(store.active_readers.detached_asset_roots().unwrap().is_empty());
+        let collected = store.asset_gc_delete_page(16, None, 100, 10).unwrap().report;
+        assert!(collected.blockers.is_empty(), "{kind}: {:?}", collected.blockers);
+        assert_eq!(collected.deleted_hashes, [selected.content_hash.clone()], "{kind}");
+        assert!(cas.read_object(&selected.content_hash).unwrap().is_none());
+        assert_eq!(cas.read_object(&replacement.content_hash).unwrap().unwrap(), b"replacement bytes");
+    }
 }
 
 #[test]
@@ -624,7 +910,7 @@ fn checkpoints_accept_both_documented_modes() {
 }
 
 #[test]
-fn active_lease_rejects_truncate_and_final_release_truncates_the_wal() {
+fn active_lease_turns_truncate_into_passive_and_final_release_truncates_the_wal() {
     let (directory, mut store, _) = open_fixture();
     store
         .connection
@@ -634,27 +920,28 @@ fn active_lease_rejects_truncate_and_final_release_truncates_the_wal() {
     store
         .set_app_kv("device-backup-commit:after-lease", &json!(true))
         .expect("append WAL frame after lease");
-    store
-        .checkpoint(CheckpointMode::Passive)
-        .expect("passive checkpoint with active lease");
+    let database_path = directory.path().join("persistent/persistent.sqlite");
+    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
 
     let started = std::time::Instant::now();
-    let error = store
+    store
         .checkpoint(CheckpointMode::Truncate)
-        .expect_err("truncate must reject an active lease");
+        .expect("truncate request under an active lease checkpoints passively");
     // Far above scheduler/disk jitter, comfortably below the 5s SQLite busy timeout:
-    // proves the call rejected promptly instead of waiting out the busy handler.
+    // proves the call returned promptly instead of waiting out the busy handler.
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(matches!(
-        error,
-        StoreError::Store { message } if message.contains("active read lease")
-    ));
+    assert!(fs::metadata(&wal_path).expect("read leased WAL").len() > 0);
+    assert_eq!(
+        store
+            .read_root(Some(&lease.lease))
+            .expect("lease stays pinned after the checkpoint")
+            .revision,
+        1
+    );
 
     store
         .release_revision(&lease.lease)
         .expect("release final lease and truncate WAL");
-    let database_path = directory.path().join("persistent/persistent.sqlite");
-    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
     assert_eq!(fs::metadata(wal_path).expect("read final WAL").len(), 0);
 }
 
@@ -717,7 +1004,7 @@ fn attached_export_can_leave_the_store_lock_and_restore_the_same_lease() {
 }
 
 #[test]
-fn detached_export_reader_rejects_truncate_until_it_is_released() {
+fn detached_export_reader_keeps_truncate_passive_until_it_is_released() {
     let (directory, mut store, _) = open_fixture();
     store
         .connection
@@ -729,24 +1016,21 @@ fn detached_export_reader_rejects_truncate_until_it_is_released() {
     store
         .set_app_kv("device-backup-commit:after-detached-export", &json!(true))
         .expect("append WAL frame after detached reader");
+    let database_path = directory.path().join("persistent/persistent.sqlite");
+    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
 
     let started = std::time::Instant::now();
-    let error = store
+    store
         .checkpoint(CheckpointMode::Truncate)
-        .expect_err("truncate must reject a detached export reader");
+        .expect("truncate request beside a detached export reader checkpoints passively");
     // Far above scheduler/disk jitter, comfortably below the 5s SQLite busy timeout.
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(matches!(
-        error,
-        StoreError::Store { message } if message.contains("active read lease")
-    ));
+    assert!(fs::metadata(&wal_path).expect("read leased WAL").len() > 0);
 
     let reader = prepared.take_reader().expect("take detached export reader");
     prepared
         .release(reader)
         .expect("release detached export reader");
-    let database_path = directory.path().join("persistent/persistent.sqlite");
-    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
     assert_eq!(fs::metadata(wal_path).expect("read final WAL").len(), 0);
 }
 
@@ -883,7 +1167,7 @@ fn byte_rotation_keeps_newest_and_durable_stage_owns_rotated_source() {
     store.snapshot_create("middle").unwrap();
     let latest=store.snapshot_create("latest").unwrap();
     let mut archive=Archive::open(&store.snapshots_dir).unwrap();
-    archive.rotate(0,&latest.id).unwrap();
+    archive.rotate(8,0,&latest.id).unwrap();
     let ids:Vec<_>=archive.list().unwrap().into_iter().map(|s|s.id).collect();
     assert_eq!(ids,vec![latest.id]);
     let authority=store.lww_binding_authority().unwrap();
@@ -1086,26 +1370,33 @@ fn invalid_snapshot_candidates_preserve_current_data_and_operation_state() {
 
 #[test]
 fn exact_schema_snapshot_with_forged_message_cache_is_rejected_before_activation() {
-    let (_directory, mut store, _) = open_fixture();
-    for table in ["messages", "message_page_manifests", "message_page_indexes", "message_page_proofs", "message_page_verified_objects"] {
-        let count:i64=store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0)).unwrap();
-        assert!(count>0,"fixture must contain actual {table} before forgery");
+    for forged_hash in [true, false] {
+        let (_directory, mut store, _) = open_fixture();
+        for table in ["messages", "message_page_manifests", "message_page_indexes", "message_page_proofs", "message_page_verified_objects"] {
+            let count:i64=store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0)).unwrap();
+            assert!(count>0,"fixture must contain actual {table} before forgery");
+        }
+        if forged_hash {
+            store.connection.execute("UPDATE messages SET canonical_hash=?1,canonical_size=1",["0".repeat(64)]).unwrap();
+        } else {
+            store.connection.execute("UPDATE messages SET value=json_set(value,'$.data','changed synthetic message'),canonical_hash='',canonical_size=0",[]).unwrap();
+        }
+        let snapshot = store.snapshot_create("forged-cache").unwrap();
+        store.commit(&WorkingSetCommit {
+            root: Some(json!({"username":"keep-current"})),
+            ..empty_working_set_commit(1)
+        }).unwrap();
+        let revision = store.revision().unwrap();
+        let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+        let generation = active_generation(&store.connection).unwrap();
+        let error = store.snapshot_restore_stage(&snapshot.id,"forged-snapshot").unwrap_err();
+        let expected = if forged_hash { "identity mismatch" } else { "copied message manifest differs from native messages" };
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(store.read_root(None).unwrap().value["username"],"keep-current");
+        assert_eq!(store.revision().unwrap(),revision);
+        assert_eq!(active_generation(&store.connection).unwrap(),generation);
+        assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
     }
-    store.connection.execute("UPDATE messages SET canonical_hash=?1,canonical_size=1",["0".repeat(64)]).unwrap();
-    let snapshot = store.snapshot_create("forged-cache").unwrap();
-    store.commit(&WorkingSetCommit {
-        root: Some(json!({"username":"keep-current"})),
-        ..empty_working_set_commit(1)
-    }).unwrap();
-    let revision = store.revision().unwrap();
-    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
-    let generation = active_generation(&store.connection).unwrap();
-    let error = store.snapshot_restore_stage(&snapshot.id,"forged-snapshot").unwrap_err();
-    assert!(error.to_string().contains("identity mismatch"));
-    assert_eq!(store.read_root(None).unwrap().value["username"],"keep-current");
-    assert_eq!(store.revision().unwrap(),revision);
-    assert_eq!(active_generation(&store.connection).unwrap(),generation);
-    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
 }
 
 #[test]
@@ -1128,23 +1419,54 @@ fn exact_schema_snapshot_with_forged_page_index_is_rejected_before_activation() 
 
 #[test]
 fn live_snapshot_restore_recertifies_then_reopens_without_replaying() {
-    let (directory, mut store, _) = open_fixture();
-    let snapshot = store.snapshot_create("manual").unwrap();
-    let stage = store.snapshot_restore_stage(&snapshot.id,"live-snapshot").unwrap();
-    let writer = store.lww_clock_state().unwrap().writer_id;
-    let authority = store.lww_binding_authority().unwrap();
-    let revision = store.revision().unwrap();
-    let activated = store.snapshot_restore_activate(&stage.staging_id,revision,authority.clone()).unwrap();
-    assert!(activated.revision>revision);
-    assert_eq!(store.lww_clock_state().unwrap().writer_id,writer);
-    assert_eq!(store.lww_binding_authority().unwrap(),authority);
-    let verified:i64 = store.connection.query_row("SELECT COUNT(*) FROM message_page_verified_objects",[],|r|r.get(0)).unwrap();
-    assert!(verified>0);
-    drop(store);
-    let mut reopened = PersistentStore::open(directory.path()).unwrap();
-    let replay = reopened.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
-    assert_eq!(replay.revision,activated.revision);
-    assert_eq!(reopened.revision().unwrap(),activated.revision);
-    assert_eq!(reopened.lww_clock_state().unwrap().writer_id,writer);
-    assert!(reopened.snapshot_list().unwrap().iter().all(|entry|entry.reason!="pre-restore"));
+    for legacy in ["none", "populated", "empty"] {
+        let (directory, mut store, _) = open_fixture();
+        if legacy != "none" {
+            if legacy == "empty" {
+                store.commit(&WorkingSetCommit {
+                    conversations: Some(vec![ConversationMutation::ReplaceRange {
+                        character_id: "char-a".into(), conversation_id: "conv-short".into(),
+                        start: 0, delete_count: 2, messages: vec![],
+                        conversation: None, configured_index: None,
+                    }]),
+                    ..empty_working_set_commit(store.revision().unwrap())
+                }).unwrap();
+            }
+            // Preserve the derived rows that released versions left behind after deletion.
+            store.connection.execute_batch("CREATE TEMP TABLE legacy_manifests AS
+                SELECT * FROM message_page_manifests WHERE character_id='char-a' AND conversation_id='conv-short';
+                CREATE TEMP TABLE legacy_indexes AS
+                SELECT * FROM message_page_indexes WHERE character_id='char-a' AND conversation_id='conv-short';").unwrap();
+            store.commit(&WorkingSetCommit {
+                conversations: Some(vec![ConversationMutation::Delete {
+                    character_id: "char-a".into(), conversation_id: "conv-short".into(),
+                }]),
+                ..empty_working_set_commit(store.revision().unwrap())
+            }).unwrap();
+            store.connection.execute_batch("INSERT OR REPLACE INTO message_page_manifests SELECT * FROM legacy_manifests;
+                INSERT OR REPLACE INTO message_page_indexes SELECT * FROM legacy_indexes;").unwrap();
+        }
+        let expected = store.materialize(None).unwrap();
+        let snapshot = store.snapshot_create("manual").unwrap();
+        let stage = store.snapshot_restore_stage(&snapshot.id,"live-snapshot")
+            .unwrap_or_else(|error| panic!("{legacy}: {error}"));
+        let writer = store.lww_clock_state().unwrap().writer_id;
+        let authority = store.lww_binding_authority().unwrap();
+        let revision = store.revision().unwrap();
+        let activated = store.snapshot_restore_activate(&stage.staging_id,revision,authority.clone()).unwrap();
+        assert!(activated.revision>revision);
+        assert_eq!(store.lww_clock_state().unwrap().writer_id,writer);
+        assert_eq!(store.lww_binding_authority().unwrap(),authority);
+        let verified:i64 = store.connection.query_row("SELECT COUNT(*) FROM message_page_verified_objects",[],|r|r.get(0)).unwrap();
+        assert!(verified>0);
+        assert_eq!(store.materialize(None).unwrap(),expected);
+        drop(store);
+        let mut reopened = PersistentStore::open(directory.path()).unwrap();
+        let replay = reopened.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
+        assert_eq!(replay.revision,activated.revision);
+        assert_eq!(reopened.revision().unwrap(),activated.revision);
+        assert_eq!(reopened.lww_clock_state().unwrap().writer_id,writer);
+        assert_eq!(reopened.materialize(None).unwrap(),expected);
+        assert!(reopened.snapshot_list().unwrap().iter().all(|entry|entry.reason!="pre-restore"));
+    }
 }

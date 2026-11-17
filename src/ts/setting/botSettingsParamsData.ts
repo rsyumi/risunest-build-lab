@@ -6,7 +6,7 @@
  */
 
 import type { SettingItem } from './types';
-import { LLMFlags } from '../model/types';
+import { LLMFlags, resolveClaudeThinkingType } from '../model/types';
 
 /**
  * Basic parameter settings that are always visible
@@ -128,6 +128,8 @@ export const modelSpecificParameterItems: SettingItem[] = [
         type: 'segmented',
         labelKey: 'thinkingType',
         bindKey: 'thinkingType',
+        // Shows the mode the request uses without rewriting the stored value.
+        getValue: (db, ctx) => ctx ? resolveClaudeThinkingType(ctx.modelInfo.flags, db.thinkingType) : db.thinkingType,
         condition: (ctx) =>
             ctx.modelInfo.flags.includes(LLMFlags.claudeThinking) ||
             ctx.modelInfo.flags.includes(LLMFlags.claudeAdaptiveThinking),
@@ -162,7 +164,7 @@ export const modelSpecificParameterItems: SettingItem[] = [
         bindKey: 'thinkingTokens',
         condition: (ctx) =>
             ctx.modelInfo.parameters.includes('thinking_tokens') &&
-            ctx.db.thinkingType === 'budget',
+            resolveClaudeThinkingType(ctx.modelInfo.flags, ctx.db.thinkingType) === 'budget',
         options: {
             min: -1,
             max: 64000,
@@ -178,7 +180,7 @@ export const modelSpecificParameterItems: SettingItem[] = [
         bindKey: 'adaptiveThinkingEffort',
         condition: (ctx) =>
             ctx.modelInfo.flags.includes(LLMFlags.claudeAdaptiveThinking) &&
-            ctx.db.thinkingType === 'adaptive',
+            resolveClaudeThinkingType(ctx.modelInfo.flags, ctx.db.thinkingType) === 'adaptive',
         options: {
             segmentOptions: [
                 { value: 'low', label: 'Low' },

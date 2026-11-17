@@ -4,6 +4,7 @@ use super::compatible_projection::{
     pocket_swipes, rewrite_assets, rewrite_plugin, Projector,
 };
 use super::*;
+use crate::persistent_store::author_note;
 use crate::persistent_store::owner_projection::OwnerManifestProjector;
 use crate::persistent_store::{ReadTarget, StoreError};
 use rusqlite::{params, Connection};
@@ -161,6 +162,14 @@ fn export_compatible_local_backup_with_limit(
                 .entries
                 .iter()
                 .map(|entry| entry.logical_name.clone())
+                .collect(),
+        );
+        projector.set_source_assets(
+            inventory
+                .assets
+                .iter()
+                .filter(|alias| alias.kind == "asset")
+                .map(|alias| alias.key.clone())
                 .collect(),
         );
         let database = owned_directory.join("compatible-database.risudat");
@@ -439,6 +448,7 @@ fn write_database(
             )
             .map_err(sql)?,
     )?;
+    let author_notes = author_note::preset_texts(&root);
     export::derive_identity_root(connection, generation, object(&mut root)?)
         .map_err(store_job_error)?;
     owner
@@ -457,7 +467,9 @@ fn write_database(
     let root = projector.project("DataBase", &root)?;
     let mut file = File::create(path).map_err(io_job_error)?;
     file.write_all(COMPRESSED_MAGIC).map_err(io_job_error)?;
-    let mut writer = DecodedSizeWriter { inner: GzEncoder::new(file, Compression::default()), bytes: 0, limit: max_decoded_bytes };
+    // MessagePack values arrive token by token; the buffer spares the encoder one deflate call each.
+    let encoder = io::BufWriter::with_capacity(64 * 1024, GzEncoder::new(file, Compression::default()));
+    let mut writer = DecodedSizeWriter { inner: encoder, bytes: 0, limit: max_decoded_bytes };
     map_header(&mut writer, root.as_object().unwrap().len() as u64 + 3)?;
     write_pairs(&mut writer, &root)?;
     string(&mut writer, "characters")?;
@@ -480,7 +492,10 @@ fn write_database(
         object(&mut character)?.remove("chats");
         rewrite_assets(&mut character, assets);
         rewrite_references(&mut character, inlays, false);
-        let character = projector.project("character", &character)?;
+        let character_owner = FailureOwner { kind: "character", name: name_of(&character), character: None };
+        let character = projector
+            .project("character", &character)
+            .map_err(|error| error.owned_by(&character_owner))?;
         let chats = count(
             connection,
             "SELECT count(*) FROM conversations WHERE generation=?1 AND character_id=?2",
@@ -498,10 +513,16 @@ fn write_database(
             let before = projector.losses.0.clone();
             let chat_id: String = row.get(0).map_err(sql)?;
             let mut chat = parse(row.get(1).map_err(sql)?)?;
+            author_note::materialize(&mut chat, &author_notes);
             let recovery = object(&mut chat)?.remove("rerollRecovery");
             object(&mut chat)?.remove("message");
             rewrite_references(&mut chat, inlays, false);
-            let chat = projector.project("Chat", &chat)?;
+            let chat_owner = FailureOwner {
+                kind: "chat",
+                name: name_of(&chat),
+                character: Some(character_owner.name.clone()),
+            };
+            let chat = projector.project("Chat", &chat).map_err(|error| error.owned_by(&chat_owner))?;
             map_header(&mut writer, chat.as_object().unwrap().len() as u64 + 1)?;
             write_pairs(&mut writer, &chat)?;
             string(&mut writer, "message")?;
@@ -513,6 +534,7 @@ fn write_database(
                 recovery.as_ref(),
                 projector,
                 inlays,
+                &chat_owner,
                 &mut writer,
                 cancel,
             )?;
@@ -538,7 +560,9 @@ fn write_database(
         check_cancelled(cancel).map_err(local_backup_error)?;
         let mut value = parse(row.get(0).map_err(sql)?)?;
         rewrite_assets(&mut value, assets);
-        write_value(&mut writer, &projector.project("botPreset", &value)?)?;
+        let preset_owner = FailureOwner { kind: "preset", name: name_of(&value), character: None };
+        let value = projector.project("botPreset", &value).map_err(|error| error.owned_by(&preset_owner))?;
+        write_value(&mut writer, &value)?;
         actual += 1;
     }
     if actual != preset_count {
@@ -578,7 +602,8 @@ fn write_database(
             "plugin cursor count changed",
         ));
     }
-    let file = writer.inner.finish().map_err(io_job_error)?;
+    let encoder = writer.inner.into_inner().map_err(|error| io_job_error(error.into_error()))?;
+    let file = encoder.finish().map_err(io_job_error)?;
     file.sync_all().map_err(io_job_error)?;
     if file.metadata().map_err(io_job_error)?.len() > u32::MAX as u64 {
         return Err(NativeJobError::too_large(
@@ -589,6 +614,10 @@ fn write_database(
     Ok((ids.len() as u64, preset_count, conversations))
 }
 
+
+fn name_of(value: &Value) -> String {
+    value.get("name").and_then(Value::as_str).unwrap_or_default().to_owned()
+}
 
 fn each_message(
     connection: &Connection,
@@ -616,6 +645,7 @@ fn write_messages(
     recovery: Option<&Value>,
     projector: &mut Projector,
     inlays: &HashMap<String, String>,
+    owner: &FailureOwner,
     writer: &mut dyn Write,
     cancel: &dyn CancellationProbe,
 ) -> Result<(), NativeJobError> {
@@ -631,7 +661,8 @@ fn write_messages(
                 projector.losses.add("unsupported-reroll-candidates", 1)
             }
             rewrite_references(&mut value, inlays, true);
-            write_value(writer, &projector.project("Message", &value)?)
+            let value = projector.project("Message", &value).map_err(|error| error.owned_by(owner))?;
+            write_value(writer, &value)
         })?;
         if actual as u64 != total {
             return Err(NativeJobError::new(
@@ -696,7 +727,8 @@ fn write_messages(
             projector.losses.add("unsupported-reroll-candidates", 1)
         }
         rewrite_references(&mut value, inlays, true);
-        write_value(writer, &projector.project("Message", &value)?)?;
+        let value = projector.project("Message", &value).map_err(|error| error.owned_by(owner))?;
+        write_value(writer, &value)?;
         written += 1;
         Ok(())
     };
@@ -1007,7 +1039,7 @@ mod tests {
                             inlay_type: Some("image".into()),
                             width: Some(1),
                             height: Some(1),
-                            metadata: json!({}),
+                            metadata: json!({"createdAt":123,"charId":"synthetic","chatId":"chat"}),
                         },
                         AssetAlias {
                             key: "assets/nested/icon.webp".into(),
@@ -1025,7 +1057,7 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","second"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"second"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
+            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","second"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"second"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"authorNotePresets":[{"id":"note-preset","name":"Shared","text":"Shared note"}],"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
             root["hypaModel"] = json!("voyageContext4");
             root["pluginCustomStorage"] = json!({"10":null,"2":true,"01":"leading zero","z":{"exact":"assets/nested/icon.webp","opaque":"prefix assets/nested/icon.webp suffix","large":"큰".repeat(65536)},"4294967295":9007199254740991u64});
             store.replace_put_upstream_root(&staging, &root).unwrap();
@@ -1036,7 +1068,8 @@ mod tests {
                 )
                 .unwrap();
             let message = json!({"role":"char","data":"현재 한국어 {{inlay::synthetic}}","chatId":"message","unknownMessage":true,"responseVariants":{"groupId":"message","selectedId":"selected","candidates":[{"id":"other","messages":[{"role":"char","data":"alternative"}]},{"id":"complex","messages":[{"role":"char","data":"one"},{"role":"char","data":"two"}]},{"id":"selected","messages":[{"role":"char","data":"stale selected"}]}]}});
-            store.replace_add_characters(&staging,&[json!({"chaId":"synthetic","type":"character","name":"Synthetic","additionalAssets":[["Synthetic owner image","assets/prior-owner.png","png"]],"chats":[{"id":"chat","name":"Chat","message":[message,{"role":"user","data":"followup"}],"savedToggleValues":{"test":"1"},"unknownChat":true}]}),json!({"chaId":"second","type":"character","name":"Synthetic Second","chats":[]})]).unwrap();
+            let note_link = json!({"id":"note-preset","fingerprint":author_note::fingerprint("stale copy")});
+            store.replace_add_characters(&staging,&[json!({"chaId":"synthetic","type":"character","name":"Synthetic","additionalAssets":[["Synthetic owner image","assets/prior-owner.png","png"]],"chats":[{"id":"chat","name":"Chat","message":[message,{"role":"user","data":"followup"}],"savedToggleValues":{"test":"1"},"note":"stale copy","authorNotePreset":note_link,"unknownChat":true}]}),json!({"chaId":"second","type":"character","name":"Synthetic Second","chats":[]})]).unwrap();
             store.replace_add_characters(&staging, &[
                 json!({"chaId":"archived-one","type":"character","name":"Archived","chats":[]}),
                 json!({"chaId":"archived-two","type":"character","name":"Archived second","chats":[]}),
@@ -1209,8 +1242,12 @@ mod tests {
             assert!(db.get("unknownRoot").is_none());
             assert!(db.get("risunestInlayMode").is_none());
             let chat = &db["characters"][0]["chats"][0];
+            assert_eq!(db["characters"][0]["chaId"], "synthetic");
+            assert_eq!(chat["id"], "chat");
             assert_eq!(chat["message"].as_array().unwrap().len(), 2);
             assert!(chat.get("unknownChat").is_none());
+            assert_eq!(chat["note"], "Shared note");
+            assert!(chat.get("authorNotePreset").is_none());
             let message = &chat["message"][0];
             assert_eq!(message["data"], "현재 한국어 {{inlay::synthetic}}");
             assert!(message.get("responseVariants").is_none());
@@ -1224,6 +1261,7 @@ mod tests {
                 );
                 assert_eq!(message["swipeId"], 1);
                 assert_eq!(chat["savedToggleValues"], json!({"test":"1"}));
+                assert_eq!(report.converted.iter().find(|item| item.code == "converted-inlay-provenance").unwrap().items, "1");
             } else {
                 assert_eq!(db["characters"].as_array().unwrap().len(), 2);
                 assert!(message.get("swipes").is_none());
@@ -1288,6 +1326,61 @@ mod tests {
     }
 
     #[test]
+    fn compatible_export_names_the_item_whose_value_the_target_rejects() {
+        fn rejection(root: &Value, presets: &[Value], characters: &[Value]) -> NativeJobError {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            let staging = store.replace_begin().unwrap().staging_id;
+            store.replace_put_upstream_root(&staging, root).unwrap();
+            store.replace_put_upstream_presets(&staging, presets).unwrap();
+            store.replace_add_characters(&staging, characters).unwrap();
+            let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
+            let owned = directory.path().join("owned");
+            let handoff = directory.path().join("handoff");
+            std::fs::create_dir(&owned).unwrap();
+            std::fs::create_dir(&handoff).unwrap();
+            let job = JobRegistry::default().create(JobKind::ExportCompatibleLocalBackup).unwrap();
+            let output = directory.path().join("export.bin");
+            export_compatible_local_backup(CompatibilityTarget::RisuAi, Some(&output), revision, &owned, &handoff, store, &job)
+                .unwrap_err()
+        }
+        let owner = |kind, name: &str, character: Option<&str>| {
+            Some(FailureOwner { kind, name: name.into(), character: character.map(Into::into) })
+        };
+        let lore = json!({"key":"","secondkey":"","comment":"","content":"","mode":"normal","alwaysActive":false,"selective":false,"insertorder":"first"});
+        let root = json!({"modules":[],"personas":[]});
+        let character = |fields: Value| {
+            let mut character = json!({"chaId":"synthetic","type":"character","name":"Synthetic","chats":[]});
+            character.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            character
+        };
+        let chat = |fields: Value| {
+            let mut chat = json!({"id":"chat","name":"Synthetic chat","message":[]});
+            chat.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            character(json!({"chats":[chat]}))
+        };
+        let cases = [
+            (json!({"modules":[{"id":"module","name":"Synthetic module","description":7}],"personas":[]}), vec![], vec![],
+                owner("module", "Synthetic module", None)),
+            (json!({"modules":[],"personas":[{"name":"Synthetic persona","icon":"","personaPrompt":7}]}), vec![], vec![],
+                owner("persona", "Synthetic persona", None)),
+            // The selected preset is also the root's settings, so the rejected one is another.
+            (root.clone(), vec![json!({"name":"Selected"}), json!({"name":"Synthetic preset","temperature":"hot"})], vec![],
+                owner("preset", "Synthetic preset", None)),
+            (root.clone(), vec![], vec![character(json!({"globalLore":[lore]}))], owner("character", "Synthetic", None)),
+            (root.clone(), vec![], vec![chat(json!({"localLore":[lore]}))], owner("chat", "Synthetic chat", Some("Synthetic"))),
+            (root.clone(), vec![], vec![chat(json!({"message":[{"role":5,"data":""}]}))],
+                owner("chat", "Synthetic chat", Some("Synthetic"))),
+            (json!({"modules":[],"personas":[],"mainPrompt":7}), vec![], vec![], None),
+        ];
+        for (root, presets, characters, expected) in cases {
+            let error = rejection(&root, &presets, &characters);
+            assert_eq!(error.code, "unsupported-projection", "{}", error.message);
+            assert_eq!(error.owner, expected, "{}", error.message);
+        }
+    }
+
+    #[test]
     fn compatible_interrupted_reroll_restores_original_and_retains_independent_edits() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch("CREATE TABLE messages(generation TEXT,character_id TEXT,conversation_id TEXT,message_index INTEGER,value TEXT)").unwrap();
@@ -1316,6 +1409,7 @@ mod tests {
             Some(&recovery),
             &mut projector,
             &HashMap::new(),
+            &FailureOwner { kind: "chat", name: "Synthetic chat".into(), character: None },
             &mut bytes,
             &crate::local_backup::NeverCancelled,
         )

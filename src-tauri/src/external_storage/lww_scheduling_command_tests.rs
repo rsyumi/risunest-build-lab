@@ -33,11 +33,22 @@ fn removed_connection_invalidates_inflight_cache_and_cancellation() {
 }
 
 #[test]
-fn expired_routine_admission_renews_once_at_entry_and_rejects_fresh_clock_skew() {
-    for skewed in [false, true] {
+fn invalid_routine_admission_refreshes_once_and_preserves_clock_failure_details() {
+    for (phase, corrected, reason) in [("entry", false, None), ("entry", true, None),
+        ("entry", false, Some("server-offset")), ("entry", false, Some("date-missing")),
+        ("entry", false, Some("date-invalid")), ("entry", false, Some("sample-cached")),
+        ("publish", false, None), ("publish", false, Some("date-missing")),
+        ("receive", false, None), ("receive", false, Some("date-missing"))] {
         tauri::async_runtime::block_on(async move {
             use crate::external_storage::{fake, lww_engine::Admission, lww_tests::CycleFixture, providers::webdav, wire_fixture::{Reply, WireServer}};
-            let fixture = CycleFixture::new();
+            use std::sync::atomic::{AtomicI64, Ordering};
+            struct AdjustableClock(AtomicI64);
+            impl crate::external_storage::http::Clock for AdjustableClock {
+                fn now_ms(&self) -> u64 {
+                    (runtime::now_ms() as i64 + self.0.load(Ordering::SeqCst)) as u64
+                }
+            }
+            let mut fixture = CycleFixture::new();
             let now = runtime::now_ms();
             let listing = |offset: u64, entries: &[&str]| Reply::Http {
                 status: 207,
@@ -46,40 +57,98 @@ fn expired_routine_admission_renews_once_at_entry_and_rejects_fresh_clock_skew()
                 body: format!("<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\">{}</D:multistatus>",
                     entries.iter().map(|href| format!("<D:response><D:href>{href}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")).collect::<String>()).into_bytes(),
             };
-            let server = WireServer::start(vec![
-                listing(0, &["/synthetic/sync/", "/synthetic/sync/descriptors/"]),
-                listing(if skewed { 20 * 60_000 } else { 0 }, &["/synthetic/sync/segments/"]),
-            ]);
+            let mut refreshed = listing(if reason == Some("server-offset") { 20 * 60_000 } else { 0 },
+                &["/synthetic/sync/segments/"]);
+            if let Reply::Http { headers, .. } = &mut refreshed {
+                match reason {
+                    Some("date-missing") => headers.retain(|(name, _)| name != "Date"),
+                    Some("date-invalid") => {
+                        headers.iter_mut().find(|(name, _)| name == "Date").unwrap().1 = "synthetic-private-header".into();
+                    }
+                    Some("sample-cached") => headers.push(("Age".into(), "12".into())),
+                    _ => {}
+                }
+            }
+            let mut replies = vec![listing(0, &["/synthetic/sync/", "/synthetic/sync/descriptors/"])];
+            if phase == "receive" {
+                replies.extend([listing(0, &["/synthetic/sync/snapshots/"]), listing(0, &["/synthetic/sync/segments/"])]);
+            }
+            replies.push(refreshed);
+            if phase == "receive" && reason.is_none() {
+                replies.extend([listing(0, &["/synthetic/sync/snapshots/"]), listing(0, &["/synthetic/sync/segments/"])]);
+            }
+            let server = WireServer::start(replies);
             let mut dependencies = fake::loopback_dependencies(fake::MemoryVault::with("synthetic", b"password"), now);
-            // Admission compares wall time with elapsed real time, including under parallel test load.
-            dependencies.dependencies.clock = Arc::new(crate::external_storage::http::SystemClock);
+            let clock = Arc::new(AdjustableClock(AtomicI64::new(if corrected { -6000 } else { 0 })));
+            dependencies.dependencies.clock = clock.clone();
             let provider = webdav::create(dependencies.dependencies.clone()).unwrap();
             let config = ConnectionConfig { provider: "webdav".into(), profile: None,
                 endpoint: server.url.as_str().into(), account_id: "synthetic".into(),
                 location: BTreeMap::from([("root".into(), "sync".into())]), oauth_profile: None };
+            let before_open = Instant::now();
             let (repository, _) = provider.open_repository(&config, &SecretRef("synthetic".into()), OpenMode::Existing, &Cancellation::default()).await.unwrap();
+            clock.0.store(0, Ordering::SeqCst);
             let mut engine = fixture.receiver;
             engine.provider = provider;
             engine.repository = repository;
             let mut admission = Admission::synthetic(runtime::now_ms());
-            admission.age_for_test(std::time::Duration::from_secs(16 * 60));
+            if phase == "entry" { admission.age_for_test(std::time::Duration::from_secs(16 * 60)); }
             engine.admission = Some(admission);
-            assert_eq!(engine.admitted_upper().unwrap_err().kind, ErrorKind::ClockSkew);
+            if phase == "entry" { assert_eq!(engine.admitted_upper().unwrap_err().kind, ErrorKind::ClockSkew); }
             let mut session = Session::new();
             session.engine = Some(engine);
             session.dependencies = Some(dependencies.dependencies);
-            session.fresh_after = Instant::now();
-            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-            let result = admit_clock(&mut session).await;
-            if skewed {
-                assert_eq!(result.unwrap_err().kind, ErrorKind::ClockSkew);
+            // A recent cached sample must also survive validation against the current wall clock.
+            session.fresh_after = if corrected { before_open } else { Instant::now() };
+            let result = if phase == "entry" {
+                admit_clock(&mut session).await
+            } else {
+                admit_clock(&mut session).await.unwrap();
+                assert!(!session.clock_refresh_attempted);
+                let held = super::super::clock::future_change("receive", now + 600_000, now);
+                assert_eq!(retry_clock_failure(&mut session, held.clone()).await.unwrap_err().cause.0, held.cause.0);
+                assert!(!session.clock_refresh_attempted, "a future stamp does not invalidate a valid admission");
+                session.engine.as_mut().unwrap().admission.as_mut().unwrap()
+                    .age_for_test(std::time::Duration::from_secs(16 * 60));
+                if phase == "publish" {
+                    let published = publish_round(&mut session, &mut fixture.b, 0.into(), &[], Some(1)).await;
+                    published.map(|value| assert_eq!(value.segments.0, 0))
+                } else {
+                    let page = receive_page(&mut fixture.b, &mut session, &Default::default(), 0.into(), false).await;
+                    page.map(|value| assert!(value.0.is_none()))
+                }
+            };
+            if let Some(reason) = reason {
+                let error = crate::native_log::logged::<(), _>("synthetic-clock-refresh", result).unwrap_err();
+                assert_eq!(error.kind, ErrorKind::ClockSkew);
+                let detail = error.cause.0.as_deref().unwrap();
+                assert!(detail.contains(&format!("stage=sample reason={reason}")), "{detail}");
+                assert!(detail.contains("refresh_attempted=true"));
+                for (value, code_key) in [(serde_json::to_value(&error).unwrap(), "kind"), (runtime::error_dto(&error), "code")] {
+                    assert_eq!(value[code_key], "clockSkew");
+                    assert_eq!(value["detail"], detail);
+                }
+                let entry = crate::native_log::global_state().tail(None).into_iter().rev()
+                    .find(|entry| entry.message.starts_with("synthetic-clock-refresh failed:")).unwrap();
+                assert!(entry.message.contains("code=clockSkew"));
+                assert!(entry.message.contains(detail));
+                assert!(!entry.message.contains("synthetic-private-header"));
                 assert!(session.engine.as_ref().unwrap().admitted_upper().is_err());
+                assert!(session.engine.as_ref().unwrap().admission.is_none());
             } else {
                 result.unwrap();
                 assert!(session.engine.as_ref().unwrap().admitted_upper().is_ok());
                 admit_clock(&mut session).await.unwrap();
+                let requests_before = server.requests.lock().unwrap().len();
+                session.engine.as_mut().unwrap().admission.as_mut().unwrap()
+                    .age_for_test(std::time::Duration::from_secs(16 * 60));
+                let expired = session.engine.as_ref().unwrap().admitted_upper().unwrap_err();
+                let error = retry_clock_failure(&mut session, expired).await.unwrap_err();
+                assert!(error.cause.0.unwrap().contains("reason=sample-expired"));
+                assert_eq!(server.requests.lock().unwrap().len(), requests_before,
+                    "entry and continuation share a single refresh budget");
             }
-            assert_eq!(server.requests.lock().unwrap().len(), 2);
+            if phase != "receive" { assert_eq!(server.requests.lock().unwrap().len(), 2); }
         });
     }
 }

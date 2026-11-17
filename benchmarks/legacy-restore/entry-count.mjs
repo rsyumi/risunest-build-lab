@@ -59,14 +59,23 @@ export async function measureEntryCount({ count, directory, evaluate, memory, sa
   } });
   let finalized = false;
   let status;
+  // Samples grouped by the job stage reported just before each sample.
+  result.stages = {};
   do {
     status = await invoke('native_file_job_status', { jobId: job.jobId });
     const sample = await memory();
+    const elapsedMs = Date.now() - started;
+    const stageName = `${status.phase}/${status.detail?.stage ?? 'none'}`;
+    const stage = result.stages[stageName] ??= { samples: 0, nativeMaxBytes: 0, firstElapsedMs: elapsedMs };
+    stage.samples++;
+    stage.nativeMaxBytes = Math.max(stage.nativeMaxBytes, sample.nativeWorkingSetBytes);
+    stage.lastElapsedMs = elapsedMs;
+    if (sample.nativePeakWorkingSetBytes > result.nativePeakBytes) result.nativePeakStage = stageName;
     result.nativeMaxBytes = Math.max(result.nativeMaxBytes, sample.nativeWorkingSetBytes);
     result.nativePeakBytes = Math.max(result.nativePeakBytes, sample.nativePeakWorkingSetBytes);
     result.rendererMaxBytes = Math.max(result.rendererMaxBytes, sample.usedBytes);
     result.phase = status.phase;
-    result.elapsedMs = Date.now() - started;
+    result.elapsedMs = elapsedMs;
     await save(result);
     if (status.phase === 'awaiting-activation' && !finalized) {
       await invoke('native_file_job_finalize', { jobId: job.jobId, expectedRevision: opened.revision });

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const startup = vi.hoisted(() => ({ cacheBudget: 0 }));
@@ -86,4 +87,32 @@ describe("application startup performance profile", () => {
     expect(window).not.toHaveProperty("__streamingSmoke");
     expect(window).not.toHaveProperty("__RISUNEST_TOKENIZER_BENCHMARK__");
   }, 30_000);
+});
+
+describe("startup document", () => {
+  it("does not hold first paint or the entry script on a third-party stylesheet", () => {
+    // A parser-inserted stylesheet for screen blocks rendering and module scripts until it
+    // answers, and a slow or blocked network can hold a remote one for many seconds.
+    // Parsed as text: a DOM parser in the test environment would fetch the stylesheet.
+    const links = [
+      ...readFileSync("index.html", "utf8").matchAll(/<link\b[^>]*>/g),
+    ].map(([tag]) =>
+      Object.fromEntries(
+        [...tag.matchAll(/([\w-]+)="([^"]*)"/g)].map(([, name, value]) => [
+          name,
+          value,
+        ]),
+      ),
+    );
+    const remote = links.filter(
+      (link) =>
+        link.rel?.split(/\s+/).includes("stylesheet") &&
+        /^(https?:)?\/\//.test(link.href ?? ""),
+    );
+
+    for (const link of remote) {
+      expect(link.media).toBe("print");
+      expect(link.onload).toBe("this.media='all'");
+    }
+  });
 });

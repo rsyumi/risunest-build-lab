@@ -1,17 +1,19 @@
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
     defineConfig,
     mergeConfig,
+    normalizePath,
     type ConfigEnv,
     type Plugin,
     type UserConfig,
 } from 'vite'
 import mainConfigDefinition from '../../vite.config'
 
-const BASELINE_REVISION = '793930f17731547c7e9f2fe7bf0be6f6a5bbd462'
+const BASELINE_REVISION = 'd6d9ba9411c7ed2ed3b4829f4616a458321dc791'
 const repositoryRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     '..',
@@ -47,22 +49,104 @@ function git(argumentsList: string[]): string {
     )
 }
 
-function baselineSourcePlugin(): Plugin | null {
-    if (sourceMode !== 'baseline') return null
-    const changedSourcePaths = new Set(
-        git(['diff', '--name-only', BASELINE_REVISION, '--', 'src'])
+function gitPathSet(argumentsList: string[]): Set<string> {
+    return new Set(
+        git(argumentsList)
             .split(/\r?\n/)
             .map((value) => value.trim().replaceAll('\\', '/'))
             .filter(Boolean),
     )
-    const cache = new Map<string, string>()
+}
+
+interface BaselineTree {
+    changedSourcePaths: Set<string>
+    baselineSourcePaths: Set<string>
+    cache: Map<string, string>
+}
+
+let baselineTree: BaselineTree | undefined
+
+// The page and every worker bundle share one listing of the baseline tree.
+function readBaselineTree(): BaselineTree {
+    baselineTree ??= {
+        // With rename detection a renamed file is listed only under its new path.
+        changedSourcePaths: gitPathSet([
+            'diff',
+            '--name-only',
+            '--no-renames',
+            BASELINE_REVISION,
+            '--',
+            'src',
+        ]),
+        baselineSourcePaths: gitPathSet([
+            'ls-tree',
+            '-r',
+            '--name-only',
+            BASELINE_REVISION,
+            '--',
+            'src',
+        ]),
+        cache: new Map(),
+    }
+    return baselineTree
+}
+
+function baselineSourcePlugin(): Plugin | null {
+    if (sourceMode !== 'baseline') return null
+    const { changedSourcePaths, baselineSourcePaths, cache } =
+        readBaselineTree()
+    let extensions: string[] = []
     return {
         name: 'risunest-ui-benchmark-baseline-source',
         enforce: 'pre',
+        configResolved(config) {
+            extensions = config.resolve.extensions
+        },
+        // The default resolver only sees the working tree, so a baseline import
+        // of a file that was deleted or renamed since then does not resolve.
+        // Resolve it against the baseline tree, trying candidates in the order
+        // Vite does, and let `load` serve the baseline contents.
+        resolveId: {
+            filter: { id: /^(?:\.{1,2}\/|\/?src\/)/ },
+            handler(source, importer) {
+                const queryIndex = source.indexOf('?')
+                const specifier =
+                    queryIndex === -1 ? source : source.slice(0, queryIndex)
+                const query = queryIndex === -1 ? '' : source.slice(queryIndex)
+                let target: string
+                if (specifier.startsWith('.')) {
+                    if (!importer) return null
+                    target = path.resolve(
+                        path.dirname(importer.split('?', 1)[0]),
+                        specifier,
+                    )
+                } else {
+                    target = path.join(repositoryRoot, specifier)
+                }
+                const relativeTarget = path
+                    .relative(repositoryRoot, target)
+                    .replaceAll('\\', '/')
+                const match = [
+                    relativeTarget,
+                    ...extensions.map(
+                        (extension) => `${relativeTarget}${extension}`,
+                    ),
+                    ...extensions.map(
+                        (extension) => `${relativeTarget}/index${extension}`,
+                    ),
+                ].find((candidate) => baselineSourcePaths.has(candidate))
+                if (!match) return null
+                const matchPath = path.join(repositoryRoot, match)
+                if (existsSync(matchPath)) return null
+                return `${normalizePath(matchPath)}${query}`
+            },
+        },
         load(id) {
-            const cleanId = id.split('?', 1)[0]
+            // An id with a query is a module derived from the file, such as a
+            // Svelte component's styles, and its own plugin builds it.
+            if (id.includes('?')) return null
             const relativePath = path
-                .relative(repositoryRoot, cleanId)
+                .relative(repositoryRoot, id)
                 .replaceAll('\\', '/')
             if (!changedSourcePaths.has(relativePath)) return null
             let source = cache.get(relativePath)
@@ -92,6 +176,9 @@ export default defineConfig(async () =>
         root: repositoryRoot,
         publicDir: false,
         plugins: [baselineSourcePlugin()],
+        // Workers are bundled through their own plugin list, which the page's
+        // plugins do not reach.
+        worker: { plugins: () => [baselineSourcePlugin()] },
         build: {
             outDir: outputDirectory,
             emptyOutDir: true,

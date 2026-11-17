@@ -1,6 +1,7 @@
 //! Target attachment materialization. Only verified, job-owned files reach the writer.
 use super::*;
-use crate::server_sync::residency::RemotePayloadAccess;
+use crate::native_file_jobs::available_payload::{available_payload_size, open_available_payload};
+use crate::native_file_jobs::error::asset_missing;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -130,12 +131,8 @@ fn read_owner_manifest(
     if expected_size > MAX_OWNER_MANIFEST_BYTES {
         return Err(NativeJobError::too_large("owner-manifest", "owner manifest exceeds the decode limit"));
     }
-    let file = cas
-        .open_available_object(hash)
-        .map_err(io_job_error)?
-        .ok_or_else(|| {
-            NativeJobError::new("invalid-source", "legacy backup owner manifest is missing")
-        })?;
+    let file = open_available_payload(cas, hash, cancellation, io_job_error)?
+        .ok_or_else(|| asset_missing("legacy backup owner manifest is missing"))?;
     let mut bytes = Vec::with_capacity(expected_size as usize);
     CancellationReader::new(file, cancellation)
         .take(MAX_OWNER_MANIFEST_BYTES + 1)
@@ -226,7 +223,8 @@ fn allocate_asset_name(key: &str, extension: &str, used: &mut HashSet<String>) -
     }
 }
 
-/// Pins then streams into a private file, checking the exact hash and length.
+/// Downloads a body only the Sync server holds, pins it, then streams it into a
+/// private file, checking the exact hash and length.
 fn copy_verified(
     cas: &PayloadCas,
     pins: &mut DurableCasJob,
@@ -241,12 +239,10 @@ fn copy_verified(
         ));
     }
     check_cancelled(cancellation).map_err(local_backup_error)?;
+    let mut source = open_available_payload(cas, hash, cancellation, io_job_error)?
+        .ok_or_else(|| asset_missing("attachment object is missing"))?;
     pins.pin_existing(cas, hash, expected, role)
         .map_err(io_job_error)?;
-    let mut source = cas
-        .open_available_object(hash)
-        .map_err(io_job_error)?
-        .ok_or_else(|| invalid_source("attachment object is missing"))?;
     let mut output = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -271,41 +267,41 @@ fn copy_verified(
     if bytes != expected || hex::encode(digest.finalize()) != hash {
         return Err(invalid_source("attachment object hash or length mismatch"));
     }
-    output.sync_all().map_err(io_job_error)
+    // Staging files live only for this job and are discarded on restart; the finished
+    // archive and its destination copy are synced instead.
+    Ok(())
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), NativeJobError> {
-    let mut file = std::fs::OpenOptions::new()
+    let bytes = serde_json::to_vec(value)
+        .map_err(|_| invalid_source("attachment metadata cannot be serialized"))?;
+    std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)
-        .map_err(io_job_error)?;
-    serde_json::to_writer(&mut file, value)
-        .map_err(|_| invalid_source("attachment metadata cannot be serialized"))?;
-    file.sync_all().map_err(io_job_error)
+        .and_then(|mut file| file.write_all(&bytes))
+        .map_err(io_job_error)
 }
 
 fn provenance(alias: &AssetAlias) -> Option<Value> {
-    let source = alias.metadata.get("pocketRisu")?.as_object()?;
     let mut result = Map::new();
-    for key in ["createdAt", "updatedAt"] {
-        if let Some(value) = source
-            .get(key)
-            .filter(|v| v.as_f64().is_some_and(|n| n >= 0.0))
-        {
+    let pocket = &alias.metadata["pocketRisu"];
+    for key in ["createdAt", "charId", "chatId"] {
+        let valid = |v: &&Value| if key == "createdAt" {
+            v.as_f64().is_some_and(|n| n > 0.0)
+        } else { v.is_string() };
+        if let Some(value) = alias.metadata.get(key).filter(valid)
+            .or_else(|| pocket.get(key).filter(valid)) {
             result.insert(key.to_owned(), value.clone());
         }
     }
-    for key in ["charId", "chatId"] {
-        if let Some(value) = source.get(key).filter(|v| v.is_string()) {
-            result.insert(key.to_owned(), value.clone());
-        }
+    if !result.contains_key("createdAt") && pocket.get("createdAt").is_some_and(|v| v.as_f64() == Some(0.0)) {
+        result.insert("createdAt".to_owned(), pocket["createdAt"].clone());
     }
-    if result.is_empty() {
-        None
-    } else {
-        Some(Value::Object(result))
+    if let Some(value) = pocket.get("updatedAt").filter(|v| v.as_f64().is_some_and(|n| n >= 0.0)) {
+        result.insert("updatedAt".to_owned(), value.clone());
     }
+    if result.is_empty() { None } else { Some(Value::Object(result)) }
 }
 
 pub(super) fn prepare(
@@ -511,10 +507,8 @@ pub(super) fn prepare(
             .manifest_hash
             .as_deref()
             .ok_or_else(|| invalid_source("owner manifest hash is missing"))?;
-        let size = cas
-            .stat_available_object(hash)
-            .map_err(io_job_error)?
-            .ok_or_else(|| invalid_source("owner manifest is missing"))?;
+        let size = available_payload_size(cas, hash, cancellation, io_job_error)?
+            .ok_or_else(|| asset_missing("owner manifest is missing"))?;
         if size > MAX_OWNER_MANIFEST_BYTES {
             return Err(NativeJobError::too_large("owner-manifest", "owner manifest exceeds the decode limit"));
         }
@@ -543,10 +537,8 @@ pub(super) fn prepare(
                 let name = allocate_asset_name(&format!("owner:{hash}"), &ext, &mut names);
                 let path =
                     owned_directory.join(format!("compatible-owner-{}.entry", payload_keys.len()));
-                let size = cas
-                    .stat_available_object(&hash)
-                    .map_err(io_job_error)?
-                    .ok_or_else(|| invalid_source("owner attachment object is missing"))?;
+                let size = available_payload_size(cas, &hash, cancellation, io_job_error)?
+                    .ok_or_else(|| asset_missing("owner attachment object is missing"))?;
                 copy_verified(cas, pins, &hash, size, role(&hash), &path, cancellation)?;
                 result.preserved_files += 1;
                 result.preserved_bytes = result.preserved_bytes.saturating_add(size);
@@ -566,10 +558,8 @@ pub(super) fn prepare(
                 && !supported_image_extension(&entry.tuple[2])
                 && unverified_owner_payloads.insert(hash.clone())
             {
-                let size = cas
-                    .stat_available_object(&hash)
-                    .map_err(io_job_error)?
-                    .ok_or_else(|| invalid_source("owner attachment object is missing"))?;
+                let size = available_payload_size(cas, &hash, cancellation, io_job_error)?
+                    .ok_or_else(|| asset_missing("owner attachment object is missing"))?;
                 loss(&mut result, "asset-playback-unverified", size);
             }
             keys.push(key);
@@ -815,12 +805,12 @@ pub(super) fn count_affected_conversations(
         .iter()
         .filter(|alias| alias.kind == "inlay")
     {
-        let metadata = alias.metadata.get("pocketRisu");
+        let metadata = provenance(alias);
         if let (Some(character), Some(chat), Some(codes)) = (
-            metadata
+            metadata.as_ref()
                 .and_then(|value| value.get("charId"))
                 .and_then(Value::as_str),
-            metadata
+            metadata.as_ref()
                 .and_then(|value| value.get("chatId"))
                 .and_then(Value::as_str),
             index.inlays.get(&alias.key),
@@ -1003,7 +993,7 @@ mod tests {
             inlay_type: (kind == "inlay").then(|| "image".to_owned()),
             width: Some(1),
             height: Some(1),
-            metadata: serde_json::json!({"pocketRisu":{"createdAt":123,"charId":"synthetic-character","unsupported":"discard"}}),
+            metadata: serde_json::json!({"pocketRisu":{"createdAt":123,"updatedAt":124,"charId":"synthetic-character","chatId":"synthetic-chat","unsupported":"discard"}}),
         }
     }
 
@@ -1121,7 +1111,7 @@ mod tests {
                         .unwrap();
                 assert_eq!(
                     meta,
-                    serde_json::json!({"createdAt":123,"charId":"synthetic-character"})
+                    serde_json::json!({"createdAt":123,"updatedAt":124,"charId":"synthetic-character","chatId":"synthetic-chat"})
                 );
                 assert!(!result
                     .entries
@@ -1132,6 +1122,50 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provenance_survives_export_and_reimport_with_per_field_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(root.path()).unwrap();
+        let cases = [
+            (serde_json::json!({"createdAt":456,"charId":"nest-character","chatId":"nest-chat"}),
+             serde_json::json!({"createdAt":456,"charId":"nest-character","chatId":"nest-chat"})),
+            (serde_json::json!({"pocketRisu":{"createdAt":123,"updatedAt":124,"charId":"pocket-character","chatId":"pocket-chat"}}),
+             serde_json::json!({"createdAt":123,"updatedAt":124,"charId":"pocket-character","chatId":"pocket-chat"})),
+            (serde_json::json!({"createdAt":456,"charId":"nest-character","pocketRisu":{"createdAt":123,"updatedAt":124,"charId":"pocket-character","chatId":"pocket-chat"}}),
+             serde_json::json!({"createdAt":456,"updatedAt":124,"charId":"nest-character","chatId":"pocket-chat"})),
+            (serde_json::json!({"pocketRisu":{"createdAt":0,"updatedAt":0,"charId":"pocket-character","chatId":"pocket-chat"}}),
+             serde_json::json!({"createdAt":0,"updatedAt":0,"charId":"pocket-character","chatId":"pocket-chat"})),
+        ];
+        for (index, (metadata, expected)) in cases.into_iter().enumerate() {
+            let mut alias = synthetic_alias(&cas, "remapped/inlay", "inlay", b"synthetic image");
+            alias.metadata = metadata;
+            let inventory = export::PinnedLegacyBackupInventory { revision: 1, assets: vec![alias], owner_heads: vec![] };
+            let output = root.path().join(index.to_string());
+            std::fs::create_dir(&output).unwrap();
+            let mut pins = DurableCasJob::begin(
+                root.path(), &Uuid::new_v4().to_string(), CasJobKind::OfficialPublicationOrExportPreparation,
+                crate::asset_repository::job_pins::CasJobOwner::for_test(), 0,
+            ).unwrap();
+            let prepared = prepare(CompatibilityTarget::PocketRisu, &output, &cas, &inventory, &mut pins, &crate::local_backup::NeverCancelled).unwrap();
+            let id = &prepared.inlay_replacements["remapped/inlay"];
+            let exported: Value = serde_json::from_slice(&read_entry(&prepared, &format!("inlay_meta/{id}"))).unwrap();
+            assert_eq!(exported, expected);
+            let staged = prepared.entries.iter().map(|entry| {
+                let bytes = read_entry(&prepared, &entry.logical_name);
+                let LegacyBackupWriteSource::File(path) = &entry.source else { panic!("file expected"); };
+                StagedLocalBackupEntry {
+                    logical_name: entry.logical_name.clone(), byte_length: bytes.len() as u64,
+                    sha256: hex::encode(Sha256::digest(&bytes)), staged_path: Some(path.clone()),
+                }
+            }).collect::<Vec<_>>();
+            let metadata = pocket_risu::index_metadata(&staged, &crate::local_backup::NeverCancelled).unwrap();
+            let entry = staged.iter().find(|entry| entry.logical_name == format!("inlay/{id}.png")).unwrap();
+            let restored = pocket_risu::prepare(entry, id, "png", &metadata, &crate::local_backup::NeverCancelled).unwrap().unwrap();
+            assert_eq!(restored.metadata, serde_json::json!({"pocketRisu": expected}));
+            assert_eq!(provenance(&restored), Some(exported));
+        }
     }
 
     #[test]
@@ -1331,7 +1365,7 @@ mod tests {
         let inlay = synthetic_alias(&cas, "bad/id", "inlay", b"synthetic inlay");
         let mut unused = synthetic_alias(&cas, "unused", "inlay", b"unused inlay");
         unused.ext = "mp:3".to_owned();
-        let inventory = export::PinnedLegacyBackupInventory {
+        let mut inventory = export::PinnedLegacyBackupInventory {
             revision: 1,
             assets: vec![asset, inlay, unused],
             owner_heads: vec![],
@@ -1448,6 +1482,13 @@ mod tests {
             prepared.affected_conversations["opaque-plugin-inlay-references-unverified"],
             None
         );
+        inventory.assets[1].metadata = serde_json::json!({
+            "createdAt":456,"charId":"c1","chatId":"b",
+            "pocketRisu":{"createdAt":123,"charId":"missing","chatId":"missing"},
+        });
+        count_affected_conversations(&mut prepared, &connection, &target, &inventory, &crate::local_backup::NeverCancelled).unwrap();
+        assert_eq!(prepared.affected_conversations["converted-inlay-provenance"], Some(3));
+
         connection
             .execute(
                 "INSERT INTO bot_presets VALUES('leased',?1)",
@@ -1550,7 +1591,7 @@ mod tests {
         )
         .is_err());
         assert!(!root.join("overflow").exists());
-        assert!(copy_verified(
+        let missing = copy_verified(
             &cas,
             &mut pins,
             &"0".repeat(64),
@@ -1559,7 +1600,8 @@ mod tests {
             &root.join("missing"),
             &crate::local_backup::NeverCancelled,
         )
-        .is_err());
+        .unwrap_err();
+        assert_eq!(missing.code, "asset-missing");
         assert!(!root.join("missing").exists());
         copy_verified(
             &cas,
@@ -1584,6 +1626,57 @@ mod tests {
             &crate::local_backup::NeverCancelled
         )
         .is_err());
+        // A body that only the Sync server holds is downloaded before it is pinned.
+        use crate::server_sync::residency::test_remote;
+        let store = crate::persistent_store::PersistentStore::open(&root.join("repository")).unwrap();
+        let remote = cas.prepare_bytes(b"synthetic server-held attachment").unwrap();
+        let interrupted = cas.prepare_bytes(b"synthetic interrupted attachment").unwrap();
+        for (object, body) in [
+            (&remote, b"synthetic server-held attachment"),
+            (&interrupted, b"synthetic interrupted attachment"),
+        ] {
+            std::fs::remove_file(cas.object_path(&object.content_hash).unwrap().unwrap()).unwrap();
+            test_remote::serve(&root.join("repository"), &object.content_hash, body.to_vec());
+        }
+        test_remote::hold(
+            &root.join("repository"),
+            &[
+                (&remote.content_hash, remote.byte_size),
+                (&interrupted.content_hash, interrupted.byte_size),
+            ],
+        );
+        copy_verified(
+            &cas,
+            &mut pins,
+            &remote.content_hash,
+            remote.byte_size,
+            CasObjectRole::DirectObject,
+            &root.join("remote"),
+            &crate::local_backup::NeverCancelled,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(root.join("remote")).unwrap(), b"synthetic server-held attachment");
+        assert_eq!(test_remote::fetched(&root.join("repository")), 1);
+        // Cancelling once that download has started stops it before the body is stored.
+        struct CancelWhileDownloading<'a>(&'a Path);
+        impl CancellationProbe for CancelWhileDownloading<'_> {
+            fn is_cancelled(&self) -> bool { test_remote::fetched(self.0) > 1 }
+        }
+        let error = copy_verified(
+            &cas,
+            &mut pins,
+            &interrupted.content_hash,
+            interrupted.byte_size,
+            CasObjectRole::DirectObject,
+            &root.join("interrupted"),
+            &CancelWhileDownloading(&root.join("repository")),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(test_remote::fetched(&root.join("repository")), 2);
+        assert!(cas.stat_object(&interrupted.content_hash).unwrap().is_none());
+        assert!(!root.join("interrupted").exists());
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

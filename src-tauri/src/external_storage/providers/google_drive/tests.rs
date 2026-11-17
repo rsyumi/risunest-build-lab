@@ -1574,6 +1574,80 @@ fn compare_and_exchange_is_unsupported_rather_than_emulated() {
 }
 
 #[test]
+fn a_descriptor_replacement_checks_the_file_and_patches_its_media_once() {
+    runtime().block_on(async {
+        let metadata = |parent: &str, role: &str| {
+            json_reply(
+                200,
+                json!({
+                    "id": "desc-1",
+                    "parents": [parent],
+                    "appProperties": { "risunestRole": role, "risunestObjectId": "d1" }
+                }),
+            )
+        };
+        let mut replies = open_existing_replies();
+        replies.push(metadata("another-folder", "descriptor"));
+        replies.push(metadata(FOLDER, "pack"));
+        replies.push(metadata(FOLDER, "descriptor"));
+        replies.push(json_reply(200, json!({ "id": "desc-1", "size": "19", "version": "4" })));
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let bytes = HeadBytes::new(b"switched-descriptor".to_vec()).unwrap();
+        let at = |collection: Option<&str>, object: &str| RemoteLocator {
+            connection_identity: repository.connection_identity.clone(),
+            collection: collection.map(str::to_owned),
+            object: object.to_owned(),
+        };
+        for refused in [
+            provider.head_locator(&repository).unwrap(),
+            at(None, "desc-1"),
+            at(Some("snapshots"), "desc-1"),
+            at(Some("descriptors"), "not/a/file/id"),
+        ] {
+            let outcome = provider.replace_descriptor(&repository, &refused, &bytes, &cancel).await;
+            assert_eq!(outcome.err().unwrap().kind, ErrorKind::Corrupt, "{}", refused.object);
+        }
+        assert_eq!(request_lines(&server).len(), 3);
+
+        // A file of another folder, then one not marked as the descriptor, is
+        // looked up and never written.
+        let descriptor = at(Some("descriptors"), "desc-1");
+        for _ in 0..2 {
+            let outcome = provider.replace_descriptor(&repository, &descriptor, &bytes, &cancel).await;
+            assert_eq!(outcome.err().unwrap().kind, ErrorKind::Corrupt);
+        }
+        let receipt = provider
+            .replace_descriptor(&repository, &descriptor, &bytes, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt,
+            HeadReceipt {
+                version: Some(VersionToken("4".to_owned())),
+                complete: true,
+            }
+        );
+        let lines = request_lines(&server);
+        assert_eq!(lines.len(), 7);
+        for line in &lines[3..6] {
+            assert_eq!(
+                line,
+                "GET /synthetic/drive/v3/files/desc-1?fields=id%2Cparents%2CappProperties HTTP/1.1"
+            );
+        }
+        assert!(
+            lines[6].starts_with("PATCH /synthetic/upload/drive/v3/files/desc-1?uploadType=media"),
+            "{}",
+            lines[6]
+        );
+        assert_eq!(server.requests.lock().unwrap()[6].body, b"switched-descriptor");
+    });
+}
+
+#[test]
 fn listing_accepts_false_and_absent_incomplete_search_with_a_cursor() {
     runtime().block_on(async {
         let mut replies = open_existing_replies();
@@ -2195,6 +2269,7 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
             &config,
             &grant(),
             Some(zeroize::Zeroizing::new("synthetic-client-secret".into())),
+            None,
             &cancel,
         )
         .await
@@ -2227,13 +2302,68 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
 
         // A grant without a refresh token cannot keep the connection alive.
         assert_eq!(
-            exchange_authorization_code(&test.dependencies, &config, &grant(), None, &cancel,)
+            exchange_authorization_code(&test.dependencies, &config, &grant(), None, None, &cancel,)
                 .await
                 .err()
                 .unwrap()
                 .kind,
             ErrorKind::ReauthRequired
         );
+    });
+}
+
+#[test]
+fn a_renewal_without_a_client_secret_reuses_the_secret_of_the_replaced_credential() {
+    runtime().block_on(async {
+        let saved = stored_secret_with_client_secret(NOW_MS);
+        for (typed, vault, sent) in [
+            (None, Some(saved.clone()), Some("synthetic-client-secret")),
+            (Some("typed-client-secret"), Some(saved.clone()), Some("typed-client-secret")),
+            (None, None, None),
+            (None, Some(b"unreadable".to_vec()), None),
+        ] {
+            let mut replies = vec![json_reply(
+                200,
+                json!({
+                    "access_token": "granted-access",
+                    "refresh_token": "granted-refresh",
+                    "expires_in": 3599
+                }),
+            )];
+            replies.extend(grant_verification_replies());
+            replies.push(about_reply());
+            let server = WireServer::start(replies);
+            let test = deps_with(vault);
+            let grant = AuthorizationCode {
+                code: SecretBytes(zeroize::Zeroizing::new(b"synthetic-code".to_vec())),
+                verifier: SecretBytes(zeroize::Zeroizing::new(b"synthetic-verifier".to_vec())),
+                client_id: client_id(config::platform_key()),
+                redirect_url: url::Url::parse("http://127.0.0.1:52001/oauth").unwrap(),
+                picked_file_id: None,
+            };
+            let payload = exchange_authorization_code(
+                &test.dependencies,
+                &connection(server.url.as_str()),
+                &grant,
+                typed.map(|secret| zeroize::Zeroizing::new(secret.to_owned())),
+                Some(&SecretRef(SECRET.to_owned())),
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            let body = String::from_utf8(server.requests.lock().unwrap()[0].body.clone()).unwrap();
+            let stored = String::from_utf8(payload.secret.0.to_vec()).unwrap();
+            match sent {
+                Some(secret) => {
+                    assert!(body.contains(&format!("client_secret={secret}")));
+                    assert!(stored.contains(&format!("\"clientSecret\":\"{secret}\"")));
+                }
+                None => {
+                    assert!(!body.contains("client_secret="));
+                    assert!(!stored.contains("clientSecret"));
+                }
+            }
+        }
     });
 }
 
@@ -2259,6 +2389,7 @@ fn a_rejected_code_exchange_preserves_the_oauth_error_details() {
             &test.dependencies,
             &connection(server.url.as_str()),
             &grant,
+            None,
             None,
             &Cancellation::default(),
         )
@@ -2623,7 +2754,7 @@ fn segment_listing_keeps_logical_names_and_routes_read_stat_delete_to_file_ids()
         replies.extend([control_reply(vec![file("opaque-file-a"), file("opaque-file-b")]),
             json_reply(200, file("opaque-file-a")), json_reply(200, file("opaque-file-a")),
             Reply::Http {status:200,headers:vec![],body:bytes.clone()},
-            json_reply(200, file("opaque-file-a")), Reply::Http {status:204,headers:vec![],body:vec![]}]);
+            json_reply(200, file("opaque-file-a")), Reply::Http {status:204,headers:vec![("content-type".into(), "text/html; charset=UTF-8".into())],body:vec![]}]);
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let cancel = Cancellation::default();

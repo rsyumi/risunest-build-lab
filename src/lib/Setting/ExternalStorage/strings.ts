@@ -1,4 +1,4 @@
-import { externalErrorKind } from 'src/ts/storage/sync/external/connection'
+import { EXTERNAL_ASSET_KEY_CODE, EXTERNAL_ASSET_REAUTH_CODE, externalErrorKind } from 'src/ts/storage/sync/external/connection'
 import { languageEnglish } from 'src/lang/en'
 import { languageKorean } from 'src/lang/ko'
 export { externalErrorKind } from 'src/ts/storage/sync/external/connection'
@@ -76,6 +76,7 @@ const english = {
     iosOAuthClientId: 'iOS OAuth client ID',
     webOAuthClientId: 'Web OAuth client ID', oauthCallbackUrl: 'Sign-in completion address (HTTPS)', oauthClientSecret: 'Client secret',
     manualOAuthCallback: 'Sign-in completion page address (if the app does not return by itself)', manualOAuthHelp: 'If the app does not reopen by itself, paste the complete address of the sign-in completion page.',
+    renewalClientSecretHelp: 'Leave blank to use the client secret saved with this connection.',
     authorizationWaiting: 'Finish signing in in the browser, then press Finish sign-in.',
     authorizationWaitingMobile: 'After signing in in the browser, you will return to the app.',
     callbackRejected: 'That address does not belong to this sign-in attempt. Check it and paste the complete address again.',
@@ -112,6 +113,10 @@ const english = {
     retry: 'Could not reach the repository. Check your internet connection and try again.', retryAction: 'Try again',
     reauthenticate: 'The sign-in expired or the key is no longer valid. Sign in again or enter a new key.',
     unlockKey: 'Enter the recovery key to use this repository.',
+    reauthenticateOther: 'Sign in to {0} again to continue this backup.',
+    unlockKeyOther: 'Enter the recovery key of {0} to continue this backup.',
+    reauthenticateOtherAssets: 'Sign in to {0} again to continue downloading assets.',
+    unlockKeyOtherAssets: 'Enter the recovery key of {0} to continue downloading assets.',
     resolveRequired: 'Resolve the conflict first. The Conflicts tab lets you choose which side to keep.',
     freeSpace: 'The repository is out of space. Free space on the service and try again.',
     credentialsRejected: 'The service did not accept this sign-in or key. Check what you entered and try again.',
@@ -123,6 +128,8 @@ const english = {
     corrupted: 'The stored data did not pass verification. Choose another backup or connect the repository again.',
     recoveryKeyMismatch: 'The recovery key does not match this repository. Check the key.',
     repositoryMismatch: 'This location holds a different repository. Check the folder, bucket and address.',
+    formatSwitchRequired: languageEnglish.lwwSync.formatSwitchRequiredHelp,
+    appUpdateRequired: languageEnglish.lwwSync.appUpdateRequiredHelp,
     unsupportedOperation: 'This repository cannot do that.',
     requestLengthRequired: 'The server rejected the request.',
     interrupted: 'This stopped before it finished. Try again.',
@@ -277,6 +284,7 @@ const korean: typeof english = {
     iosOAuthClientId: 'iOS OAuth 클라이언트 ID',
     webOAuthClientId: '웹 OAuth 클라이언트 ID', oauthCallbackUrl: '로그인 완료 주소 (HTTPS)', oauthClientSecret: '클라이언트 보안 비밀',
     manualOAuthCallback: '로그인 완료 페이지 주소 (자동으로 돌아오지 않을 때)', manualOAuthHelp: '앱이 자동으로 다시 열리지 않으면 로그인 완료 페이지의 주소를 통째로 붙여넣으세요.',
+    renewalClientSecretHelp: '비워 둘 경우 이 연결에 저장된 클라이언트 보안 비밀을 사용합니다.',
     authorizationWaiting: '브라우저에서 로그인을 마친 뒤 로그인 완료를 누르세요.',
     authorizationWaitingMobile: '브라우저에서 로그인을 마치면 앱으로 돌아옵니다.',
     callbackRejected: '이 주소는 현재 로그인 시도의 것이 아닙니다. 확인한 뒤 주소를 통째로 다시 붙여넣으세요.',
@@ -313,6 +321,10 @@ const korean: typeof english = {
     retry: '저장소에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 시도하세요.', retryAction: '다시 시도',
     reauthenticate: '로그인이 만료되었거나 키가 더 이상 유효하지 않습니다. 다시 로그인하거나 새 키를 입력하세요.',
     unlockKey: '복구 키를 입력해야 이 저장소를 쓸 수 있습니다.',
+    reauthenticateOther: '{0}에 다시 로그인해야 이 백업을 이어갈 수 있습니다.',
+    unlockKeyOther: '{0}의 복구 키를 입력해야 이 백업을 이어갈 수 있습니다.',
+    reauthenticateOtherAssets: '{0}에 다시 로그인해야 에셋 다운로드를 이어갈 수 있습니다.',
+    unlockKeyOtherAssets: '{0}의 복구 키를 입력해야 에셋 다운로드를 이어갈 수 있습니다.',
     resolveRequired: '충돌을 먼저 해결하세요. 충돌 탭에서 어느 쪽을 남길지 고를 수 있습니다.',
     freeSpace: '저장소 공간이 부족합니다. 서비스에서 공간을 확보한 뒤 다시 시도하세요.',
     credentialsRejected: '서비스가 이 로그인이나 키를 받아들이지 않았습니다. 입력한 내용을 확인하고 다시 시도하세요.',
@@ -324,6 +336,8 @@ const korean: typeof english = {
     corrupted: '저장된 데이터가 검증을 통과하지 못했습니다. 다른 백업을 고르거나 저장소를 다시 연결하세요.',
     recoveryKeyMismatch: '복구 키가 이 저장소와 맞지 않습니다. 복구 키를 확인하세요.',
     repositoryMismatch: '이 위치에 다른 저장소가 있습니다. 폴더·버킷과 주소를 확인하세요.',
+    formatSwitchRequired: languageKorean.lwwSync.formatSwitchRequiredHelp,
+    appUpdateRequired: languageKorean.lwwSync.appUpdateRequiredHelp,
     unsupportedOperation: '이 저장소에서는 할 수 없는 작업입니다.',
     requestLengthRequired: '서버가 요청을 거부했습니다.',
     interrupted: '끝나기 전에 멈췄습니다. 다시 시도하세요.',
@@ -519,6 +533,8 @@ function externalErrorSummary(strings: ExternalStorageStrings, value: unknown): 
         case 'folderUnsupportedLocation': return strings.folderUnsupportedLocation
         case 'alreadyConnected': return strings.connectionAlreadyAdded
         case 'unauthorized': return strings.credentialsRejected
+        case EXTERNAL_ASSET_REAUTH_CODE: return strings.reauthenticate
+        case EXTERNAL_ASSET_KEY_CODE: return strings.unlockKey
         case 'reauthRequired': return [strings.reauthenticate, oauthSuffix, oauthDescriptionSuffix]
             .filter(Boolean)
             .join('\n')
@@ -531,6 +547,8 @@ function externalErrorSummary(strings: ExternalStorageStrings, value: unknown): 
         case 'corrupt': return strings.corrupted
         case 'recoveryKeyMismatch': return strings.recoveryKeyMismatch
         case 'repositoryMismatch': return strings.repositoryMismatch
+        case 'libraryFormatSwitchRequired': return strings.formatSwitchRequired
+        case 'appUpdateRequired': return strings.appUpdateRequired
         case 'unsupported': return (value as { httpStatus?: unknown }).httpStatus === 411
             ? strings.requestLengthRequired : strings.unsupportedOperation
         case 'cancelled': return strings.interrupted

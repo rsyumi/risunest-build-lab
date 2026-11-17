@@ -222,18 +222,82 @@ fn a_preset_and_persona_selected_by_index_are_not_reported() {
     assert_eq!(dangling_selections(&scan(&mut store)), Vec::<String>::new());
 }
 
+fn diagnosis_of(store: &mut PersistentStore) -> crate::data_health::ScanResult {
+    let findings = scan(store);
+    crate::data_health::ScanResult::new(store.revision().unwrap(), 1, crate::data_health::ScanDepth::Quick, findings)
+}
+
 #[test]
-fn a_selected_preset_or_persona_that_is_gone_is_still_reported() {
+fn a_selected_preset_or_persona_that_is_gone_is_reported_until_the_first_is_selected() {
+    use crate::data_health::repair::RepairAction;
     for (preset, persona) in [
         (json!("preset-gone"), json!("persona-gone")),
         (json!(5), json!(5)),
     ] {
         let (_directory, mut store) = selection_fixture(preset, persona);
-        assert_eq!(
-            dangling_selections(&scan(&mut store)),
-            ["$.botPresetsId", "$.selectedPersona"]
-        );
+        let findings = scan(&mut store);
+        assert_eq!(dangling_selections(&findings), ["$.botPresetsId", "$.selectedPersona"]);
+        let diagnosis =
+            crate::data_health::ScanResult::new(store.revision().unwrap(), 1, crate::data_health::ScanDepth::Quick, findings);
+        let candidates = crate::data_health::repair::plan(&diagnosis)
+            .into_iter()
+            .filter(|candidate| matches!(candidate.action, RepairAction::SelectFirstPreset | RepairAction::SelectFirstPersona))
+            .collect::<Vec<_>>();
+        assert_eq!(candidates.len(), 2);
+        store.apply_repair(store.revision().unwrap(), &candidates, 10).unwrap();
+        let root = store.read_root(None).unwrap().value;
+        // The first preset is the first configured one, not the first by id.
+        assert_eq!(root["botPresetsId"], "preset-beta");
+        assert_eq!(root["selectedPersona"], "persona-a");
+        assert_eq!(dangling_selections(&scan(&mut store)), Vec::<String>::new());
     }
+}
+
+fn save_root(store: &mut PersistentStore) -> Result<(), StoreError> {
+    let mut root = store.read_root(None).unwrap().value;
+    root["username"] = json!("Saved");
+    let revision = store.revision().unwrap();
+    store
+        .commit(&WorkingSetCommit { root: Some(root), ..empty_working_set_commit(revision) })
+        .map(|_| ())
+}
+
+#[test]
+fn an_embedded_module_without_an_id_is_given_one_so_the_root_saves_again() {
+    use crate::data_health::repair::RepairAction;
+    let (_directory, mut store) = selection_fixture(json!("preset-alpha"), json!("persona-a"));
+    // A library activated before every embedded module was given an id.
+    let generation = active_generation(&store.connection).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE root SET value=json_set(value,'$.personas[1].embeddedModule',json('{\"name\":\"Embedded\"}')) WHERE generation=?1",
+            [&generation],
+        )
+        .unwrap();
+    assert!(save_root(&mut store).is_err(), "the root cannot be saved while the module has no id");
+
+    let candidates = crate::data_health::repair::plan(&diagnosis_of(&mut store))
+        .into_iter()
+        .filter(|candidate| matches!(candidate.action, RepairAction::AssignEmbeddedModuleId { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candidates.iter().map(|candidate| &candidate.action).collect::<Vec<_>>(),
+        [&RepairAction::AssignEmbeddedModuleId { persona_id: "persona-b".into() }]
+    );
+    store.apply_repair(store.revision().unwrap(), &candidates, 10).unwrap();
+    let root = store.read_root(None).unwrap().value;
+    let module = &root["personas"][1]["embeddedModule"];
+    // The same id activation would have given it.
+    assert_eq!(
+        module["id"].as_str().expect("the module has an id"),
+        crate::persistent_store::record_projection::embedded_module_id("persona-b")
+    );
+    assert_eq!(module["name"], "Embedded");
+    assert!(scan(&mut store).items.iter().all(|finding| {
+        finding.locator.as_ref().is_none_or(|locator| locator.source_path != "$.embeddedModule.id")
+    }));
+    save_root(&mut store).expect("the root saves again");
 }
 
 fn scan_bounded(store: &mut PersistentStore, limit: usize) -> Findings {
@@ -375,12 +439,24 @@ pub(super) fn blocking(findings: &Findings) -> Vec<&crate::data_health::Finding>
 
 /// Adds a character whose additional asset is listed by an owner manifest, as the app stores one.
 pub(crate) fn add_character_with_additional_asset(store: &mut PersistentStore, character_id: &str) -> String {
+    let key = format!("assets/{character_id}-extra.png");
+    add_character_with_owner_manifest(store, character_id, &key, &key)
+}
+
+/// Adds a character whose additional assets name only `key`, with `image` as its image, and
+/// returns the hash of its owner manifest.
+pub(crate) fn add_character_with_owner_manifest(
+    store: &mut PersistentStore,
+    character_id: &str,
+    key: &str,
+    image: &str,
+) -> String {
     use crate::asset_repository::{
         job_pins::{CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob},
         owner_manifest_codec::{encode_owner_manifest, OwnerManifestEntry},
     };
-    let key = format!("assets/{character_id}-extra.png");
-    let asset = crate::server_sync::lww_tests::put_asset(store, &key, b"synthetic additional asset body")
+    let key = key.to_owned();
+    let asset = crate::server_sync::lww_tests::put_asset(store, &key, format!("synthetic body of {key}").as_bytes())
         .object_hash
         .expect("store the additional asset");
     let canonical = encode_owner_manifest(&[OwnerManifestEntry {
@@ -406,7 +482,7 @@ pub(crate) fn add_character_with_additional_asset(store: &mut PersistentStore, c
             expected_revision: store.revision().expect("read revision"),
             add_character: Some(json!({
                 "chaId": character_id, "type": "character", "name": "Synthetic owner",
-                "image": key, "creatorNotes": "synthetic notes", "lastInteraction": 500,
+                "image": image, "creatorNotes": "synthetic notes", "lastInteraction": 500,
                 "additionalAssets": [["extra", key, "png"]],
                 "chats": [{"id": format!("{character_id}-chat"), "name": "Chat", "message": [
                     {"role": "user", "data": "synthetic first", "chatId": "synthetic-message"}

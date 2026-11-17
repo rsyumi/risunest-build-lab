@@ -231,6 +231,25 @@ describe('native media IPC', () => {
         })
     })
 
+    it.each([
+        ['bytes that arrive with it', { data: [1, 2, 3] }, Uint8Array.of(1, 2, 3)],
+        ['an output transfer', { outputId: 'output-id' }, Uint8Array.of(1, 2, 3)],
+        ['an empty output id', { outputId: '' }, Uint8Array.of(1, 2, 3)],
+        ['a non-string output id', { outputId: 7 }, Uint8Array.of(1, 2, 3)],
+        ['a different size', {}, Uint8Array.of(1, 2)],
+        ['no source to keep', {}, undefined],
+    ] as const)('rejects a kept source with %s', async (_, fields, source) => {
+        const invoke = vi.fn(async () => undefined)
+
+        await expect(consumeBoundedNativeMediaOutput(
+            invoke,
+            { data: null, outputId: null, outputSize: 3, sourceKept: true, metadata: {}, ...fields },
+            (metadata) => metadata,
+            source,
+        )).rejects.toThrow('invalid kept source')
+        expect(invoke).not.toHaveBeenCalledWith('native_media_inlay_output_read', expect.anything())
+    })
+
     it('keeps output validation failure primary and reports cancel failure', async () => {
         const primary = new Error('metadata rejected')
         const cleanup = new Error('output cancel failed')

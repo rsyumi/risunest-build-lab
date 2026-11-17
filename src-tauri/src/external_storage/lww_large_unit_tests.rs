@@ -83,7 +83,7 @@ fn restore_original_backup(populate: impl FnOnce(&mut PersistentStore)) -> (temp
     let (lease, prepared) = source.lww_acquire_backup_capture(source.revision().unwrap()).unwrap();
     let sections = super::sections::capture_prepared_backup_sections(&prepared, &source_root.path().join("backup-sections"), &probe.0).unwrap();
     let capture = source.capture_external_library_from_lease_with_sections("sender", &hydration, &lease.lease, sections, &probe).unwrap();
-    let sections = capture.catalog.backup_sections().unwrap();
+    let sections = capture.catalog.backup_sections(source_root.path()).unwrap();
     let original_units = capture.catalog.original_backup_units().unwrap();
     let provider = Arc::new(fake::FakeProvider::new(false));
     let repository = fake::repository();
@@ -138,7 +138,7 @@ fn restore_original_backup(populate: impl FnOnce(&mut PersistentStore)) -> (temp
         let (lease,prepared)=store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
         let sections=super::sections::capture_prepared_backup_sections(&prepared,&destination.path().join("backup-sections"),&probe.0).unwrap();
         let capture=store.capture_external_library_from_lease_with_sections("restored-backup",&hydration,&lease.lease,sections,&probe).unwrap();
-        let sections=capture.catalog.backup_sections().unwrap();
+        let sections=capture.catalog.backup_sections(destination.path()).unwrap();
         let units=capture.catalog.original_backup_units().unwrap();
         let meta=packaging::SnapshotMetadata {snapshot_id:"restored-backup".into(),repository_id:connected.stored.descriptor.repository_id.clone(),library_id:capture.identity.library_epoch.clone(),author_device_id:capture.identity.store_id.clone(),
             created_at_ms:super::runtime::now_ms(),logical_revision:capture.identity.revision as u64,parent_snapshot_id:None,
@@ -154,7 +154,7 @@ fn restore_original_backup(populate: impl FnOnce(&mut PersistentStore)) -> (temp
             super::leases::Admission::Admitted(owner)=>owner,_=>panic!("backup lease must be admitted"),
         };
         let view=super::cleanup::ConnectedRepositoryView {connected:&connected,writer_id:"collector",policy:super::connection::RetentionPolicy::DEFAULT,
-            now_ms:super::runtime::now_ms(),unfinished:vec![],cache_root:&cache};
+            now_ms:super::runtime::now_ms(),unfinished:vec![],cache_root:&cache,reads:Default::default()};
         let documents=super::cleanup::ConnectedDocuments {connected:&connected,cancel:&cancel,scratch:destination.path()};
         let request=super::cleanup::CleanupRequest {job_id:"cleanup-during-backup",cleanup_supported:true,limits:super::cleanup::CleanupLimits::default(),connection_time:&|_|Ok(true)};
         assert_eq!(super::cleanup::run(&context,&request,&view,&documents,&cancel).await.unwrap().stop_reason,super::cleanup::StopReason::Lease);
@@ -201,7 +201,9 @@ fn original_backup_restores_an_indivisible_message_above_the_metadata_bound() {
 #[test]
 fn oversized_large_unit_controls_are_spooled_and_scanned() {
     let asset = "a".repeat(64);
-    let body = risunest_sync_wire::payload_value::encode(&json!([asset, "x".repeat(risunest_sync_wire::MAX_METADATA_BYTES)])).unwrap();
+    // Up to one part a control body may be raw bytes, so the spool checks the form of larger ones.
+    let part = crate::persistent_store::device_store::plugin_values::structure::PART_BYTES as usize;
+    let body = risunest_sync_wire::payload_value::encode(&json!([asset, "x".repeat(part)])).unwrap();
     let hash = risunest_sync_wire::hash(&body);
     assert!(published_json_asset_roots(&body).unwrap().object_hashes.contains(&asset));
     let padded = [b"[".as_slice(), &body[1..body.len() - 1], b" ]"].concat();

@@ -25,6 +25,8 @@ export interface RisunestPrivateApiDependencies {
     generationEnd: GenerationEndListenerAccess
     /** The periodic `db` permission, the one `getDatabase` asks for. */
     hasDatabasePermission(): Promise<boolean>
+    /** The periodic `hostTools` permission that the host tool methods ask for. */
+    hasHostToolPermission(): Promise<boolean>
     lifetimeSignal: AbortSignal
     now?(): number
 }
@@ -48,8 +50,8 @@ export function createRisunestPrivateApi(dependencies: RisunestPrivateApiDepende
         dependencies.chatView.dispose()
         dependencies.generationEnd.dispose()
     }, { once: true })
-    async function requireDatabasePermission(): Promise<void> {
-        if (!(await dependencies.hasDatabasePermission())) throw new Error('Host tools require the db permission')
+    async function requireHostToolPermission(): Promise<void> {
+        if (!(await dependencies.hasHostToolPermission())) throw new Error('Host tools require the hostTools permission')
     }
     return {
         async readConversationContext(input?: unknown): Promise<ConversationContext | null> {
@@ -85,7 +87,7 @@ export function createRisunestPrivateApi(dependencies: RisunestPrivateApiDepende
             })
         },
         async listHostTools(): Promise<HostToolList> {
-            await requireDatabasePermission()
+            await requireHostToolPermission()
             throwIfAborted(dependencies.lifetimeSignal)
             return dependencies.hostTools.listTools()
         },
@@ -94,7 +96,7 @@ export function createRisunestPrivateApi(dependencies: RisunestPrivateApiDepende
             const linked = linkPluginQueryAbortSignals(inputSignal(input), dependencies.lifetimeSignal)
             try {
                 throwIfAborted(linked.signal)
-                await requireDatabasePermission()
+                await requireHostToolPermission()
                 throwIfAborted(linked.signal)
                 return await dependencies.hostTools.callTool(request, linked.signal)
             } finally {

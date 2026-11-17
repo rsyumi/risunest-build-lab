@@ -147,10 +147,10 @@ pub(super) fn rebuild(app: &AppHandle) -> Result<(), String> {
         .configure(state.paths.data.join("native-media-ipc"))?;
     crate::server_sync::residency::arm_anchor(&state.paths.data);
     if let Some(media) = app.try_state::<crate::native_media::streaming::MediaServerState>() {
-        media.reopen_after_cleanup(state.paths.data.clone())?;
+        media.reopen_after_cleanup(state.paths.data.clone(), app.state::<crate::app_paths::AppPaths>().cache.clone())?;
     } else {
         app.manage(
-            crate::native_media::streaming::MediaServerState::initialize_after_cleanup(state.paths.data.clone())?,
+            crate::native_media::streaming::MediaServerState::initialize_after_cleanup(state.paths.data.clone(), app.state::<crate::app_paths::AppPaths>().cache.clone())?,
         );
     }
     let jobs = app.state::<crate::external_storage::job_store::JobCommandState>();

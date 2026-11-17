@@ -39,6 +39,7 @@ fn fixture(size: u64) -> (TempDir, Files, String, PathBuf) {
         remote: Arc::new(
             MediaProvider::new(root.path().to_path_buf(), "http://127.0.0.1:12345".into()).unwrap(),
         ),
+        thumbnails: Arc::new(super::super::thumbnail::ThumbnailCache::new(root.path().join("cache"))),
     };
     let path = format!(
         "{}{}?mime=application%2Foctet-stream&size={size}",
@@ -223,7 +224,7 @@ async fn actual_loopback_http_serves_only_capability_url() {
 #[test]
 fn cleanup_media_waits_for_owned_transfers_and_revokes_the_previous_capability() {
     let root = TempDir::new().unwrap();
-    let state = MediaServerState::initialize(root.path().to_owned());
+    let state = MediaServerState::initialize(root.path().to_owned(), root.path().join("cache"));
     let (previous, slots) = {
         let server = state.0.lock().unwrap();
         let server = server.as_ref().unwrap();
@@ -236,14 +237,14 @@ fn cleanup_media_waits_for_owned_transfers_and_revokes_the_previous_capability()
     drop(transfer);
     assert!(state.cleanup_drained().unwrap());
     assert!(state.0.lock().unwrap().is_err());
-    state.reopen_after_cleanup(root.path().to_owned()).unwrap();
+    state.reopen_after_cleanup(root.path().to_owned(), root.path().join("cache")).unwrap();
     assert_ne!(state.0.lock().unwrap().as_ref().unwrap().base_url, previous);
 }
 
 #[test]
 fn foreground_recovery_preserves_healthy_and_rebound_urls_and_respects_cleanup() {
     let root = TempDir::new().unwrap();
-    let state = MediaServerState::initialize(root.path().to_path_buf());
+    let state = MediaServerState::initialize(root.path().to_path_buf(), root.path().join("cache"));
     std::thread::sleep(Duration::from_millis(30));
     let before = state.0.lock().unwrap().as_ref().unwrap().base_url.clone();
     assert_eq!(state.ensure().unwrap(), before);
@@ -259,7 +260,7 @@ fn foreground_recovery_preserves_healthy_and_rebound_urls_and_respects_cleanup()
 #[test]
 fn foreground_recovery_changes_url_when_old_port_is_occupied() {
     let root = TempDir::new().unwrap();
-    let state = MediaServerState::initialize(root.path().to_path_buf());
+    let state = MediaServerState::initialize(root.path().to_path_buf(), root.path().join("cache"));
     let (before, address) = {
         let guard = state.0.lock().unwrap();
         let server = guard.as_ref().unwrap();
@@ -278,7 +279,7 @@ fn foreground_recovery_changes_url_when_old_port_is_occupied() {
 #[test]
 fn foreground_recovery_does_not_replace_a_listener_with_active_transfers() {
     let root = TempDir::new().unwrap();
-    let state = MediaServerState::initialize(root.path().to_path_buf());
+    let state = MediaServerState::initialize(root.path().to_path_buf(), root.path().join("cache"));
     let slots = state.0.lock().unwrap().as_ref().unwrap().slots.clone();
     let transfer = slots.try_acquire_owned().unwrap();
     state.0.lock().unwrap().as_ref().unwrap().task.abort();
@@ -303,4 +304,122 @@ fn media_commands_log_their_own_failures() {
         .expect("the command logs its failure");
     assert_eq!((entry.level.as_str(), entry.target.as_str()), ("error", "native-command"));
     assert!(entry.message.contains("streaming.rs:"), "{}", entry.message);
+}
+
+fn image_fixture(source: &[u8]) -> (TempDir, Files, String, String) {
+    let (root, state, _, _) = fixture(0);
+    let object = crate::asset_repository::PayloadCas::new(root.path()).unwrap().prepare_bytes(source).unwrap();
+    let original = format!("{}{}?mime=image%2Fpng&size={}", state.prefix,
+        hex::encode(crate::asset_repository::object_physical_key(&object.content_hash)), source.len());
+    let preview = format!("{original}&thumbnail=gallery-v1");
+    (root, state, original, preview)
+}
+
+#[tokio::test]
+async fn gallery_derivatives_have_their_own_mime_length_ranges_and_validator() {
+    let mut source = Vec::new();
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1024, 512, image::Rgba([240, 16, 32, 255])))
+        .write_to(&mut std::io::Cursor::new(&mut source), image::ImageFormat::Png).unwrap();
+    let (_root, state, original, preview) = image_fixture(&source);
+    let response = serve(State(state.clone()), request(&state, &preview, "GET")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
+    let validator = response.headers()[header::ETAG].clone();
+    assert!(validator.to_str().unwrap().ends_with("-gallery-v1\""));
+    let expected_length = response.headers()[header::CONTENT_LENGTH].to_str().unwrap().parse::<usize>().unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(bytes.len(), expected_length);
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (512, 256));
+    let head = serve(State(state.clone()), request(&state, &preview, "HEAD")).await;
+    assert_eq!(head.headers()[header::CONTENT_LENGTH], expected_length.to_string());
+    assert!(axum::body::to_bytes(head.into_body(), 0).await.unwrap().is_empty());
+    let mut range = request(&state, &preview, "GET");
+    range.headers_mut().insert(header::RANGE, "bytes=0-15".parse().unwrap());
+    let range = serve(State(state.clone()), range).await;
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(axum::body::to_bytes(range.into_body(), 16).await.unwrap().as_ref(), &bytes[..16]);
+    let mut cached = request(&state, &preview, "GET");
+    cached.headers_mut().insert(header::IF_NONE_MATCH, validator.clone());
+    assert_eq!(serve(State(state.clone()), cached).await.status(), StatusCode::NOT_MODIFIED);
+    let original = serve(State(state.clone()), request(&state, &original, "GET")).await;
+    assert_eq!(original.headers()[header::CONTENT_TYPE], "image/png");
+    assert_ne!(original.headers()[header::ETAG], validator);
+    assert_eq!(axum::body::to_bytes(original.into_body(), source.len()).await.unwrap().as_ref(), source);
+    for suffix in ["&thumbnail=unknown", "&thumbnail=gallery-v1&thumbnail=gallery-v1", "&thumbnail=gallery-v1&extra=1"] {
+        let path = format!("{}{}", preview.split("&thumbnail").next().unwrap(), suffix);
+        assert_eq!(serve(State(state.clone()), request(&state, &path, "GET")).await.status(), StatusCode::NOT_FOUND);
+    }
+    assert_eq!(serve(State(state.clone()), request(&state, &preview, "POST")).await.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+fn png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    output.extend_from_slice(kind);
+    output.extend_from_slice(data);
+    let mut digest = crc32fast::Hasher::new();
+    digest.update(kind); digest.update(data);
+    output.extend_from_slice(&digest.finalize().to_be_bytes());
+}
+
+fn flat_png(width: u32, height: u32) -> Vec<u8> {
+    use std::io::Write;
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = Vec::new();
+    header.extend_from_slice(&width.to_be_bytes()); header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, 2, 0, 0, 0]);
+    png_chunk(&mut png, b"IHDR", &header);
+    let mut compressed = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let row = vec![0; width as usize * 3 + 1];
+    for _ in 0..height { compressed.write_all(&row).unwrap(); }
+    png_chunk(&mut png, b"IDAT", &compressed.finish().unwrap());
+    png_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+#[tokio::test]
+async fn valid_images_beyond_derivative_work_memory_keep_their_original_preview_response() {
+    use crate::asset_repository::PayloadCas;
+    use sha2::{Digest, Sha256};
+    let large_dimensions = flat_png(6000, 4000);
+    let mut large_file = flat_png(16, 8);
+    large_file.truncate(large_file.len() - 12);
+    png_chunk(&mut large_file, b"raNd", &vec![0; 33 * 1024 * 1024]);
+    png_chunk(&mut large_file, b"IEND", &[]);
+    for source in [large_dimensions, large_file] {
+        // The fixture is a real decodable image, including the large ancillary chunk.
+        assert!(image::load_from_memory(&source).is_ok());
+        let (root, state, original, preview) = image_fixture(&source);
+        let original_head = serve(State(state.clone()), request(&state, &original, "HEAD")).await;
+        assert_eq!(original_head.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+        let validator = original_head.headers()[header::ETAG].clone();
+        let response = serve(State(state.clone()), request(&state, &preview, "GET")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(response.headers()[header::ETAG], validator);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(axum::body::to_bytes(response.into_body(), source.len()).await.unwrap().as_ref(), source);
+        let mut conditional = request(&state, &preview, "GET");
+        conditional.headers_mut().insert(header::IF_NONE_MATCH, validator.clone());
+        let response = serve(State(state.clone()), conditional).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        let hash = hex::encode(Sha256::digest(&source));
+        let path = PayloadCas::new(root.path()).unwrap().object_path(&hash).unwrap().unwrap();
+        fs::remove_file(path).unwrap();
+        let mut conditional = request(&state, &preview, "HEAD");
+        conditional.headers_mut().insert(header::IF_NONE_MATCH, validator);
+        assert_eq!(serve(State(state.clone()), conditional).await.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn invalid_sources_and_cleanup_do_not_fall_back_to_original_bytes() {
+    let source = b"not an image";
+    let (_root, state, _, preview) = image_fixture(source);
+    assert_eq!(serve(State(state.clone()), request(&state, &preview, "GET")).await.status(), StatusCode::NOT_FOUND);
+    let source = flat_png(6000, 4000);
+    let (_root, state, _, preview) = image_fixture(&source);
+    state.thumbnails.close();
+    assert_eq!(serve(State(state.clone()), request(&state, &preview, "GET")).await.status(), StatusCode::NOT_FOUND);
 }

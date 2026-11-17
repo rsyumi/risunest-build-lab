@@ -23,6 +23,7 @@ import {
 } from './nativeFileJobs'
 import type { NativeFileOperationSource } from './nativeFileJobManager'
 import { basenameOf } from './nativeFileSourceInfo'
+import { localFileStamp } from '../localFileStamp'
 import type {
     PinnedRisuSaveExport,
     RisuSaveExportRuntime,
@@ -140,8 +141,15 @@ async function exportThroughAndroidSaf(
     name: string,
     options: RisuSaveFileRouteOptions,
     dependencies: RisuSaveFileRouteDependencies,
-): Promise<RisuSaveFileRouteResult> {
+): Promise<RisuSaveFileRouteResult | null> {
     const reservation = await dependencies.reserveAndroidDestination(name, 'risuSave', options.signal)
+        .catch((error: unknown) => {
+            // Backing out of the save picker ends like a dismissed desktop dialog; a cancelled export still rejects.
+            if (!options.signal?.aborted && error instanceof DOMException && error.name === 'AbortError') return null
+            throw error
+        })
+    if (!reservation) return null
+    options.onDestinationChosen?.()
     return withAndroidSafDestination(reservation, () =>
         exportToReservedAndroidSaf(runtime, name, options, dependencies, reservation))
 }
@@ -345,7 +353,7 @@ export interface RisuSaveFileRouteResult {
 }
 
 function defaultExportName(): string {
-    return `risunest-${new Date().toISOString().replace(/[:.]/g, '-')}.risudat`
+    return `risunest-${localFileStamp(Date.now())}.risudat`
 }
 
 function isCapabilityUnavailable(error: unknown): boolean {
@@ -380,7 +388,11 @@ async function importWithBytes(
 ): Promise<RisuSaveFileRouteResult> {
     webImportStatus(options, 'decoding-database', bytes.byteLength, bytes.byteLength)
     const { prepareUpstreamImport } = await import('./importedIdentity')
-    const database = prepareUpstreamImport(prepareExternalDatabaseImport(await dependencies.decodeRisuSave(bytes) as Database))
+    const { importColdPluginStorage } = await import('../process/coldPayloadExpansion')
+    const decoded = prepareExternalDatabaseImport(await dependencies.decodeRisuSave(bytes) as Database)
+    // A save file carries no cold items, so cold plugin storage references can only be left out.
+    const plugins = await importColdPluginStorage(decoded, async () => ({ kind: 'missing' }))
+    const database = prepareUpstreamImport(decoded)
     webImportStatus(options, 'activating', bytes.byteLength, bytes.byteLength)
     let pluginsRestarted = false
     await runtime.replacePersistentDatabase(
@@ -394,7 +406,11 @@ async function importWithBytes(
     )
     webImportStatus(options, 'reloading-plugins', bytes.byteLength, bytes.byteLength)
     if (!pluginsRestarted) await dependencies.reloadPlugins()
-    return { mode: 'web', warningCodes: [], bytes: bytes.byteLength }
+    return {
+        mode: 'web',
+        warningCodes: plugins.omitted > 0 ? ['upstream-restore-losses'] : [],
+        bytes: bytes.byteLength,
+    }
 }
 
 async function importWithWebCodec(
@@ -478,6 +494,7 @@ export async function exportRisuSaveFromPicker(
     if (platform === 'native-desktop' || platform === 'native-ios') {
         const destination = await dependencies.chooseNativeExport(name)
         if (!destination) return null
+        options.onDestinationChosen?.()
         let result: NativeFileJobResult
         try {
             result = await dependencies.runNativeExport(

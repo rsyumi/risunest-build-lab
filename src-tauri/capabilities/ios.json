@@ -59,6 +59,8 @@
     "ios-native:allow-discard-backup-source",
     "ios-native:allow-materialize-backup-source",
     "ios-native:allow-export-file",
+    "ios-native:allow-pick-rewritable-file",
+    "ios-native:allow-rewrite-file",
     "ios-native:allow-discard-file",
     "ios-native:allow-publication",
     "ios-native:allow-acknowledge-publication",

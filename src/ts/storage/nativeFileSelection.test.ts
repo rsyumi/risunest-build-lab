@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Buffer } from 'node:buffer'
+import { imageFixture } from '../../../tests/support/imageFixtures'
 
 const mocks = vi.hoisted(() => ({
     os: 'android' as 'android' | 'ios', invoke: vi.fn(), open: vi.fn(), pick: vi.fn(), discard: vi.fn(),
@@ -100,6 +101,34 @@ describe('native mobile file selection', () => {
     it('filters metadata before reading and still releases rejected selections', async () => {
         await expect(selectNativeFiles({ accept: '.png' })).rejects.toThrow(language.risuNest.importDialog.reasonUnsupportedFormat)
         expect(mocks.open).not.toHaveBeenCalled()
+        expect(mocks.discard).toHaveBeenCalledOnce()
+    })
+
+    it('rejects a non-image after a bounded header read and releases the selection', async () => {
+        const bytes = new Uint8Array(1024 * 1024)
+        bytes.set(new TextEncoder().encode('%PDF-1.7'))
+        mocks.pick.mockResolvedValue({ cancelled: false, files: [metadata('renamed.png', bytes.length)] })
+        mocks.open.mockImplementation(async () => readable(bytes))
+        await expect(selectNativeFileData({ image: true, accept: '.png' })).rejects.toThrow(language.risuNest.imageFormats.unsupported)
+        const requested = handles.flatMap(handle => handle.read.mock.calls.map(([buffer]) => buffer.length))
+        expect(requested.reduce((total, bytes) => total + bytes, 0)).toBeLessThanOrEqual(64 * 1024)
+        expect(handles.every(handle => handle.close.mock.calls.length === 1)).toBe(true)
+        expect(mocks.discard).toHaveBeenCalledOnce()
+    })
+
+    it.each(['png', 'avif'] as const)('keeps exact %s bytes despite an unrecognized filename and a later format box', async format => {
+        let bytes = imageFixture(format)
+        if (format === 'avif') {
+            const container = new Uint8Array(70_000 + bytes.length)
+            new DataView(container.buffer).setUint32(0, 70_000)
+            container.set(new TextEncoder().encode('free'), 4)
+            container.set(bytes, 70_000)
+            bytes = container
+        }
+        mocks.pick.mockResolvedValue({ cancelled: false, files: [metadata('portrait.bin', bytes.length)] })
+        mocks.open.mockImplementation(async () => readable(bytes))
+        const [selected] = await selectNativeFileData({ image: true, accept: '.png' })
+        expect(selected.data).toEqual(bytes)
         expect(mocks.discard).toHaveBeenCalledOnce()
     })
 

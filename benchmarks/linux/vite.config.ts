@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { defineConfig, type Plugin } from "vite";
 import { harnessConfig } from "../harnessConfig";
+import { appLockMutationPlugin } from "../appLock/mutationPlugin";
 
 const config = harnessConfig("linux");
 export default defineConfig(async environment => {
   const resolved = await config(environment);
+  resolved.plugins = [...(resolved.plugins ?? []), appLockMutationPlugin()];
   if (process.env.RISUNEST_APPEARANCE_PROBE === "1") {
     const entry = (resolved.plugins as Plugin[]).find(plugin => plugin.name === "harness-html-entry");
     if (!entry) throw new Error("Harness HTML transform missing");

@@ -5,6 +5,7 @@ import {
     createNativeDurableAssetWriteSessionFactory,
     createNativeDurableCasJobSessionFactory,
     createNativeCasReadBudget,
+    createNativeCasUploadBudget,
     createNativeImmutablePayloadCas,
     createNativeRemoteAssetReader,
     createNativeNewInlayImageEncoder,
@@ -16,10 +17,27 @@ import {
     releaseCasJob,
     sealCasJob,
 } from './nativeAssetRepository'
-import { PayloadSizeMismatchError } from './payloadCas'
+import { hashPayloadBytes, objectPhysicalKey, PayloadSizeMismatchError } from './payloadCas'
+import type { NativeByteInvoke } from './nativeAssetByteTransport'
 
 const P = NATIVE_CAS_READ_PART_BYTES
 const objectHash = '11'.repeat(32)
+
+it('returns ordered bounded native presence batches and rejects malformed size responses', async () => {
+    const hashes = Array.from({ length: 1030 }, (_, index) => index.toString(16).padStart(64, '0'))
+    const invoke = vi.fn(async (_command: string, args: unknown) => {
+        const page = (args as { contentHashes: string[] }).contentHashes
+        if (page.length > 512) throw new Error('Oversized presence request')
+        return page.map(hash => Number.parseInt(hash, 16) % 2 ? 4 : null)
+    })
+    const cas = createNativeImmutablePayloadCas(invoke)
+    const remote = createNativeRemoteAssetReader(invoke)
+    const expected = hashes.map((_hash, index) => index % 2 ? 4 : null)
+    expect(await cas.statObjects!(hashes)).toEqual(expected)
+    expect(await remote.statObjects!(hashes)).toEqual(expected)
+    invoke.mockResolvedValueOnce([])
+    await expect(cas.statObjects!([objectHash])).rejects.toThrow('response mismatch')
+})
 
 function sameBytes(actual: Uint8Array | null, expected: Uint8Array): boolean {
     return actual !== null && Buffer.from(actual).equals(Buffer.from(expected))
@@ -207,6 +225,35 @@ describe('native CAS reads', () => {
         }
     })
 
+    it('starts waiting foreground reads before waiting background reads, each in arrival order', async () => {
+        const started: string[] = []
+        const held: (() => void)[] = []
+        const invoke = vi.fn((command: string, args?: Record<string, unknown>) => {
+            if (command === 'asset_remote_hydrate_object') return Promise.resolve(1)
+            started.push(String(args?.contentHash)[0])
+            return new Promise((resolve) => held.push(() => resolve(Uint8Array.of(0).buffer)))
+        })
+        const budget = createNativeCasReadBudget({ capacityBytes: 1, minimumWeightBytes: 1 })
+        const cas = createNativeImmutablePayloadCas(invoke, budget)
+        const remote = createNativeRemoteAssetReader(invoke, budget)
+        const background = { background: true }
+        const reads = [
+            cas.readObject('a'.repeat(64), 1, background),
+            cas.readObjectRange('b'.repeat(64), { start: 0, endExclusive: 1 }, 1, background),
+            remote.readObject('c'.repeat(64), undefined, background),
+        ]
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        reads.push(cas.readObject('d'.repeat(64), 1), remote.readObject('e'.repeat(64)))
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(started).toEqual(['a'])
+        while (held.length > 0) {
+            held.shift()!()
+            await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        expect((await Promise.all(reads)).every((result) => result?.byteLength === 1)).toBe(true)
+        expect(started).toEqual(['a', 'd', 'e', 'b', 'c'])
+    })
+
     it('reads hydrated remote bytes at the hydrated size and treats a vanished object as missing', async () => {
         const source = Uint8Array.from({ length: P + 200 }, (_, index) => index % 251)
         let present = true
@@ -227,6 +274,206 @@ describe('native CAS reads', () => {
 })
 
 describe('native asset repository adapters', () => {
+    function uploadBoundary(options: {
+        maxUploads?: number
+        capacityBytes?: number
+        beforeChunk?: () => Promise<void>
+        beforeCancel?: () => Promise<void>
+        failCommand?: string
+    } = {}) {
+        const active = new Map<string, { data: Uint8Array, offset: number }>()
+        const stored = new Map<string, Uint8Array>()
+        let reservedBytes = 0
+        let peakUploads = 0
+        let peakBytes = 0
+        const save = async (data: Uint8Array) => {
+            const contentHash = await hashPayloadBytes(data)
+            stored.set(contentHash, data.slice())
+            return { contentHash, byteSize: data.length, physicalKey: objectPhysicalKey(contentHash), deduplicated: false }
+        }
+        const cancel = (id: string) => {
+            const upload = active.get(id)
+            if (upload) reservedBytes -= upload.data.length
+            active.delete(id)
+        }
+        const invoke = vi.fn<NativeByteInvoke>(async (command, args) => {
+            if (command === options.failCommand) throw new Error('Synthetic transfer failure')
+            if (command === 'native_asset_bytes_probe') return false
+            if (command === 'asset_cas_job_begin') return crypto.randomUUID()
+            const input = args as Record<string, unknown>
+            if (command === 'asset_cas_job_prepare') return save(Uint8Array.from(input.data as number[]))
+            const id = String(input.uploadId)
+            if (command === 'asset_cas_job_upload_open') {
+                const size = Number(input.totalBytes)
+                if (active.size >= (options.maxUploads ?? 4)) throw new Error('CAS upload capacity is unavailable')
+                if (reservedBytes + size > (options.capacityBytes ?? 1024 * 1024 * 1024)) throw new Error('CAS upload byte quota is unavailable')
+                active.set(id, { data: new Uint8Array(size), offset: 0 })
+                reservedBytes += size
+                peakUploads = Math.max(peakUploads, active.size)
+                peakBytes = Math.max(peakBytes, reservedBytes)
+                return { capacity: 64 * 1024 }
+            }
+            if (command === 'asset_cas_job_upload_cancel') {
+                await options.beforeCancel?.()
+                cancel(id)
+                return
+            }
+            const upload = active.get(id)
+            if (!upload) throw new Error('CAS upload is missing')
+            if (command === 'asset_cas_job_upload_chunk') {
+                await options.beforeChunk?.()
+                const data = Uint8Array.from(input.data as number[])
+                if (input.offset !== upload.offset || data.length > 64 * 1024) throw new Error('Invalid CAS upload chunk')
+                upload.data.set(data, upload.offset)
+                upload.offset += data.length
+                return upload.offset
+            }
+            if (command === 'asset_cas_job_upload_finish') {
+                if (upload.offset !== upload.data.length) throw new Error('CAS upload is incomplete')
+                cancel(id)
+                return save(upload.data)
+            }
+            throw new Error(`Unexpected command ${command}`)
+        })
+        return { invoke, stored, active, usage: () => ({ reservedBytes, peakUploads, peakBytes }) }
+    }
+
+    it('stores ten concurrent large assets across ownership sessions without exceeding native upload admission', async () => {
+        let resume!: () => void
+        const held = new Promise<void>(resolve => { resume = resolve })
+        const native = uploadBoundary({ beforeChunk: () => held })
+        const factories = [
+            createNativeDurableAssetWriteSessionFactory(native.invoke),
+            createNativeDurableCasJobSessionFactory('card-or-module-content-import', native.invoke),
+        ]
+        const sources = Array.from({ length: 10 }, (_, index) => new Uint8Array(64 * 1024 + 1).fill(index))
+        const sessions = await Promise.all(sources.map((_, index) => factories[index % factories.length].begin()))
+        const writing = Promise.allSettled(sessions.map((session, index) => session.prepare(sources[index])))
+        await vi.waitFor(() => expect(native.active.size).toBe(4)).finally(resume)
+        const outcomes = await writing
+        expect(outcomes.map(outcome => outcome.status)).toEqual(sources.map(() => 'fulfilled'))
+        for (const [index, outcome] of outcomes.entries()) {
+            if (outcome.status !== 'fulfilled') throw outcome.reason
+            expect(outcome.value.byteSize).toBe(sources[index].length)
+            expect(native.stored.get(outcome.value.contentHash)).toEqual(sources[index])
+        }
+        expect(native.usage().peakUploads).toBe(4)
+        expect(native.active.size).toBe(0)
+        expect(native.usage().reservedBytes).toBe(0)
+    })
+
+    it('waits for byte quota even when native upload slots remain available', async () => {
+        const size = 64 * 1024 + 1
+        const capacityBytes = 2 * size
+        const budget = createNativeCasUploadBudget({ capacityBytes })
+        let resume!: () => void
+        const held = new Promise<void>(resolve => { resume = resolve })
+        const native = uploadBoundary({ capacityBytes, beforeChunk: () => held })
+        const sources = Array.from({ length: 3 }, (_, index) => new Uint8Array(size).fill(index))
+        const writing = Promise.allSettled(sources.map(data =>
+            prepareCasObject('byte-quota', data, 'direct-object', native.invoke, budget)))
+        await vi.waitFor(() => expect(native.active.size).toBe(2)).finally(resume)
+        const outcomes = await writing
+        expect(outcomes.map(outcome => outcome.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled'])
+        for (const [index, outcome] of outcomes.entries()) {
+            if (outcome.status !== 'fulfilled') throw outcome.reason
+            expect(native.stored.get(outcome.value.contentHash)).toEqual(sources[index])
+        }
+        expect(native.usage()).toEqual({ reservedBytes: 0, peakUploads: 2, peakBytes: capacityBytes })
+    })
+
+    it.each([
+        'native_asset_bytes_probe',
+        'asset_cas_job_upload_open',
+        'asset_cas_job_upload_chunk',
+        'asset_cas_job_upload_finish',
+    ])('allows the next upload after %s fails', async failCommand => {
+        const budget = createNativeCasUploadBudget({ maxUploads: 1 })
+        const failing = uploadBoundary({ failCommand })
+        const next = uploadBoundary()
+        const data = new Uint8Array(64 * 1024 + 1).fill(7)
+        const outcomes = await Promise.allSettled([
+            prepareCasObject('failed-transfer', data, 'direct-object', failing.invoke, budget),
+            prepareCasObject('next-transfer', data, 'direct-object', next.invoke, budget),
+        ])
+        expect(outcomes[0]).toMatchObject({ status: 'rejected', reason: new Error('Synthetic transfer failure') })
+        const saved = outcomes[1]
+        if (saved.status !== 'fulfilled') throw saved.reason
+        expect(next.stored.get(saved.value.contentHash)).toEqual(data)
+        expect(failing.active.size).toBe(0)
+        expect(failing.usage().reservedBytes).toBe(0)
+        expect(next.active.size).toBe(0)
+    })
+
+    it('holds admission until a failed upload finishes its cancellation cleanup', async () => {
+        const budget = createNativeCasUploadBudget({ maxUploads: 1 })
+        let resume!: () => void
+        let cancelling = false
+        const held = new Promise<void>(resolve => { resume = resolve })
+        const failing = uploadBoundary({
+            failCommand: 'asset_cas_job_upload_chunk',
+            beforeCancel: () => { cancelling = true; return held },
+        })
+        const next = uploadBoundary()
+        const data = new Uint8Array(64 * 1024 + 1)
+        const writing = Promise.allSettled([
+            prepareCasObject('cancelled-transfer', data, 'direct-object', failing.invoke, budget),
+            prepareCasObject('queued-transfer', data, 'direct-object', next.invoke, budget),
+        ])
+        try {
+            await vi.waitFor(() => expect(cancelling).toBe(true))
+            expect(failing.active.size).toBe(1)
+            expect(next.invoke).not.toHaveBeenCalled()
+        } finally {
+            resume()
+        }
+        expect((await writing).map(outcome => outcome.status)).toEqual(['rejected', 'fulfilled'])
+        expect(failing.active.size).toBe(0)
+        expect(next.active.size).toBe(0)
+    })
+
+    it('keeps a small direct write available while streamed uploads wait for admission', async () => {
+        const budget = createNativeCasUploadBudget({ maxUploads: 1 })
+        let resume!: () => void
+        const held = new Promise<void>(resolve => { resume = resolve })
+        const native = uploadBoundary({ beforeChunk: () => held })
+        const large = prepareCasObject('large-transfer', new Uint8Array(64 * 1024 + 1), 'direct-object', native.invoke, budget)
+        try {
+            await vi.waitFor(() => expect(native.active.size).toBe(1))
+            const data = Uint8Array.of(1, 2, 3)
+            const saved = await prepareCasObject('small-transfer', data, 'direct-object', native.invoke, budget)
+            expect(native.stored.get(saved.contentHash)).toEqual(data)
+        } finally {
+            resume()
+            await large
+        }
+    })
+
+    it('admits queued uploads in arrival order when a smaller request could fit first', async () => {
+        const budget = createNativeCasUploadBudget({ maxUploads: 2, capacityBytes: 3 })
+        const started: string[] = []
+        let resume!: () => void
+        const held = new Promise<void>(resolve => { resume = resolve })
+        const writing = Promise.all([
+            budget.run(2, async () => { started.push('first'); await held; return 'first' }),
+            budget.run(2, async () => { started.push('second'); return 'second' }),
+            budget.run(1, async () => { started.push('third'); return 'third' }),
+        ])
+        await vi.waitFor(() => expect(started).toEqual(['first'])).finally(resume)
+        expect(await writing).toEqual(['first', 'second', 'third'])
+        expect(started).toEqual(['first', 'second', 'third'])
+    })
+
+    it('rejects uploads that cannot fit instead of blocking later requests', async () => {
+        const budget = createNativeCasUploadBudget({ capacityBytes: 2 })
+        await expect(budget.run(3, async () => 'too large')).rejects.toThrow(RangeError)
+        await expect(budget.run(2, async () => 'fits')).resolves.toBe('fits')
+        await expect(createNativeCasUploadBudget().run(512 * 1024 * 1024 + 1, async () => 'too large'))
+            .rejects.toThrow(RangeError)
+        expect(() => createNativeCasUploadBudget({ maxUploads: 5 })).toThrow(RangeError)
+        expect(() => createNativeCasUploadBudget({ capacityBytes: 1024 * 1024 * 1024 + 1 })).toThrow(RangeError)
+    })
+
     it('streams large CAS writes through bounded chunks and always cancels the spool', async () => {
         const hash = '22'.repeat(32)
         const acknowledgements: number[] = []
@@ -369,6 +616,51 @@ describe('native asset repository adapters', () => {
             'native_media_encode_inlay_image',
             expect.anything(),
         )
+    })
+
+    it('keeps a large source the native encoder left unchanged without downloading it back', async () => {
+        const transferSize = 64 * 1024 + 1
+        const source = new Uint8Array(transferSize)
+        source.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+            if (command === 'native_asset_bytes_probe') return false
+            if (command === 'native_media_inlay_input_open') return { capacity: 64 * 1024 }
+            if (command === 'native_media_inlay_input_chunk') {
+                return Number(args?.offset) + (args?.data as number[]).length
+            }
+            if (command === 'native_media_encode_inlay_finish') {
+                return {
+                    data: null,
+                    outputId: null,
+                    outputSize: transferSize,
+                    sourceKept: true,
+                    metadata: {
+                        key: 'kept-inlay', kind: 'inlay', size: transferSize,
+                        mime: 'image/png', name: 'kept.png', ext: 'png',
+                        inlayType: 'image', width: 1, height: 1,
+                        preservationReason: 'color-profile',
+                    },
+                }
+            }
+            return undefined
+        })
+
+        const encoded = await createNativeNewInlayImageEncoder(invoke).encodeNewInlayImage(
+            'kept-inlay',
+            source,
+            { name: 'kept.png', options: { format: 'webp', quality: 85, maxDimension: 0, skipReencode: true, animationDecodeBytes: 256 * 1024 * 1024, animationMaxFps: 0 } },
+        )
+
+        expect(encoded.data).toBe(source)
+        expect(encoded.metadata).toMatchObject({ mime: 'image/png', ext: 'png', preservationReason: 'color-profile' })
+        expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+            'native_asset_bytes_probe',
+            'native_media_inlay_input_open',
+            'native_media_inlay_input_chunk',
+            'native_media_inlay_input_chunk',
+            'native_media_encode_inlay_finish',
+            'native_media_inlay_input_cancel',
+        ])
     })
 
     it('normalizes ignored original conversion options before invoking native code', async () => {

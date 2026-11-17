@@ -99,6 +99,7 @@ export interface AssetAliasPage {
 }
 
 interface AssetAliasBase {
+    metadata?: Record<string, unknown>
     key: string
     objectHash: string | null
     size: number
@@ -400,6 +401,14 @@ export interface ConversationPage {
     nextCursor?: string
 }
 
+/** A stored conversation that currently reads its author's note from a preset. */
+export interface AuthorNotePresetUsage {
+    characterId: string
+    characterName: string
+    conversationId: string
+    conversationName: string
+}
+
 export interface ConversationWindowQuery {
     characterId: string
     conversationId: string
@@ -635,12 +644,18 @@ export interface PersistentDataStore {
     lwwDrainDeferred?(request: LwwApplyReceive): Promise<LwwApplyResult>
     open(): Promise<void>
     readRoot(): Promise<Versioned<PersistentRoot>>
+    /** The current revision alone; read it through `readCurrentRevision`. */
+    readRevision?(): Promise<DataRevision>
+    /** Stable across ordinary writes, changed by a full library replacement. */
+    readLibraryIdentity?(): Promise<string>
     queryPresets(): Promise<PresetCatalog>
     readPreset(id: string): Promise<Versioned<botPreset> | null>
     queryCharacters(input: CharacterQuery): Promise<CharacterPage>
     readCharacterSummary(id: string): Promise<CharacterSummary | null>
     readCharacter(id: string): Promise<Versioned<CharacterDetail> | null>
     queryConversations(input: ConversationQuery): Promise<ConversationPage>
+    /** Conversations of non-archived characters linked to the preset with a matching fingerprint. */
+    queryAuthorNotePresetUsage?(presetId: string): Promise<AuthorNotePresetUsage[]>
     readConversation(characterId: string, conversationId: string): Promise<Versioned<Chat> | null>
     readConversationMetadata(
         characterId: string,
@@ -663,7 +678,7 @@ export interface PersistentDataStore {
     readAssetAliasesByKeys(kind: AssetAliasKind, keys: string[]): Promise<Versioned<AssetAlias[]>>
     listAssetAliases(query: AssetAliasListQuery): Promise<AssetAliasPage>
     readAssetOwnerHead(owner: AssetOwnerLocator): Promise<Versioned<AssetOwnerHead> | null>
-    commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision): Promise<{ revision: DataRevision }>
+    commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision, expectedLibrary?: string): Promise<{ revision: DataRevision }>
     deleteAssetAlias(
         identity: AssetAliasIdentity,
         expectedRevision: DataRevision,
@@ -696,4 +711,11 @@ export interface PersistentDataStore {
     ): Promise<{ revision: DataRevision }>
     materializeDatabase(revision?: DataRevision): Promise<Database>
     acquireRevision(revision: DataRevision): Promise<PersistentRevisionLease>
+}
+
+/** The store's current revision, without reading the root where the store can answer alone. */
+export function readCurrentRevision(
+    store: Pick<PersistentDataStore, 'readRoot' | 'readRevision'>,
+): Promise<DataRevision> {
+    return store.readRevision ? store.readRevision() : store.readRoot().then((root) => root.revision)
 }

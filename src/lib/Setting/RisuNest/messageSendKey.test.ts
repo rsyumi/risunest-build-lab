@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
 import { DBState } from 'src/ts/stores.svelte'
@@ -11,6 +11,9 @@ import RisuNestSettingRows from './RisuNestSettingRows.svelte'
 vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 
 let mounted: ReturnType<typeof mount> | undefined
+beforeEach(() => {
+    DBState.db.risunestScrollNavigation = true
+})
 afterEach(async () => {
     if (mounted) await unmount(mounted)
     mounted = undefined

@@ -19,6 +19,11 @@ export const hostManifests = [
   'server/manager/gui/src-tauri/Cargo.toml',
 ]
 
+export const harnessManifests = [
+  'crates/cbs-experimental/Cargo.toml',
+  'benchmarks/rust-cbs/native/Cargo.toml',
+]
+
 export const packageCrateTests = [
   {
     manifest: 'crates/tauri-plugin-window-state/Cargo.toml',
@@ -85,12 +90,17 @@ export function sharedCargoTarget(commonGitDirectory, configuredTarget, root) {
   return target
 }
 
+// The app crate under test compiles unoptimized; its dependencies keep the release optimization.
+export const appTestProfile = ['--config', 'profile.release.package.risunest.opt-level=0']
+
 export function nativeCommands(group, platform = process.platform) {
   if (!['protocol', 'host', 'harness'].includes(group)) throw new Error('Expected protocol, host or harness')
   if (group === 'harness') {
     // The Sync server's source observer serves the LWW benchmark and compiles only into test builds
     // with this feature. Its copy of small-object-store repeats that crate's own tests, so they are skipped.
-    return [[
+    return [...harnessManifests.map(manifest => [
+      'cargo', 'test', '--manifest-path', manifest, '--release', '--locked',
+    ]), [
       'cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked', '--lib',
       '--features', 'source-observer', '--', '--skip', 'source_observer::small_object_store::tests',
     ]]
@@ -98,11 +108,11 @@ export function nativeCommands(group, platform = process.platform) {
   const commands = []
   for (const manifest of group === 'protocol' ? protocolManifests : hostManifests) {
     if (manifest === 'src-tauri/Cargo.toml' && platform === 'linux') {
-      commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release'])
+      commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release', ...appTestProfile])
     } else if (manifest === 'crates/network-log/Cargo.toml') {
       commands.push(['cargo', 'test', '--manifest-path', manifest, '--features', 'reqwest', '--release', '--locked'])
     } else {
-      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked'])
+      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked', ...(manifest === 'src-tauri/Cargo.toml' ? appTestProfile : [])])
     }
   }
   if (group === 'host') {

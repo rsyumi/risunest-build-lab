@@ -1,3 +1,4 @@
+import { imageFixture } from '../../../../tests/support/imageFixtures'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 
@@ -5,7 +6,6 @@ import { writeFile } from '@tauri-apps/plugin-fs'
 import { save } from '@tauri-apps/plugin-dialog'
 
 import { ActiveConversationSession } from '../../storage/activeConversationSession'
-import type { AndroidSafDestinationReservation } from '../../storage/androidSafBridge'
 import type { PlatformShape } from '../../platform.testSupport'
 import type { Chat, Database } from '../../storage/database.svelte'
 
@@ -21,8 +21,8 @@ const mocks = vi.hoisted(() => ({
     InlayInputTooLargeError: class InlayInputTooLargeError extends Error {},
     alertError: vi.fn(),
     platform: { runtime: 'web', os: 'windows' } as PlatformShape,
-    reserveAndroidSafDownload: vi.fn(),
-    publishAndroidSafDownload: vi.fn(),
+    pickRewritableIOSFile: vi.fn(async (_name: string) => false),
+    rewriteIOSFile: vi.fn(async (_text: string) => {}),
 }))
 
 vi.mock('src/ts/stores.svelte', () => ({
@@ -45,12 +45,10 @@ vi.mock('src/ts/globalApi.svelte', () => ({ downloadFile: mocks.downloadFile }))
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => mocks.platform))
 vi.mock('@tauri-apps/plugin-fs', async () => (await import('src/ts/globalApi.testSupport')).tauriFsModule())
 vi.mock('@tauri-apps/plugin-dialog', async () => (await import('src/ts/globalApi.testSupport')).tauriDialogModule())
-vi.mock('src/ts/storage/androidSafDownload', () => ({
-    ANDROID_DOWNLOAD_PIECE_BYTES: 1,
-    downloadThroughAndroidSaf: vi.fn(),
-    reserveAndroidSafDownload: mocks.reserveAndroidSafDownload,
-    publishAndroidSafDownload: mocks.publishAndroidSafDownload,
-}) satisfies typeof import('src/ts/storage/androidSafDownload'))
+vi.mock('src/ts/storage/iosFiles', () => ({
+    pickRewritableIOSFile: mocks.pickRewritableIOSFile,
+    rewriteIOSFile: mocks.rewriteIOSFile,
+}))
 vi.mock('../memory/hypamemory', () => ({
     HypaProcesser: class {
         addText() {}
@@ -78,6 +76,7 @@ import { postChatFile } from './multisend'
 import { InlayInputTooLargeError } from './inlays'
 import { doingChat, reserveGeneration } from '../generationState'
 import { language } from 'src/lang'
+import { selectMultipleFile } from 'src/ts/util'
 
 function createDatabase(): Database {
     const conversation = {
@@ -262,11 +261,6 @@ describe('postChatFile PO save destination', () => {
     const afterSecond = `${afterFirst}msgid "second"\nmsgstr ""\n"second"\n\n`
     const translated = `${afterSecond}\n`
     const decode = (data: unknown) => new TextDecoder().decode(data as Uint8Array)
-    const androidReservation = () => ({
-        requestId: 'synthetic-request',
-        bind: vi.fn(async () => {}),
-        release: vi.fn(async () => {}),
-    }) satisfies AndroidSafDestinationReservation
     let conversation: Chat
 
     beforeEach(() => {
@@ -283,8 +277,8 @@ describe('postChatFile PO save destination', () => {
         })
         mocks.sendChat.mockReset().mockImplementation(async () => undefined)
         mocks.downloadFile.mockClear()
-        mocks.reserveAndroidSafDownload.mockReset()
-        mocks.publishAndroidSafDownload.mockReset()
+        mocks.pickRewritableIOSFile.mockReset()
+        mocks.rewriteIOSFile.mockReset()
         vi.mocked(save).mockReset()
         vi.mocked(writeFile).mockReset()
         doingChat.set(false)
@@ -294,76 +288,51 @@ describe('postChatFile PO save destination', () => {
         mocks.platform = { runtime: 'web', os: 'windows' }
     })
 
-    it('asks for the desktop file once and rewrites it after every message', async () => {
-        mocks.platform = { runtime: 'tauri', os: 'windows' }
-        vi.mocked(save).mockResolvedValue('/synthetic/translated.po')
+    it.each<[string, PlatformShape, string]>([
+        ['desktop', { runtime: 'tauri', os: 'windows' }, '/synthetic/translated.po'],
+        ['Android', { runtime: 'tauri', os: 'android' }, 'content://synthetic/translated.po'],
+    ])('asks for the %s file once and rewrites it after every message', async (_name, platform, path) => {
+        mocks.platform = platform
+        vi.mocked(save).mockResolvedValue(path)
 
         await expect(postChatFile({ name: 'input.po', data: input })).resolves.toEqual([{ type: 'void' }])
 
-        expect(save).toHaveBeenCalledOnce()
-        expect(vi.mocked(writeFile).mock.calls.map(([path, data]) => [path, decode(data)])).toEqual([
-            ['/synthetic/translated.po', afterFirst],
-            ['/synthetic/translated.po', afterSecond],
-            ['/synthetic/translated.po', translated],
+        expect(vi.mocked(save).mock.calls).toEqual([[{ defaultPath: 'translated.po' }]])
+        expect(vi.mocked(writeFile).mock.calls.map(([target, data]) => [target, decode(data)])).toEqual([
+            [path, afterFirst],
+            [path, afterSecond],
+            [path, translated],
         ])
         expect(mocks.downloadFile).not.toHaveBeenCalled()
     })
 
-    it('picks the Android destination before sending and writes the finished file there', async () => {
-        mocks.platform = { runtime: 'tauri', os: 'android' }
-        const reservation = androidReservation()
-        const events: string[] = []
-        const published: unknown[] = []
-        mocks.reserveAndroidSafDownload.mockImplementation(async () => {
-            events.push('pick')
-            return reservation
-        })
-        mocks.sendChat.mockImplementation(async () => { events.push('send') })
-        mocks.publishAndroidSafDownload.mockImplementation(async (destination, name, data) => {
-            events.push('publish')
-            published.push([destination, name, decode(data)])
-            return true
-        })
+    it('asks for the iOS file once and rewrites it after every message', async () => {
+        mocks.platform = { runtime: 'tauri', os: 'ios' }
+        mocks.pickRewritableIOSFile.mockResolvedValue(true)
 
         await postChatFile({ name: 'input.po', data: input })
 
-        expect(events).toEqual(['pick', 'send', 'send', 'publish'])
-        expect(published).toEqual([[reservation, 'translated.po', translated]])
+        expect(mocks.pickRewritableIOSFile.mock.calls).toEqual([['translated.po']])
+        expect(mocks.rewriteIOSFile.mock.calls).toEqual([[afterFirst], [afterSecond], [translated]])
+        expect(save).not.toHaveBeenCalled()
+        expect(mocks.downloadFile).not.toHaveBeenCalled()
     })
 
-    it('releases the Android destination when the run stops before the file is written', async () => {
+    it('keeps the finished messages in the Android file when the run stops partway', async () => {
         mocks.platform = { runtime: 'tauri', os: 'android' }
-        const reservation = androidReservation()
-        mocks.reserveAndroidSafDownload.mockResolvedValue(reservation)
-        const failure = new Error('provider failed')
-        mocks.sendChat.mockRejectedValueOnce(failure)
-
-        await expect(postChatFile({ name: 'input.po', data: input })).rejects.toBe(failure)
-
-        expect(reservation.release).toHaveBeenCalledOnce()
-        expect(mocks.publishAndroidSafDownload).not.toHaveBeenCalled()
-    })
-
-    it('writes the last checkpoint to the Android destination when the run stops partway', async () => {
-        mocks.platform = { runtime: 'tauri', os: 'android' }
-        const reservation = androidReservation()
-        const published: unknown[] = []
-        mocks.reserveAndroidSafDownload.mockResolvedValue(reservation)
-        mocks.publishAndroidSafDownload.mockImplementation(async (destination, name, data) => {
-            published.push([destination, name, decode(data)])
-            return true
-        })
+        vi.mocked(save).mockResolvedValue('content://synthetic/translated.po')
         const failure = new Error('provider failed')
         mocks.sendChat.mockResolvedValueOnce(undefined).mockRejectedValueOnce(failure)
 
         await expect(postChatFile({ name: 'input.po', data: input })).rejects.toBe(failure)
 
-        expect(published).toEqual([[reservation, 'translated.po', afterFirst]])
+        expect(vi.mocked(writeFile).mock.calls.map(([, data]) => decode(data))).toEqual([afterFirst])
     })
 
     it.each<[string, PlatformShape, () => void]>([
         ['desktop', { runtime: 'tauri', os: 'windows' }, () => vi.mocked(save).mockResolvedValue(null)],
-        ['Android', { runtime: 'tauri', os: 'android' }, () => mocks.reserveAndroidSafDownload.mockResolvedValue(null)],
+        ['Android', { runtime: 'tauri', os: 'android' }, () => vi.mocked(save).mockResolvedValue(null)],
+        ['iOS', { runtime: 'tauri', os: 'ios' }, () => mocks.pickRewritableIOSFile.mockResolvedValue(false)],
     ])('sends nothing when the %s destination is cancelled', async (_name, platform, cancel) => {
         mocks.platform = platform
         cancel()
@@ -373,18 +342,13 @@ describe('postChatFile PO save destination', () => {
         expect(conversation.message.map((message) => message.data)).toEqual(['before'])
         expect(mocks.sendChat).not.toHaveBeenCalled()
         expect(writeFile).not.toHaveBeenCalled()
-        expect(mocks.publishAndroidSafDownload).not.toHaveBeenCalled()
+        expect(mocks.rewriteIOSFile).not.toHaveBeenCalled()
         const next = reserveGeneration()
         expect(next).not.toBeNull()
         next?.release()
     })
 
-    it.each<[string, PlatformShape]>([
-        ['iOS', { runtime: 'tauri', os: 'ios' }],
-        ['the web', { runtime: 'web', os: 'windows' }],
-    ])('saves the finished file once on %s', async (_name, platform) => {
-        mocks.platform = platform
-
+    it('saves the finished file once on the web', async () => {
         await postChatFile({ name: 'input.po', data: input })
 
         expect(mocks.downloadFile.mock.calls).toEqual([['translated.po', translated]])
@@ -400,33 +364,46 @@ describe('postChatFile attachment errors', () => {
         mocks.alertError.mockReset()
     })
 
+    it.each([false, true])('does not repeat selection failures when attachment storage fails: %s', async storageFails => {
+        vi.mocked(selectMultipleFile).mockImplementationOnce(async (_extensions, options) => {
+            options!.failures!.push('rejected.png: damaged')
+            mocks.alertError('rejected.png: damaged')
+            return [{ name: 'valid.png', data: imageFixture('png') }]
+        })
+        if (storageFails) mocks.postInlayAsset.mockRejectedValueOnce(new Error('cannot store'))
+        else mocks.postInlayAsset.mockResolvedValueOnce('inlay-id')
+        expect(await postChatFile('')).toEqual(storageFails ? [] : [{ type: 'asset', data: 'inlay-id' }])
+        expect(mocks.alertError.mock.calls.map(([message]) => message)).toEqual(storageFails
+            ? ['rejected.png: damaged', 'valid.png: cannot store'] : ['rejected.png: damaged'])
+    })
+
     it.each(['gif', 'png'])('skips an oversized %s attachment without appending an asset or message', async (extension) => {
         mocks.postInlayAsset.mockRejectedValueOnce(new InlayInputTooLargeError('over the input limit'))
         const conversation = mocks.dbState.db!.characters[0].chats[0]
 
-        await expect(postChatFile({ name: `huge.${extension}`, data: new Uint8Array([1]) })).resolves.toEqual([])
+        await expect(postChatFile({ name: `huge.${extension}`, data: imageFixture(extension as 'png' | 'gif') })).resolves.toEqual([])
 
-        expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.inlay.tooLarge)
+        expect(mocks.alertError).toHaveBeenCalledWith(`huge.${extension}: ${language.risuNest.inlay.tooLarge}`)
         expect(conversation.message).toEqual([{ role: 'char', data: 'before' }])
         expect(mocks.sendChat).not.toHaveBeenCalled()
     })
 
-    it.each(['png', 'mp3'])('propagates ordinary %s attachment failures', async (extension) => {
+    it.each(['png', 'mp3', 'txt'])('reports ordinary %s attachment failures by name', async (extension) => {
         const failure = new Error('storage failed')
         mocks.postInlayAsset.mockRejectedValueOnce(failure)
 
-        await expect(postChatFile({ name: `attachment.${extension}`, data: new Uint8Array([1]) }))
-            .rejects.toBe(failure)
+        await expect(postChatFile({ name: `attachment.${extension}`, data: extension === 'mp3' ? new Uint8Array([1]) : imageFixture('png') }))
+            .resolves.toEqual([])
 
-        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(mocks.alertError).toHaveBeenCalledWith(`attachment.${extension}: storage failed`)
     })
 
-    it('keeps null unsupported-extension results as a silent skip', async () => {
+    it('reports an unrecognized attachment instead of silently skipping it', async () => {
         mocks.postInlayAsset.mockResolvedValueOnce(null)
 
         await expect(postChatFile({ name: 'attachment.avi', data: new Uint8Array([1]) }))
             .resolves.toEqual([])
 
-        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(mocks.alertError).toHaveBeenCalledWith(`attachment.avi: ${language.risuNest.importDialog.reasonUnsupportedFormat}`)
     })
 })

@@ -24,6 +24,7 @@ struct Files {
     prefix: String,
     slots: Arc<Semaphore>,
     remote: Arc<MediaProvider>,
+    thumbnails: Arc<super::thumbnail::ThumbnailCache>,
 }
 
 pub(crate) struct MediaServer {
@@ -39,6 +40,7 @@ impl MediaServerState {
     pub(crate) fn begin_cleanup(&self) -> Result<(), String> {
         let state = self.0.lock().map_err(|_| "cleanup-media-busy")?;
         if let Ok(server) = state.as_ref() {
+            server.files.thumbnails.close();
             server.slots.close();
             server.task.abort();
         }
@@ -83,19 +85,19 @@ impl MediaServerState {
         Ok(base_url)
     }
 
-    pub(crate) fn reopen_after_cleanup(&self, root: PathBuf) -> Result<(), String> {
-        let server = MediaServer::start(root).map_err(|_| "cleanup-media-unavailable")?;
+    pub(crate) fn reopen_after_cleanup(&self, root: PathBuf, cache: PathBuf) -> Result<(), String> {
+        let server = MediaServer::start_with_cache(root, cache).map_err(|_| "cleanup-media-unavailable")?;
         *self.0.lock().map_err(|_| "cleanup-media-busy")? = Ok(server);
         Ok(())
     }
 
-    pub(crate) fn initialize_after_cleanup(root: PathBuf) -> Result<Self, String> {
-        let server = MediaServer::start(root).map_err(|_| "cleanup-media-unavailable")?;
+    pub(crate) fn initialize_after_cleanup(root: PathBuf, cache: PathBuf) -> Result<Self, String> {
+        let server = MediaServer::start_with_cache(root, cache).map_err(|_| "cleanup-media-unavailable")?;
         Ok(Self(std::sync::Mutex::new(Ok(server))))
     }
 
-    pub(crate) fn initialize(root: PathBuf) -> Self {
-        Self(std::sync::Mutex::new(MediaServer::start(root).map_err(|_| "native-media-unavailable".to_owned())))
+    pub(crate) fn initialize(root: PathBuf, cache: PathBuf) -> Self {
+        Self(std::sync::Mutex::new(MediaServer::start_with_cache(root, cache).map_err(|_| "native-media-unavailable".to_owned())))
     }
 }
 
@@ -122,7 +124,13 @@ impl MediaServer {
     pub(crate) fn test_base_url(&self) -> &str {
         &self.base_url
     }
+    #[cfg(test)]
     pub(crate) fn start(root: PathBuf) -> io::Result<Self> {
+        let cache = root.join("cache");
+        Self::start_with_cache(root, cache)
+    }
+
+    fn start_with_cache(root: PathBuf, cache: PathBuf) -> io::Result<Self> {
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let authority = listener.local_addr()?.to_string();
@@ -137,6 +145,7 @@ impl MediaServer {
             prefix,
             slots: Arc::new(Semaphore::new(MAX_TRANSFERS)),
             remote,
+            thumbnails: Arc::new(super::thumbnail::ThumbnailCache::new(cache)),
         };
         Self::from_listener(listener, state)
     }
@@ -210,7 +219,7 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
     if path.len() > 16384 {
         return empty(StatusCode::NOT_FOUND);
     }
-    let (uri, remote, refresh) = if let Some(token) = path.strip_prefix(REFRESH_PATH) {
+    let (uri, remote, refresh, thumbnail) = if let Some(token) = path.strip_prefix(REFRESH_PATH) {
         let Ok(object) = state.remote.verify_refresh(token) else {
             return empty(StatusCode::NOT_FOUND);
         };
@@ -224,9 +233,12 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
         url.query_pairs_mut()
             .append_pair("mime", &object.mime)
             .append_pair("size", object.size.as_str());
-        (url.to_string(), Some(object), true)
+        (url.to_string(), Some(object), true, false)
     } else if let Some(path) = path.strip_prefix(&state.prefix) {
         let uri = format!("http://risuasset.localhost/{path}");
+        let Ok((uri, thumbnail)) = super::thumbnail::parse_request(&uri) else {
+            return empty(StatusCode::NOT_FOUND);
+        };
         let remote = super::decode_physical_key(&uri)
             .and_then(|key| super::cas_content_hash(&key))
             .and_then(|hash| {
@@ -236,7 +248,7 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
                     size: size.into(),
                 })
             });
-        (uri, remote, false)
+        (uri, remote, false, thumbnail)
     } else {
         return empty(StatusCode::NOT_FOUND);
     };
@@ -252,6 +264,11 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
     *request.uri_mut() = uri;
     let (response, permit) = match tokio::task::spawn_blocking(move || {
         let response = (|| {
+        if thumbnail {
+            if let Some(response) = state.thumbnails.response(&state.root, request.clone()) {
+                return response;
+            }
+        }
         let response = super::prepare_response(&state.root, request);
         if response.status() == StatusCode::NOT_FOUND {
             if let Some(object) = remote {
@@ -284,6 +301,9 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
         Err(_) => return empty(StatusCode::INTERNAL_SERVER_ERROR),
     };
     let (mut parts, reader) = response.into_parts();
+    if thumbnail && (parts.status.is_success() || parts.status == StatusCode::NOT_MODIFIED) {
+        parts.headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    }
     parts
         .headers
         .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());

@@ -58,7 +58,7 @@ describe('current asset repository dispatcher', () => {
 })
 
 describe('coordinated staged asset activation', () => {
-    function harness() {
+    function harness(options: { revisionReader?: boolean } = {}) {
         let revision = 1
         let authorityEpoch = 1
         let alias: unknown = { ...metadata, key: 'assets/item.bin', objectHash: '4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a', size: 1 }
@@ -110,13 +110,14 @@ describe('coordinated staged asset activation', () => {
         const authority = {
             rawStore: {
                 async readAssetAlias() { return alias ? { revision, value: structuredClone(alias) } : null },
-                async readRoot() {
+                readRoot: vi.fn(async () => {
                     if (failure === 'root') {
                         failure = null
                         throw new Error('root read failed')
                     }
                     return { revision, value: {} }
-                },
+                }),
+                ...(options.revisionReader ? { readRevision: vi.fn(async () => revision) } : {}),
             },
             gate: {
                 async runKeyedWrite(_key: string, operation: () => Promise<unknown>) {
@@ -130,6 +131,7 @@ describe('coordinated staged asset activation', () => {
         }
         return {
             handles,
+            rawStore: authority.rawStore,
             setAlias(value: unknown) { alias = value },
             preparationStarted,
             currentRemove: current.remove as ReturnType<typeof vi.fn>,
@@ -159,6 +161,15 @@ describe('coordinated staged asset activation', () => {
         await expect(writer!(Uint8Array.of(2), metadata, Uint8Array.of(1))).rejects.toThrow('already used')
     })
 
+    it('checks download ownership inside activation and aborts a rejected prepared write', async () => {
+        const setup = harness()
+        await expect(setup.blob.putVerified!('assets/item.bin', Uint8Array.of(1), metadata, async () => {
+            throw new Error('Download library was replaced')
+        })).rejects.toThrow('Download library was replaced')
+        expect(setup.handles[0].activate).not.toHaveBeenCalled()
+        expect(setup.handles[0].abort).toHaveBeenCalledOnce()
+    })
+
     it('rejects transformed B when the captured A alias was restored before activation', async () => {
         const setup = harness()
         const writer = await setup.blob.captureConditionalWrite!('assets/item.bin')
@@ -173,6 +184,14 @@ describe('coordinated staged asset activation', () => {
         expect(await writer!(Uint8Array.of(2), metadata, Uint8Array.of(1))).toMatchObject({ key: 'assets/item.bin' })
         expect(setup.handles[0].activate).toHaveBeenCalledOnce()
         expect(setup.handles[0].abort).not.toHaveBeenCalled()
+    })
+
+    it('checks the revision around an activation without reading the root where the store can', async () => {
+        const setup = harness({ revisionReader: true })
+        const writer = await setup.blob.captureConditionalWrite!('assets/item.bin')
+        expect(await writer!(Uint8Array.of(2), metadata, Uint8Array.of(1))).toMatchObject({ key: 'assets/item.bin' })
+        expect(setup.rawStore.readRevision).toHaveBeenCalledTimes(2)
+        expect(setup.rawStore.readRoot).not.toHaveBeenCalled()
     })
 
     it.each([

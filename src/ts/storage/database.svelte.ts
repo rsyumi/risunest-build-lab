@@ -616,6 +616,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.showDeprecatedTriggerV2 ??= false
     data.returnCSSError ??= true
     data.realmDirectOpen ??= false
+    data.blockedRealmCreators ??= []
     data.checkCorruption ??= false
     data.toggleConfirmRecommendedPreset ??= false
     data.useExperimentalGoogleTranslator ??= false
@@ -717,6 +718,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.streamingThoughtMode ??= 'recent'
     data.streamingDeferDisplayProcessing ??= false
     data.risunestChatEditPopup ??= true
+    data.risunestScrollNavigation ??= true
     data.risunestSyncStatusUi ??= true
     data.echoMessage ??= "Echo Message"
     data.echoDelay ??= 0
@@ -733,6 +735,12 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.enableRisuaiProTools ??= data.plugins.length > 0
     data.keepSessionAlive ??= 'off'
     data.loadouts ??= []
+    data.loadoutApplyOptions ??= {
+        modules: true,
+        globalVariables: true,
+        preset: true,
+        persona: true
+    }
     data.longPressToPopupEditor ??= false
     data.customSidebarItems ??= []
     data.moveInsteadOfCopyOnCMPConvert ??= false
@@ -781,12 +789,7 @@ export function getDatabase(options:getDatabaseOptions = {}):Database{
 }
 
 export function getCurrentCharacter(options:getDatabaseOptions = {}):character{
-    const db = getDatabase(options)
-    if(!db.characters){
-        db.characters = []
-    }
-    const char = db.characters?.[get(selectedCharID)]
-    return char
+    return getCharacterByIndex(get(selectedCharID), options)
 }
 
 export function setCurrentCharacter(char:character){
@@ -797,12 +800,12 @@ export function setCurrentCharacter(char:character){
 }
 
 export function getCharacterByIndex(index:number,options:getDatabaseOptions = {}):character{
-    const db = getDatabase(options)
-    if(!db.characters){
-        db.characters = []
+    if(!DBState.db.characters){
+        DBState.db.characters = []
     }
-    const char = db.characters?.[index]
-    return char
+    const char = DBState.db.characters[index]
+    // snapshot only the requested character instead of the whole database
+    return options.snapshot ? $state.snapshot(char) as character : char
 }
 
 export function setCharacterByIndex(index:number,char:character){
@@ -843,6 +846,11 @@ export interface RisuPersona {
     embeddedModule?:RisuModule
 }
 
+export type BlockedRealmCreator = {
+    id: string
+    name: string
+}
+
 export interface Database{
     characters: character[],
     apiType: string
@@ -853,15 +861,15 @@ export interface Database{
     globalNote:string
     temperature: number
     askRemoval:boolean
-    maxContext: number
-    maxResponse: number
+    maxContext: number|null
+    maxResponse: number|null
     frequencyPenalty: number
     PresensePenalty: number
     formatingOrder: FormatingOrderItem[]
     aiModel: string
     jailbreakToggle:boolean
-    loreBookDepth: number
-    loreBookToken: number,
+    loreBookDepth: number|null
+    loreBookToken: number|null,
     cipherChat: boolean,
     loreBook: {
         name:string
@@ -921,9 +929,9 @@ export interface Database{
         FontColorQuote1 : string,
         FontColorQuote2 : string
     }
-    requestRetrys:number
+    requestRetrys:number|null
     localNetworkMode:boolean
-    localNetworkTimeoutSec:number
+    localNetworkTimeoutSec:number|null
     emotionPrompt2:string
     useSayNothing:boolean
     didFirstSetup: boolean
@@ -1001,9 +1009,10 @@ export interface Database{
     personaNote:boolean
     assetWidth:number
     animationSpeed:number
-    botSettingAtStart:false
+    botSettingAtStart:boolean
     NAIsettings:NAISettings
     hideRealm:boolean
+    blockedRealmCreators:BlockedRealmCreator[]
     colorScheme:ColorScheme
     colorSchemeName:string
     customColorScheme:ColorScheme
@@ -1030,7 +1039,7 @@ export interface Database{
     localStopStrings?:string[]
     autofillRequestUrl:boolean
     customProxyRequestModel:string
-    generationSeed:number
+    generationSeed:number|null
     newOAIHandle:boolean
     gptVisionQuality:string
     reverseProxyOobaMode:boolean
@@ -1049,7 +1058,7 @@ export interface Database{
     }
     mistralKey?:string
     chainOfThought?:boolean
-    genTime:number
+    genTime:number|null
     promptSettings: PromptSettings
     keiServerURL:string
     top_k:number
@@ -1081,7 +1090,7 @@ export interface Database{
     ollamaCloudModelName:string
     ollamaThinkingMode:'auto'|'off'|'on'|'low'|'medium'|'high'
     autoContinueChat:boolean
-    autoContinueMinTokens:number
+    autoContinueMinTokens:number|null
     removeIncompleteResponse:boolean
     customTokenizer:string
     instructChatTemplate:string
@@ -1105,6 +1114,7 @@ export interface Database{
     disableToggleBinding?: boolean
     defaultToggleValues?: Record<string, string>
     togglePresets?: { name: string; values: Record<string, string>; promptPresetName?: string; id?: string }[]
+    authorNotePresets?: { id: string; name: string; text: string }[]
     globalChatVariables:{[key:string]:string}
     templateDefaultVariables:string
     hypaAllocatedTokens:number
@@ -1175,7 +1185,7 @@ export interface Database{
     presetChain: string
     legacyMediaFindings?:boolean
     geminiStream?:boolean
-    assetMaxDifference:number
+    assetMaxDifference:number|null
     auxModelUnderModelSettings:boolean
     menuSideBar:boolean
     pluginV2: RisuPlugin[]
@@ -1208,7 +1218,7 @@ export interface Database{
     checkCorruption?: boolean
     toggleConfirmRecommendedPreset?: boolean
     useExperimentalGoogleTranslator:boolean
-    thinkingTokens: number
+    thinkingTokens: number|null
     thinkingType: 'off' | 'budget' | 'adaptive'
     deepseekThinkingType: 'off' | 'enabled'
     adaptiveThinkingEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -1315,6 +1325,7 @@ export interface Database{
     streamingThoughtMode?: StreamingThoughtMode
     streamingDeferDisplayProcessing?: boolean
     risunestChatEditPopup?: boolean
+    risunestScrollNavigation?: boolean
     risunestSyncStatusUi?: boolean
     pluginDevelopMode?: boolean
     echoMessage?:string
@@ -1332,6 +1343,12 @@ export interface Database{
     keepSessionAlive: 'off' | 'pip' | 'sound'
     longPressToPopupEditor?: boolean
     loadouts: Loadout[]
+    loadoutApplyOptions: {
+        modules: boolean
+        globalVariables: boolean
+        preset: boolean
+        persona: boolean
+    }
     disableAprilFools?:boolean
     customSidebarItems: CustomSideBarItem[]
     lastLoadedLoadoutName: string
@@ -1431,7 +1448,7 @@ export interface character{
     removedQuotes?:boolean
     creatorNotes:string
     systemPrompt:string
-    postHistoryInstructions:string
+    postHistoryInstructions:string|null
     alternateGreetings:string[]
     tags:string[]
     creator:string
@@ -1543,6 +1560,7 @@ export interface character{
         ext: string
     }>
     defaultVariables?:string
+    onboarding?:CharacterOnboarding
     lowLevelAccess?:boolean
     hideChatIcon?:boolean
     lastInteraction?:number
@@ -1581,8 +1599,8 @@ export interface botPreset{
     jailbreak: string
     globalNote:string
     temperature: number
-    maxContext: number
-    maxResponse: number
+    maxContext: number|null
+    maxResponse: number|null
     frequencyPenalty: number
     PresensePenalty: number
     formatingOrder: FormatingOrderItem[]
@@ -1823,6 +1841,8 @@ export interface Chat{
     id?:string
     rerollRecovery?: import('../responseVariants').RerollRecovery
     savedToggleValues?: Record<string, string>
+    /** Selects an author's note preset while `note` still matches the fingerprint written with it. */
+    authorNotePreset?: { id: string; fingerprint: string }
     bindedPersona?:string
     fmIndex?:number
     hypaV3Data?:SerializableHypaV3Data
@@ -1833,6 +1853,35 @@ export interface Chat{
     useLocallySetGlobalVariables?: boolean
     GLGlobalVariables?: { [key: string]: string }
     toolCalls?: { [callId: string]: import('../process/mcp/mcp').toolCallData }
+    onboardingDone?: boolean
+}
+
+export interface OnboardingOption{
+    label:string
+    value:string
+}
+
+export interface OnboardingQuestion{
+    id:string
+    title:string
+    description?:string
+    type:'single'|'multiple'|'text'
+    varName:string
+    required?:boolean
+    options:OnboardingOption[]
+    placeholder?:string
+}
+
+/** A creator-defined set of choices shown before a chat starts. Each answer is written to a chat variable. */
+export interface CharacterOnboarding{
+    enabled:boolean
+    mode:'form'|'html'
+    title?:string
+    description?:string
+    questions:OnboardingQuestion[]
+    html?:string
+    /** Also shows a floating button on the chat screen that opens the onboarding. */
+    floatingButton?:boolean
 }
 
 export interface IrisDialogueLine{
@@ -1939,8 +1988,10 @@ export interface OobaSettings{
 
 
 export async function saveImage(data: Uint8Array, customId = '', fileName = '') {
+    const { requireImage } = await import('../media/imageFormats')
+    const format = requireImage(data)
     const { saveAsset } = await import('../globalApi.svelte')
-    return saveAsset(data, customId, fileName)
+    return saveAsset(data, customId, `${fileName || 'image'}.${format.ext}`)
 }
 
 export const defaultAIN:AINsettings = {

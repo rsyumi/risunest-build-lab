@@ -51,6 +51,7 @@ export const moduleBackgroundEmbedding = writable('')
 export const openPresetList = writable(false)
 export const openPersonaList = writable(false)
 export const bookmarkListOpen = writable(false)
+export const moduleScopeMenuOpen = writable(false)
 export const MobileGUI = writable(false)
 export const MobileGUIStack = writable(0)
 export const MobileSideBar = writable(0)
@@ -59,6 +60,8 @@ export const ReloadGUIPointer = writable(0)
 export const ReloadChatPointer = writable({} as Record<number, number>)
 /** Advanced when a script's variable change refreshes the rows that read it. */
 export const ScriptDisplayRefreshPointer = writable(0)
+/** Advanced when a script reloads the whole display, so the background rebuilds its DOM. */
+export const ScriptDisplayRebuildPointer = writable(0)
 export const ScrollToMessageStore = writable<CapturedChatMessageTarget | null>(null)
 export const OpenRealmStore = writable(false)
 export const RealmInitialOpenChar = writable<null | hubType>(null)
@@ -174,6 +177,10 @@ export const popUpEditorStore = $state({
 })
 
 export const loadoutModalStore = $state({
+    open: false
+})
+
+export const onboardingModalStore = $state({
     open: false
 })
 

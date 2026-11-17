@@ -11,9 +11,11 @@
     import { closeTextEditorPopup, openTextEditorPopup } from "src/ts/gui/textEditorPopup.svelte"
     import { forgetEditorPopup, type ChatEditorDraft, type ChatEditorPopup, type ChatEditorPopupHandlers } from "src/ts/chatEditorDrafts"
     import { getModelInfo } from "src/ts/model/modellist"
-    import { runLuaButtonTrigger } from 'src/ts/process/scriptings'
+    import { runLuaInteractionTrigger } from 'src/ts/process/scriptings'
     import { risuChatParser } from "src/ts/process/scripts"
     import { DisplayReadRecord, recordChatVariableReads, registerDisplayRow } from 'src/ts/process/scriptVariableReads'
+    import { rebuildScriptDisplayRow } from 'src/ts/process/scriptDisplayRefresh'
+    import { holdScriptRun } from 'src/ts/process/generationBackground'
     import { runTrigger } from 'src/ts/process/triggers'
     import { sayTTS } from "src/ts/process/tts"
     import { DBState, ReloadChatPointer, CurrentTriggerIdStore, popupStore } from 'src/ts/stores.svelte'
@@ -80,6 +82,9 @@
     let translationEvidence: Message | null = null
     let editPopup: ChatEditorPopup | null = null
     let chatBodyRevision = $state(0)
+    // Explicit refreshes replace this so the message is parsed once per flush.
+    // Assigning without reading keeps a caller's effect from depending on it.
+    let displayRequest = $state.raw({})
     let bodyRoot:HTMLElement|null = $state(null)
     let editTarget: CapturedChatMessageTarget | null = null
     let editEvidence: Message | null = null
@@ -128,6 +133,8 @@
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
         onDisplaySettled?: () => void
+        /** When the view asked for this row, from `nextDisplayListenerOrder`. */
+        displayRequestOrder?: number
         restoredEditor?: ChatEditorDraft
         onEditorOpen?: () => void
         onEditorClose?: () => void
@@ -171,6 +178,7 @@
         parserProjection,
         parserAbortSignal,
         onDisplaySettled,
+        displayRequestOrder,
         restoredEditor,
         onEditorOpen,
         onEditorClose,
@@ -190,6 +198,10 @@
         return retainedLayout
     })
     let captureTheme = $derived(presentedLayout.theme)
+    // Without the message buttons a long press on the inline editor is the only way to finish editing.
+    let editButtonShown = $derived(captureTheme === 'customHTML'
+        ? !!presentedLayout.gui?.querySelector('risubuttons')
+        : captureTheme !== 'mobilechat')
     let captureIconSize = $derived(captureSettings?.iconSize ?? DBState.db.iconsize)
     let captureZoomSize = $derived(captureSettings?.zoomSize ?? DBState.db.zoomsize)
     let captureLineHeight = $derived(captureSettings?.lineHeight ?? DBState.db.lineHeight ?? 1.25)
@@ -312,7 +324,7 @@
             if (editIntent) editIntent = selectedConversationOperations.rebindMessageEditIntent(editIntent, input)
             if (partialEditIntent) partialEditIntent = selectedConversationOperations.rebindMessageEditIntent(partialEditIntent, input)
         }
-        if (!state.preserveDisplay) updateDisplayedMessage()
+        if (!state.preserveDisplay) displayRequest = {}
     }
 
     export function refreshParserProjection(
@@ -399,6 +411,7 @@
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
         onDisplaySettled = state.onDisplaySettled
+        if (state.displayRequestOrder !== undefined) displayRequestOrder = state.displayRequestOrder
         if (state.viewportBinding) {
             updateViewportBinding({
                 ...state.viewportBinding,
@@ -409,7 +422,7 @@
         // Complete-history renders have no bounded projection object to change.
         // They still need to re-evaluate scripts when any message changes.
         chatBodyRevision += 1
-        updateDisplayedMessage()
+        displayRequest = {}
     }
 
     function currentConversationSession() {
@@ -873,6 +886,7 @@
     }
 
     $effect.pre(() => {
+        void displayRequest
         updateDisplayedMessage()
     });
 
@@ -941,58 +955,87 @@
         const triggerId = origin.getAttribute('risu-id')
         const btnEvent = origin.getAttribute('risu-btn')
 
-        const runManualTrigger = async (
-            currentChar: CharacterRecord,
-            currentChat: ReturnType<typeof getCurrentChat>,
-        ) => triggerName
+        await runMessageTrigger(async (currentChar, currentChat) => triggerName
             ? runTrigger(currentChar, 'manual', {
                 chat: currentChat,
                 manualName: triggerName,
                 triggerId: triggerId || undefined,
             })
             : btnEvent
-                ? runLuaButtonTrigger(currentChar, btnEvent)
-                : null
-        if (selectedConversationOperations) {
-            try {
-                await selectedConversationOperations.withCompleteSelectedConversation(
-                    'manual-chat-trigger',
-                    async (context) => {
-                        const authority = context.requireCurrent()
+                ? runLuaInteractionTrigger('button', currentChar, btnEvent)
+                : null)
 
-                        const triggerResult = await runManualTrigger(
-                            authority.character,
-                            authority.conversation,
-                        )
-                        context.requireCurrent()
-                        if (triggerResult) setCurrentChat(triggerResult.chat)
-                        if (triggerResult) ReloadChatPointer.update((v) => {
-                            v[idx] = (v[idx] ?? 0) + 1
-                            return v
-                        })
-                    },
-                )
-            } catch (error) {
-                if (!(error instanceof SelectedConversationPromotionStaleError)) throw error
-            }
-        } else {
-            const currentChar = getCurrentCharacter()
-            if(!currentChar) return
-            const triggerResult = await runManualTrigger(currentChar, getCurrentChat())
-            if(triggerResult) {
-                setCurrentChat(triggerResult.chat)
-                ReloadChatPointer.update((v) => {
-                    v[idx] = (v[idx] ?? 0) + 1
-                    return v
-                })
-            }
-        }
-        
         if(triggerName && triggerId) {
             setTimeout(() => {
                 CurrentTriggerIdStore.set(null)
             }, 100) // Small delay to allow display mode to complete
         }
+    }
+
+    async function handleFormTriggerWithin(event: SubmitEvent) {
+        // Regardless of attribute presence, prevent undesirable site exits via form submission
+        event.preventDefault()
+
+        const target = event.target as HTMLFormElement
+        const formEvent = target.getAttribute('risu-form')
+        if (!formEvent) {
+            return
+        }
+
+        const data: Record<string, FormDataEntryValue | FormDataEntryValue[]> = Object.create(null)
+        for (const [key, value] of new FormData(target, event.submitter)) {
+            if (Object.hasOwn(data, key)) {
+                const existing = data[key]
+                if (Array.isArray(existing)) {
+                    existing.push(value)
+                } else {
+                    data[key] = [existing, value]
+                }
+            } else {
+                data[key] = value
+            }
+        }
+
+        await runMessageTrigger((currentChar) =>
+            runLuaInteractionTrigger('form', currentChar, formEvent, { data }))
+    }
+
+    async function runMessageTrigger(
+        runManualTrigger: (
+            currentChar: CharacterRecord,
+            currentChat: ReturnType<typeof getCurrentChat>,
+        ) => Promise<{ chat: ReturnType<typeof getCurrentChat> } | null | undefined>,
+    ) {
+        await holdScriptRun(async () => {
+            if (selectedConversationOperations) {
+                try {
+                    await selectedConversationOperations.withCompleteSelectedConversation(
+                        'manual-chat-trigger',
+                        async (context) => {
+                            const authority = context.requireCurrent()
+
+                            const triggerResult = await runManualTrigger(
+                                authority.character,
+                                authority.conversation,
+                            )
+                            context.requireCurrent()
+                            if (triggerResult) setCurrentChat(triggerResult.chat)
+                            if (triggerResult) rebuildScriptDisplayRow(idx)
+                        },
+                    )
+                } catch (error) {
+                    if (!(error instanceof SelectedConversationPromotionStaleError)) throw error
+                }
+            } else {
+                const currentChar = getCurrentCharacter()
+                if(!currentChar) return
+                const triggerResult = await runManualTrigger(currentChar, getCurrentChat())
+                if(triggerResult) {
+                    setCurrentChat(triggerResult.chat)
+                    rebuildScriptDisplayRow(idx)
+                }
+            }
+        })
     }
 
     let isBookmarked = $derived(
@@ -1129,7 +1172,7 @@
         }} />
     {/if}
     {#if inlineEditMode}
-        <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} />
+        <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} touchLongPress={!editButtonShown} />
     {:else if isComment}
         <div class="w-full flex justify-center text-textcolor2 italic mb-12">
 
@@ -1200,6 +1243,7 @@
                     {captureParserIndex}
                     {parserAbortSignal}
                     {onDisplaySettled}
+                    {displayRequestOrder}
                     displayRow={displayRow ?? undefined}
                     {parserProjection} />
         </span>
@@ -1243,13 +1287,13 @@
                 {#if (innerWidth.current ?? 0) >= 640}
                     {@render majorIconButtonsBody(false)}
                     {@render pluginMessageButtons(false)}
-                    {#if DBState.db.characters[selIdState.selId]}
+                    {#if DBState.db.characters[selIdState.selId] && idx > -1}
                         <PopupButton>
                             {@render minorIconButtonsBody(true)}
                         </PopupButton>
                     {/if}
                 {:else}
-                    {#if DBState.db.characters[selIdState.selId]}
+                    {#if DBState.db.characters[selIdState.selId] && (idx > -1 || (DBState.db.useChatCopy && !blankMessage))}
                         <PopupButton>
                             {@render majorIconButtonsBody(true)}
                             {@render pluginMessageButtons(true)}
@@ -1534,7 +1578,12 @@
             {/if}
         </button>
     {/if}
-    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => rm(e, true)}>
+    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => {
+        // A held press ends without the click that closes the action popup.
+        popupStore.children = null
+        popupStore.openId = 0
+        rm(e, true)
+    }}>
             <TrashIcon size={20}/>
 
             {#if showNames}
@@ -1594,7 +1643,8 @@
 {/snippet}
 
 {#snippet minorIconButtonsBody(showNames:boolean)}
-    
+    <!-- These act on a stored message, which the greeting row is not. -->
+    {#if idx > -1}
     {#if DBState.db.enableBookmark}
         <button class="flex items-center hover:text-blue-500 transition-colors button-icon-bookmark {isBookmarked ? 'text-yellow-400' : ''}" onclick={async () => {
             if (mutationBlocked()) return
@@ -1677,6 +1727,7 @@
             <span class="ml-1">{language.disableAbove}</span>
         {/if}
     </button>
+    {/if}
 {/snippet}
 
 {#snippet senderIcon(options:{rounded?:boolean,styleFix?:string} = {})}
@@ -1712,7 +1763,7 @@
         <img class={dom.getAttribute('class') ?? ''} alt="" style={dom.getAttribute('style') ?? ''} />
     {:else if dom.tagName === 'A'}
         <a target="_blank" rel="noreferrer" href={
-            (dom.getAttribute('href') && dom.getAttribute('href').startsWith('https')) ? dom.getAttribute('href') : ''
+            (dom.getAttribute('href') && dom.getAttribute('href').startsWith('https')) ? dom.getAttribute('href') : undefined
         } class={dom.getAttribute('class') ?? ''} style={dom.getAttribute('style') ?? ''}>
             {@render renderChilds(dom)}
         </a>
@@ -1855,7 +1906,8 @@
      data-chat-index={idx}
      data-chat-id={presentedChatId}
      style={isLastMemory ? `border-top:${captureSettings?.memoryLimitThickness ?? DBState.db.memoryLimitThickness}px solid rgba(98, 114, 164, 0.7);` : ''}
-     onclickcapture={handleButtonTriggerWithin}>
+     onclickcapture={handleButtonTriggerWithin}
+     onsubmitcapture={handleFormTriggerWithin}>
     <div class="text-textcolor mt-1 ml-4 mr-4 mb-1 p-2 bg-transparent grow border-t-gray-900 border-opacity/30 border-transparent flexium items-start max-w-full" >
         {#if captureTheme === 'mobilechat' && !blankMessage}
             <div class={role === 'user' ? "flex items-start w-full justify-end" : "flex items-start"}>

@@ -1,6 +1,7 @@
 import { safeStructuredClone } from '../safeStructuredClone'
 import {
     CONVERSATION_RANGE_MAX_LIMIT,
+    readCurrentRevision,
     RevisionConflictError,
     type CharacterDetail,
     type ConversationWindow,
@@ -85,10 +86,10 @@ export async function acquireCurrentPersistentRevision(
 ): Promise<PersistentRevisionLease> {
     for (let attempt = 0; attempt < REVISION_ACQUIRE_ATTEMPTS; attempt++) {
         assertCurrent(dependencies, generation, signal)
-        const root = await dependencies.store.readRoot()
+        const revision = await readCurrentRevision(dependencies.store)
         assertCurrent(dependencies, generation, signal)
         try {
-            const lease = await dependencies.store.acquireRevision(root.revision)
+            const lease = await dependencies.store.acquireRevision(revision)
             try {
                 assertCurrent(dependencies, generation, signal)
             } catch (error) {

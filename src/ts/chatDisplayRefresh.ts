@@ -13,6 +13,8 @@ export interface ChatDisplayRefresh {
     parserProjection?: BoundedLiveChatParserProjection
     parserAbortSignal?: AbortSignal
     onDisplaySettled?: () => void
+    /** When the view asked for this display, from `nextDisplayListenerOrder`. */
+    displayRequestOrder?: number
     viewportBinding?: {
         viewportRow: ConversationViewportRow
         viewportSourceToken: string

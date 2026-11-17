@@ -119,7 +119,7 @@ export function createGatedBlobStore(store: BlobStore, gate: StorageMutationGate
                     if (!current || JSON.stringify(current) !== JSON.stringify(original.metadata)
                         || !bytes || bytes.length !== original.bytes!.length
                         || bytes.some((byte, index) => byte !== original.bytes![index])) return null
-                    return store.put(key, ownedData, metadata)
+                    return store.put(key, ownedData, { ...metadata, ...(metadata.kind === 'inlay' && original.metadata!.kind === 'inlay' ? { metadata: original.metadata!.metadata } : {}) })
                 })
             }
         },

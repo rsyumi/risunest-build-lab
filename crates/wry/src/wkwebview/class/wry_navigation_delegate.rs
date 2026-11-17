@@ -22,7 +22,7 @@ use crate::{
     download::{navigation_download_action, navigation_download_response},
     navigation::{
       did_commit_navigation, did_finish_navigation, navigation_policy, navigation_policy_response,
-      web_content_process_did_terminate,
+      web_content_process_did_terminate, web_content_process_did_terminate_with_reason,
     },
   },
   PageLoadEvent, WryWebView,
@@ -101,6 +101,14 @@ define_class!(
     #[unsafe(method(webViewWebContentProcessDidTerminate:))]
     fn web_content_process_did_terminate(&self, webview: &WKWebView) {
       web_content_process_did_terminate(self, webview);
+    }
+  }
+
+  /// RisuNest: WKNavigationDelegatePrivate.
+  impl WryNavigationDelegate {
+    #[unsafe(method(_webView:webContentProcessDidTerminateWithReason:))]
+    fn web_content_process_did_terminate_with_reason(&self, webview: &WKWebView, reason: isize) {
+      web_content_process_did_terminate_with_reason(self, webview, reason);
     }
   }
 );

@@ -6,78 +6,34 @@ vi.mock('./platform', async () => (await import('./platform.testSupport')).platf
     runtime: 'tauri', os: platform.android ? 'android' : 'windows',
 })))
 
-import {
-    beginAndroidGenerationKeepAlive,
-    endAndroidGenerationKeepAlive,
-    requestAndroidGenerationNotifications,
-} from './androidGenerationKeepAlive'
+import { androidGenerationNotificationsEnabled, requestAndroidGenerationNotifications } from './androidGenerationKeepAlive'
 
-describe('Android generation keep-alive', () => {
+describe('Android generation notification bridge', () => {
     afterEach(() => {
         platform.android = true
         delete window.RisuGenerationKeepAlive
-        localStorage.clear()
     })
 
     it('does not use an injected bridge outside Tauri Android', async () => {
-        const begin = vi.fn(async () => true)
-        const end = vi.fn()
-        window.RisuGenerationKeepAlive = { begin, end } as any
+        const requestNotifications = vi.fn(async () => {})
+        const notificationsEnabled = vi.fn(() => true)
+        window.RisuGenerationKeepAlive = { requestNotifications, notificationsEnabled } as any
         platform.android = false
 
-        expect(await beginAndroidGenerationKeepAlive(true)).toBe(false)
-        await endAndroidGenerationKeepAlive(true)
-
-        expect(begin).not.toHaveBeenCalled()
-        expect(end).not.toHaveBeenCalled()
-    })
-
-    it('is a safe no-op when disabled, unavailable, or rejecting', async () => {
-        expect(await beginAndroidGenerationKeepAlive(false)).toBe(false)
-        expect(await beginAndroidGenerationKeepAlive(true)).toBe(false)
-        window.RisuGenerationKeepAlive = {
-            begin: async () => { throw new Error('bridge unavailable') },
-            end: async () => { throw new Error('bridge unavailable') },
-        } as any
-        expect(await beginAndroidGenerationKeepAlive(true)).toBe(false)
-        await expect(endAndroidGenerationKeepAlive(true)).resolves.toBeUndefined()
-    })
-
-    it('acquires once and releases only after a successful asynchronous begin', async () => {
-        const begin = vi.fn(async () => true)
-        const end = vi.fn(async () => true)
-        window.RisuGenerationKeepAlive = { begin, end } as any
-
-        const acquired = await beginAndroidGenerationKeepAlive(true)
-        await endAndroidGenerationKeepAlive(acquired)
-        await endAndroidGenerationKeepAlive(false)
-
-        expect(begin).toHaveBeenCalledTimes(1)
-        expect(end).toHaveBeenCalledTimes(1)
-    })
-
-    it('keeps explicit permission requests separate from generation acquisition', async () => {
-        const requestNotifications = vi.fn(async () => {})
-        window.RisuGenerationKeepAlive = {
-            begin: async () => false,
-            requestNotifications,
-        } as any
-        expect(await beginAndroidGenerationKeepAlive(true)).toBe(false)
-        expect(requestNotifications).not.toHaveBeenCalled()
         await requestAndroidGenerationNotifications()
-        expect(requestNotifications).toHaveBeenCalledOnce()
+        expect(await androidGenerationNotificationsEnabled()).toBeNull()
+
+        expect(requestNotifications).not.toHaveBeenCalled()
+        expect(notificationsEnabled).not.toHaveBeenCalled()
     })
 
-    it('does not mistake an asynchronous refusal for ownership', async () => {
-        const end = vi.fn()
+    it('reads an unavailable or rejecting bridge as unknown', async () => {
+        expect(await androidGenerationNotificationsEnabled()).toBeNull()
         window.RisuGenerationKeepAlive = {
-            begin: async () => false,
-            end,
+            requestNotifications: async () => { throw new Error('bridge unavailable') },
+            notificationsEnabled: async () => { throw new Error('bridge unavailable') },
         } as any
-
-        const acquired = await beginAndroidGenerationKeepAlive(true)
-        expect(acquired).toBe(false)
-        await endAndroidGenerationKeepAlive(acquired)
-        expect(end).not.toHaveBeenCalled()
+        await expect(requestAndroidGenerationNotifications()).resolves.toBeUndefined()
+        expect(await androidGenerationNotificationsEnabled()).toBeNull()
     })
 })

@@ -21,6 +21,7 @@ const f = vi.hoisted(() => ({
     revision: undefined as undefined | ((revision: number, cause?: string) => void),
     conversation: null as null | { characterId: string; conversationId: string },
     mobile: vi.fn(),
+    deferredMobile: vi.fn(),
     flush: vi.fn(),
     paused: vi.fn(),
     guard: vi.fn(),
@@ -65,7 +66,7 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     flushPendingDataLocally: f.flush,
     getPersistentDataRuntime: () => f.runtime,
 }))
-vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: f.mobile, beginMobileBackgroundTask: vi.fn(), measuredTaskPercent: vi.fn(() => null) }))
+vi.mock('../../mobileBackgroundTask', async () => ({ ...(await import('../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule(), runWithMobileBackgroundTask: f.mobile, runWithDeferredMobileBackgroundTask: f.deferredMobile }))
 vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthorityReplacement: vi.fn(), invalidatePluginCachesAfterAuthorityReplacement: vi.fn(), restartPluginsAfterAuthorityReplacement: vi.fn() }))
 vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: (callback: (revision: number, cause?: string) => void) => { f.revision = callback; return () => {} } }))
 vi.mock('../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => f.generating } }))
@@ -75,6 +76,7 @@ beforeEach(async () => {
     vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers(); f.events.clear()
     f.native = true; f.transport = undefined; f.dependencies = undefined; f.generating = []; f.selectedIndex = 0; f.viewport = undefined; f.revision = undefined; f.conversation = null
     f.mobile.mockImplementation(async (_kind: string, operation: (task: object) => Promise<unknown>) => operation({ progress() {}, async dispose() {} }))
+    f.deferredMobile.mockImplementation(async (_kind: string, operation: (task: object) => Promise<unknown>) => operation({ progress() {}, async dispose() {} }))
     f.flush.mockResolvedValue(undefined)
     const document = new EventTarget() as EventTarget & { visibilityState: string }
     document.visibilityState = 'hidden'
@@ -99,8 +101,140 @@ const hydrationCalls = () => f.invoke.mock.calls.filter(([command]) => command =
 const pullCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pull').length
 const openConversation = (conversationId: string) => { f.conversation = { characterId: 'selected-stable-id', conversationId }; f.viewport!({}) }
 const callOrder = (command: string) => f.invoke.mock.invocationCallOrder[f.invoke.mock.calls.findIndex(([name]) => name === command)]
+const activations = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_activate').length
+// A launch request retries after 1 s and then 2 s before an unavailable failure counts.
+const launchRetries = 3_000
+async function afterLaunchRetries<T>(operation: Promise<T>): Promise<T> {
+    const settled = operation.then(value => ({ value }), (error: unknown) => ({ error }))
+    await vi.advanceTimersByTimeAsync(launchRetries)
+    const result = await settled
+    if ('error' in result) throw result.error
+    return result.value
+}
+
+async function pluginStartup() {
+    const { createPluginStartupGate } = await import('../../plugins/pluginStartupGate')
+    let starts = 0
+    const gate = createPluginStartupGate({ enabled: () => true, delay: () => true,
+        context: async () => ({ identity: 'server', bound: true, assertCurrent: async () => {},
+            receive: signal => f.transport!.preparePluginStartup!({...bindingContext(), signal}) }),
+        start: async () => { if (await gate.ensure()) starts++ },
+    })
+    await afterLaunchRetries(gate.ensure()); await settle()
+    return { gate, starts: () => starts }
+}
 
 describe('production server LWW composition', () => {
+    it.each(['server_sync_lww_activate', 'server_sync_lww_pull'])('loads local plugins after an offline %s and still receives after reconnection', async failedCommand => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        let offline = true
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === failedCommand && offline) throw { code: 'server-unreachable', status: 503, retryable: true, startupLocalReady: true }
+            return base(command, args)
+        })
+        await afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))
+        const startup = await pluginStartup()
+        expect(startup.starts()).toBe(1)
+        expect(startup.gate.refuse()).toBe(false)
+        expect(f.apply).not.toHaveBeenCalled()
+        expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
+        await expect(f.transport!.receiveAvailableChanges!(bindingContext())).rejects.toMatchObject({code: 'server-unreachable'})
+        offline = false
+        await f.transport!.receiveAvailableChanges!(bindingContext())
+        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '0'}}))
+        expect(startup.starts()).toBe(1)
+    })
+    it.each([
+        {code: 'unauthorized', status: 401, retryable: false},
+        {code: 'server-epoch-changed', status: 409, retryable: false},
+        {code: 'equal-stamp-integrity', status: 409, retryable: false},
+        {code: 'local-storage', status: 503, retryable: true},
+        {code: 'incomplete-response', status: 503, retryable: true},
+        {code: 'sync-retry-budget-exhausted', status: 503, retryable: true},
+        {code: 'unknown-error', status: 503, retryable: true},
+        {code: 'invalid-directory-envelope', status: 502, retryable: true},
+        {code: 'server-response-error', status: 401, retryable: false},
+        {code: 'server-response-error', status: 404, retryable: true},
+        {code: 'server-incompatible', status: 409, retryable: false},
+    ])('keeps plugins waiting after $code', async failure => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        await f.transport!.resumeBinding(bindingContext())
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_pull') throw failure
+            return base(command, args)
+        })
+        const startup = await pluginStartup()
+        expect(startup.starts()).toBe(0)
+        expect(startup.gate.refuse()).toBe(true)
+    })
+    it.each([false, undefined])('keeps an incomplete native activation closed when startupLocalReady is %s', async startupLocalReady => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_activate') throw {code: 'server-unreachable', status: 503, retryable: true, startupLocalReady}
+            return base(command, args)
+        })
+        await afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))
+        const startup = await pluginStartup()
+        expect(startup.starts()).toBe(0)
+        expect(startup.gate.refuse()).toBe(true)
+    })
+    it.each([
+        {code: 'server-timeout', status: 503},
+        {code: 'directory-unreachable', status: 503},
+        {code: 'directory-response-error', status: 503},
+        {code: 'directory-incomplete-response', status: 503},
+        {code: 'request-timeout', status: 408},
+        {code: 'server-updating', status: 503},
+        ...[500, 502, 503, 504, 521, 530, 599].map(status => ({code: 'server-response-error', status})),
+    ].flatMap(failure => ['server_sync_lww_activate', 'server_sync_lww_pull'].map(command => ({...failure, command}))))('loads local plugins on an initial $command $code ($status)', async ({command: failedCommand, ...failure}) => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === failedCommand) throw {...failure, retryable: true, startupLocalReady: true}
+            return base(command, args)
+        })
+        await afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))
+        expect((await pluginStartup()).starts()).toBe(1)
+        expect(f.invoke).toHaveBeenCalledWith(failedCommand, expect.objectContaining({startup: true}))
+    })
+    it('does not release plugins when the server disappears after an intermediate receive page', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        await f.transport!.resumeBinding(bindingContext())
+        const base = f.invoke.getMockImplementation()!
+        let pulled = false
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command !== 'server_sync_lww_pull') return base(command, args)
+            if (pulled) throw {code: 'server-unreachable', status: 503, retryable: true}
+            pulled = true
+            return {...emptyReceive(), more: true, receiveFrontier: '2', progress: {kind: 'server', cursor: '1'}}
+        })
+        const startup = await pluginStartup()
+        expect(f.apply).toHaveBeenCalledWith(expect.objectContaining({progress: {kind: 'server', cursor: '1'}}))
+        expect(startup.starts()).toBe(0)
+        expect(startup.gate.refuse()).toBe(true)
+    })
+    it('retains a file-operation hold and rejects a different binding after an offline startup', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        await f.transport!.resumeBinding(bindingContext())
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_pull') throw {code: 'server-unreachable', status: 503, retryable: true}
+            return base(command, args)
+        })
+        const { reserveLibraryFileOperation } = await import('../libraryFileOperation')
+        const release = reserveLibraryFileOperation()
+        try { expect((await pluginStartup()).starts()).toBe(0) }
+        finally { release() }
+        const changed = bindingContext()
+        changed.state.selectionEpoch = '1'
+        await expect(f.transport!.preparePluginStartup!(changed)).rejects.toThrow('Sync binding changed')
+        const cancelled = new AbortController(); cancelled.abort()
+        await expect(f.transport!.preparePluginStartup!({...bindingContext(), signal: cancelled.signal})).rejects.toThrow()
+        expect((await pluginStartup()).starts()).toBe(1)
+    })
     it('does not claim the offline warning for an unknown operation failure before a real outage', async () => {
         f.database.risunestSyncStatusUi = true
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -115,7 +249,10 @@ describe('production server LWW composition', () => {
         expect(f.alert).not.toHaveBeenCalled()
         expect(f.invoke.mock.calls.some(([name]) => name === 'server_sync_claim_offline_notice')).toBe(false)
         failure = { code: 'server-unreachable', retryable: true }
-        await vi.advanceTimersByTimeAsync(5000)
+        // The receive 5 s later is still the launch receive, so it retries before the outage counts.
+        await vi.advanceTimersByTimeAsync(5000 + launchRetries - 1)
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1)
         expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
     })
     it.each([false, true])('retries an offline startup activation before allowing any transfer after the server returns (manual retry: %s)', async manualRetry => {
@@ -127,14 +264,15 @@ describe('production server LWW composition', () => {
             if (command === 'pds_lww_binding_state') return bindingContext().state
             return base(command, args)
         })
-        visible(true); await expect(f.transport!.resumeBinding(bindingContext())).resolves.toBeUndefined(); await settle()
+        visible(true); await expect(afterLaunchRetries(f.transport!.resumeBinding(bindingContext()))).resolves.toBeUndefined(); await settle()
         const transfers = () => f.invoke.mock.calls.filter(([name]) => ['server_sync_lww_push', 'server_sync_lww_pull', 'server_sync_lww_hydrate', 'server_sync_notify_start'].includes(name))
         expect(transfers()).toEqual([])
         if (manualRetry) await expect(production.retryServerSync()).rejects.toMatchObject({ code: 'server-unreachable' })
         openConversation('offline'); f.revision!(1, 'generation-complete'); await settle()
         await vi.advanceTimersByTimeAsync(5000)
         expect(transfers()).toEqual([])
-        expect(f.invoke.mock.calls.filter(([name]) => name === 'server_sync_lww_activate')).toHaveLength(manualRetry ? 3 : 2)
+        // Three launch attempts, then one each for the manual and the scheduled retry.
+        expect(activations()).toBe(manualRetry ? 5 : 4)
         offline = false
         await vi.advanceTimersByTimeAsync(9999); expect(transfers()).toEqual([])
         await vi.advanceTimersByTimeAsync(1); await settle()
@@ -149,7 +287,7 @@ describe('production server LWW composition', () => {
             if (command === 'server_sync_lww_activate') throw { code, retryable: code === 'server-unreachable' }
             return base(command, args)
         })
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        visible(true); await afterLaunchRetries(f.transport!.resumeBinding(bindingContext())); await settle()
         code = 'server-epoch-changed'
         await vi.advanceTimersByTimeAsync(5000)
         expect(production.getServerSyncController().snapshot().blockedCode).toBe(code)
@@ -168,7 +306,7 @@ describe('production server LWW composition', () => {
             if (command === 'server_sync_lww_pull' && offline) throw { code: 'server-unreachable', retryable: true }
             return base(command, args)
         })
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        visible(true); await afterLaunchRetries(f.transport!.resumeBinding(bindingContext())); await settle()
         expect(f.alert).not.toHaveBeenCalled()
         expect(f.invoke.mock.calls.some(([name]) => name === 'server_sync_claim_offline_notice')).toBe(false)
         f.database.risunestSyncStatusUi = true
@@ -179,6 +317,132 @@ describe('production server LWW composition', () => {
         visible(false); await settle(); visible(true); await settle()
         await vi.advanceTimersByTimeAsync(20000)
         expect(f.alert).toHaveBeenCalledTimes(claimed ? 1 : 0)
+    })
+    it.each([false, true])('retries the launch activation after 1 s and then 2 s before an outage counts (server stays down: %s)', async down => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        let failures = down ? Infinity : 2
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_claim_offline_notice') return true
+            if (command === 'server_sync_lww_activate' && failures > 0) { failures--; throw { code: 'server-unreachable', status: 503, retryable: true } }
+            return base(command, args)
+        })
+        visible(true)
+        const resumed = f.transport!.resumeBinding(bindingContext())
+        await vi.advanceTimersByTimeAsync(999); expect(activations()).toBe(1)
+        await vi.advanceTimersByTimeAsync(1); expect(activations()).toBe(2)
+        await vi.advanceTimersByTimeAsync(1999); expect(activations()).toBe(2)
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1); await resumed; await settle()
+        expect(activations()).toBe(3)
+        if (!down) {
+            expect(f.alert).not.toHaveBeenCalled()
+            expect(production.getServerSyncController().snapshot().error).toBe('')
+            expect(pullCalls()).toBeGreaterThan(0)
+            return
+        }
+        expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
+        expect(pullCalls()).toBe(0)
+        // Later launch attempts follow the scheduler's delays without quick retries.
+        await vi.advanceTimersByTimeAsync(5000)
+        expect(activations()).toBe(4)
+    })
+    it.each([
+        { slow: 8_500, attempts: 2 },
+        // A failure that took the whole connect timeout is reported as it is.
+        { slow: 10_000, attempts: 1 },
+    ])('retries a slow launch failure only while the retry starts within 10 s ($slow ms)', async ({ slow, attempts }) => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        let first = true
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command !== 'server_sync_lww_activate') return base(command, args)
+            if (first) { first = false; await new Promise(resolve => setTimeout(resolve, slow)) }
+            throw { code: 'server-timeout', status: 503, retryable: true }
+        })
+        let reported = false
+        const resumed = f.transport!.resumeBinding(bindingContext()).then(() => { reported = true })
+        // The failure is reported once no retry can start within the window, without waiting for one.
+        await vi.advanceTimersByTimeAsync(slow + 1000 * (attempts - 1)); await settle()
+        expect(reported).toBe(true)
+        await resumed
+        expect(activations()).toBe(attempts)
+    })
+    it('does not retry a launch request when its wait ends after the 10 s window', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_activate') throw { code: 'server-unreachable', status: 503, retryable: true }
+            return base(command, args)
+        })
+        const resumed = f.transport!.resumeBinding(bindingContext())
+        await vi.advanceTimersByTimeAsync(500)
+        // The app is suspended while the first retry waits, so its timer fires late.
+        vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 60_000)
+        await vi.advanceTimersByTimeAsync(500); await resumed
+        expect(activations()).toBe(1)
+    })
+    it('stops retrying a launch request once its binding is stopped', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_activate') throw { code: 'server-unreachable', status: 503, retryable: true }
+            return base(command, args)
+        })
+        const stopped = new AbortController()
+        const resumed = f.transport!.resumeBinding({ ...bindingContext(), signal: stopped.signal }).catch(() => {})
+        await vi.advanceTimersByTimeAsync(500); stopped.abort()
+        await vi.advanceTimersByTimeAsync(10_000); await resumed
+        expect(activations()).toBe(1)
+    })
+    it('shows the offline notice during use only once the next automatic retry also fails', async () => {
+        f.database.risunestSyncStatusUi = false
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        let offline = true, slow = false, connects = 0
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_claim_offline_notice') return true
+            if (offline && ['server_sync_lww_activate', 'server_sync_lww_pull', 'server_sync_notify_start'].includes(command)) {
+                // While slow, a receive fails after 6 s and every connect after the first after 2 s.
+                if (slow && (command === 'server_sync_lww_pull' || connects++ > 0)) await new Promise(resolve => setTimeout(resolve, command === 'server_sync_lww_pull' ? 6000 : 2000))
+                throw { code: 'server-unreachable', status: 503, retryable: true }
+            }
+            return base(command, args)
+        })
+        // A launch outage passes while the notice is off.
+        visible(true); await afterLaunchRetries(f.transport!.resumeBinding(bindingContext())); await settle()
+        offline = false; await vi.advanceTimersByTimeAsync(5000); await settle()
+        expect(production.getServerSyncController().snapshot().error).toBe('')
+        f.database.risunestSyncStatusUi = true
+        // A failure during use shows in the status at once; the notice waits for the next automatic retry.
+        offline = true; visible(false); await settle(); visible(true); await settle()
+        expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
+        expect(f.alert).not.toHaveBeenCalled()
+        offline = false; await vi.advanceTimersByTimeAsync(5000); await settle()
+        expect(production.getServerSyncController().snapshot().error).toBe('')
+        expect(f.alert).not.toHaveBeenCalled()
+        // A receive that began before the outage and fails after the retry started is not the retry failing.
+        offline = true; slow = true; visible(false); await settle(); visible(true); await settle()
+        await vi.advanceTimersByTimeAsync(6000)
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
+    })
+    it('shows the offline notice during use once the automatic asset download retry also fails', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_claim_offline_notice') return true
+            if (command === 'server_sync_lww_hydrate') throw { code: 'server-unreachable', status: 503, retryable: true }
+            // The receive takes a moment, so the retried download fails before it succeeds.
+            if (command === 'server_sync_lww_pull') { await new Promise(resolve => setTimeout(resolve, 100)); return emptyReceive() }
+            return base(command, args)
+        })
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(f.alert).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(5_100)
+        expect(hydrationCalls()).toHaveLength(2)
+        expect(f.alert).toHaveBeenCalledExactlyOnceWith((await import('src/lang')).language.risuNest.serverSync.offlineNotice)
     })
     it('keeps startup closed across an empty intermediate page and projection, then stops at the first frontier', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -463,16 +727,17 @@ describe('production server LWW composition', () => {
         await controller.ensureStatus()
         expect(controller.snapshot().status.assetPolicy).toBe('full')
     })
-    it('resumes interrupted Full hydration on foreground after the cancelled lane settles', async () => {
+    it('keeps Full hydration running while hidden and starts no second one beside it on return', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        let reject!: (error: unknown) => void
-        f.invoke.mockImplementation(async command => command === 'server_sync_lww_hydrate' ? new Promise<void>((_resolve, fail) => { reject = fail }) : command === 'server_sync_lww_pull' ? emptyReceive() : null)
+        let finish!: () => void
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_hydrate' ? new Promise<void>(resolve => { finish = resolve }) : command === 'server_sync_lww_pull' ? emptyReceive() : null)
         visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
         expect(hydrationCalls()).toHaveLength(1)
-        visible(false); await settle(); expect(f.invoke).toHaveBeenCalledWith('server_sync_cancel')
+        visible(false); await settle()
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_notify_stop')
+        expect(f.invoke).not.toHaveBeenCalledWith('server_sync_cancel')
         visible(true); await settle(); expect(hydrationCalls()).toHaveLength(1)
-        reject({ code: 'cancelled' }); await settle()
-        expect(hydrationCalls()).toHaveLength(2)
+        finish(); await settle()
         expect(production.getServerSyncController().snapshot().error).toBe('')
     })
     it('retains a transient hydration failure through conversation open and retries after the shared cooldown', async () => {
@@ -657,6 +922,55 @@ describe('production server LWW composition', () => {
         visible(false); await settle(); visible(true); openConversation('third'); await settle()
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_retry')).toHaveLength(retries)
     })
+    it('rechecks a library format block through native code on open and resumes once it passes', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        let current = false
+        f.invoke.mockImplementation(async command => {
+            if (!current && (command === 'server_sync_lww_pull' || command === 'server_sync_lww_check_format')) throw { code: 'library-format-switch-required', retryable: false }
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, blockedCode: 'library-format-switch-required', error: 'library-format-switch-required' })
+        openConversation('first'); await settle()
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_check_format', { request: { bindingAuthority: '0', requestId: expect.any(String) } })
+        expect(production.getServerSyncController().snapshot().paused).toBe(true)
+        current = true
+        openConversation('second'); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, blockedCode: '', error: '' })
+    })
+    it.each(['a receive', 'the initial publication'])('switches the library format stopped by %s on request and resumes sync with the retry that follows', async stoppedBy => {
+        const state = bindingContext().state
+        const stop = { code: 'library-format-switch-required', retryable: false }
+        let current = false
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_status') return { configured: true, writerId: 'writer', bindingAuthority: '0' }
+            if (command === 'pds_lww_binding_state') return state
+            if (command === 'server_sync_lww_switch_format') { current = true; return null }
+            if (!current && (command === 'server_sync_lww_pull' || command === 'server_sync_lww_push')) throw stop
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        try {
+            production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+            f.resumeCurrent.mockImplementation(async () => { await f.transport!.resumeBinding(bindingContext()) })
+            visible(true)
+            if (stoppedBy === 'a receive') {
+                await f.transport!.resumeBinding(bindingContext()); await settle()
+                expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, blockedCode: 'library-format-switch-required' })
+            } else {
+                // The binding flow stops a binding whose first publication failed, outside the scheduler.
+                await expect(f.transport!.publishInitialSharedState(bindingContext())).rejects.toBe(stop)
+                await f.transport!.fenceOldJobs(bindingContext()); f.transport!.reportStopped!(stop)
+                await production.getServerSyncController().ensureStatus()
+                expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, blockedCode: '', error: 'library-format-switch-required' })
+            }
+            await production.switchServerSyncLibraryFormat()
+            expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_switch_format', { request: { bindingAuthority: '0', requestId: expect.any(String) } })
+            f.invoke.mockClear()
+            await production.retryServerSync(); await settle()
+            expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, blockedCode: '', error: '' })
+            expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_pull', expect.anything())
+        } finally { f.resumeCurrent.mockReset() }
+    })
     it('drains and clears the old hydration context before a binding fence permits foreground return', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         let stopped!: (error: unknown) => void
@@ -799,20 +1113,20 @@ describe('production server LWW composition', () => {
         await vi.advanceTimersByTimeAsync(5000); await settle()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
-    it('automatically recovers when native publication settles as server-unreachable with a nonretryable 409', async () => {
+    it('automatically recovers when native publication settles as cancelled after its request failed', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         const fallback = f.invoke.getMockImplementation()!
         let cancelled = true
         f.invoke.mockImplementation(async (command, args) => {
             if (command === 'server_sync_lww_push' && cancelled) {
                 cancelled = false
-                throw { code: 'server-unreachable', status: 409, retryable: false }
+                throw { code: 'server-unreachable', status: 503, retryable: true }
             }
             return fallback(command, args)
         })
         visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: 'server-unreachable' })
-        await vi.advanceTimersByTimeAsync(1000); await settle()
+        await vi.advanceTimersByTimeAsync(5000); await settle()
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push')).toHaveLength(2)
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
@@ -896,15 +1210,21 @@ describe('production server LWW composition', () => {
         expect(pending).toEqual([])
         expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_pull' || command === 'server_sync_notify_start')).toBe(false)
     })
-    it('binds a server connection under a sync background task', async () => {
+    it.each(['connect', 'complete'])('keeps activation retries under a sync background task when binding via %s', async action => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         const { bindSyncTarget } = await import('./bindingRegistry')
         let inTask = false
         f.mobile.mockImplementation(async (_kind: string, operation: (task: object) => Promise<unknown>) => { inTask = true; try { return await operation({ progress() {}, async dispose() {} }) } finally { inTask = false } })
-        vi.mocked(bindSyncTarget).mockImplementation(async () => { expect(inTask).toBe(true); return { kind: 'cancelled' } })
-        await production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })
-        await production.completeServerSyncBinding()
-        expect(bindSyncTarget).toHaveBeenCalledTimes(2)
-        expect(f.mobile.mock.calls.map(([kind]) => kind)).toEqual(['sync', 'sync'])
+        vi.mocked(bindSyncTarget).mockImplementation(async () => {
+            expect(inTask).toBe(true)
+            const context = bindingContext()
+            await f.transport!.resumeBinding(context)
+            return { kind: 'bound', action: 'replaced', state: context.state }
+        })
+        if (action === 'connect') await production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })
+        else await production.completeServerSyncBinding()
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_activate', expect.objectContaining({ startup: false }))
+        expect(f.mobile.mock.calls.map(([kind]) => kind)).toEqual(['sync'])
     })
     it('publishes pending local work under a sync background task before it disconnects on hide', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -914,16 +1234,67 @@ describe('production server LWW composition', () => {
             if (command === 'server_sync_lww_push') return unsent-- > 0 ? { operationId: 'hidden' } : null
             return command === 'server_sync_lww_pull' ? emptyReceive() : null
         })
-        f.invoke.mockClear(); f.mobile.mockClear()
+        f.invoke.mockClear(); f.deferredMobile.mockClear()
         f.revision!(32, 'edit')
         visible(false); await settle()
-        expect(f.mobile).toHaveBeenCalledWith('sync', expect.any(Function))
+        expect(f.deferredMobile).toHaveBeenCalledWith('sync', expect.any(Function))
         expect(f.flush).toHaveBeenCalledOnce()
         expect(unsent).toBeLessThan(0)
         expect(callOrder('server_sync_lww_push')).toBeLessThan(callOrder('server_sync_notify_stop'))
         expect(f.flush.mock.invocationCallOrder[0]).toBeLessThan(callOrder('server_sync_lww_push'))
         await vi.advanceTimersByTimeAsync(5000)
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push')).toHaveLength(3)
+    })
+    it('keeps routine sync held from a push in flight at hide through the hide-time publication', async () => {
+        const mobile = await import('../../mobileBackgroundTask')
+        let holds = 0, publishing = false, unheld = false
+        vi.mocked(mobile.beginDeferredMobileBackgroundTask).mockImplementation(() => {
+            holds++
+            return { progress() {}, async dispose() { if (--holds === 0 && !publishing) unheld = true } }
+        })
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        let finishPush!: () => void, pushes = 0
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push') {
+                if (++pushes === 1) { await new Promise<void>(resolve => { finishPush = resolve }); return null }
+                publishing = true
+                return null
+            }
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        f.revision!(32, 'edit')
+        await vi.advanceTimersByTimeAsync(2000)
+        expect(pushes).toBe(1)
+        unheld = false
+        visible(false); await settle()
+        finishPush(); await settle()
+        expect(publishing).toBe(true)
+        expect(unheld).toBe(false)
+    })
+    it('stops routine sync where it stands when the platform time runs out and resumes on return', async () => {
+        const mobile = await import('../../mobileBackgroundTask')
+        const { BackgroundExecutionExpiredError } = await import('../../iosNative')
+        const expiry = new AbortController()
+        vi.mocked(mobile.beginDeferredMobileBackgroundTask).mockImplementation(() => ({ signal: expiry.signal, progress() {}, async dispose() {} }))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        let finishPull!: () => void
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_pull'
+            ? new Promise(resolve => { finishPull = () => resolve(emptyReceive()) }) : null)
+        f.events.get('risu-server-sync-remote-hint')!({ payload: null })
+        await settle()
+        expect(finishPull).toBeTypeOf('function')
+        visible(false); await settle()
+        expect(f.invoke).not.toHaveBeenCalledWith('server_sync_cancel')
+        expiry.abort(new BackgroundExecutionExpiredError())
+        await settle()
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_cancel')
+        finishPull(); await settle()
+        f.invoke.mockClear()
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_pull' ? emptyReceive() : null)
+        visible(true); await settle()
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_pull', expect.anything())
     })
     it('keeps a failed binding visible as a paused connection that 지금 동기화 resumes', async () => {
         const { bindSyncTarget } = await import('./bindingRegistry')
@@ -1398,10 +1769,14 @@ describe('server sync progress', () => {
     it.each(['resumeBinding', 'resumeNewDeviceBinding'] as const)('clears progress after %s activation fails without recording a successful sync', async method => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         const failure = { code: 'server-unreachable', retryable: true }
-        f.invoke.mockRejectedValueOnce(failure)
-        const pending = method === 'resumeBinding'
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command.startsWith('server_sync_lww_activate')) throw failure
+            return base(command, args)
+        })
+        const pending = afterLaunchRetries(method === 'resumeBinding'
             ? f.transport!.resumeBinding(bindingContext())
-            : f.transport!.resumeNewDeviceBinding!({ authorizationId: 'authorization', writerId: 'writer' }, { revision: 1, writerId: 'writer', bindingAuthority: '0' }, bindingContext())
+            : f.transport!.resumeNewDeviceBinding!({ authorizationId: 'authorization', writerId: 'writer' }, { revision: 1, writerId: 'writer', bindingAuthority: '0' }, bindingContext()))
         if (method === 'resumeBinding') await expect(pending).resolves.toBeUndefined()
         else await expect(pending).rejects.toBe(failure)
         f.transport!.reportStopped!(failure)

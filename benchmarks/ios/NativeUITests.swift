@@ -684,6 +684,26 @@ final class NativeUITests: XCTestCase {
         XCTAssertTrue(app.webViews.staticTexts["passed"].waitForExistence(timeout: 10))
     }
 
+    func testAppLockRetainsDraft() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        app.launchEnvironment["RISUNEST_IOS_PHASE"] = "app-lock-ui"
+        app.launch()
+        XCTAssertTrue(app.webViews.staticTexts["app-lock-ready"].waitForExistence(timeout: 90))
+        let draft = app.webViews.textViews["Retained synthetic draft"]
+        XCTAssertEqual(draft.value as? String, "retained synthetic draft 123456")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        for digit in ["1", "2", "3", "4", "5", "6"] {
+            let key = app.webViews.buttons[digit]
+            XCTAssertTrue(key.waitForExistence(timeout: 30))
+            key.tap()
+        }
+        XCTAssertTrue(app.webViews.staticTexts["app-lock-retained"].waitForExistence(timeout: 30))
+        XCTAssertEqual(draft.value as? String, "retained synthetic draft 123456")
+        attachScreenshot(app, name: "app-lock-retained-draft")
+    }
+
     func testProductKeyboard() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")

@@ -2,7 +2,7 @@ use super::*;
 use crate::data_health::{codes, result_path, Severity};
 use crate::local_backup::NeverCancelled;
 use crate::persistent_store::{active_generation, PersistentStore};
-use crate::persistent_store::commands::{with_store_mutex, with_store_mutex_mut};
+use crate::persistent_store::commands::{with_store_mutex, with_store_mutex_mut, SNAPSHOT_ARCHIVE_BUSY};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::sync::Mutex;
@@ -329,7 +329,7 @@ fn a_repair_needs_a_diagnosis_and_a_selection() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     assert!(matches!(
-        apply_repair(&state, &health, &[], false, 0, 0).unwrap_err(),
+        apply_repair(&state, &health, &[], None, 0, 0).unwrap_err(),
         StoreError::Validation { .. }
     ));
 
@@ -345,11 +345,35 @@ fn the_repair_keeps_a_snapshot_of_the_library_it_was_selected_against() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     let selection = damaged_alias_selection(&state, &health);
-    let applied = apply_selected(&state, &health, &selection, true).unwrap();
-    let kept = applied.snapshot.expect("a snapshot was asked for");
+    for _ in 0..2 {
+        with_store_mutex_mut(&state, |store| store.snapshot_create("manual")).unwrap();
+    }
+    let diagnosis = last_result(&state).unwrap().unwrap();
+    let keep_one = KeepCount::requested(Some(1)).unwrap();
+    let snapshots = with_store_mutex_mut(&state, |store| Ok(store.snapshots_dir.clone())).unwrap();
+    // A snapshot list or delete can hold the archive; the repair waits for it without the store.
+    let (busy, read, applied) = std::thread::scope(|scope| {
+        let held = crate::persistent_store::snapshot_archive::Archive::open(&snapshots).unwrap();
+        let (busy_sent, busy) = std::sync::mpsc::channel();
+        let (state, health, selection) = (&state, &health, &selection);
+        let repair = scope.spawn(move || {
+            SNAPSHOT_ARCHIVE_BUSY.with(|hook| *hook.borrow_mut() = Some(Box::new(move || busy_sent.send(()).unwrap())));
+            apply_repair(state, health, selection, Some(keep_one), diagnosis.revision, diagnosis.scanned_at)
+        });
+        let busy = busy.recv_timeout(std::time::Duration::from_secs(5));
+        let (read_sent, read) = std::sync::mpsc::channel();
+        scope.spawn(move || read_sent.send(with_store_mutex_mut(state, |store| store.revision())).unwrap());
+        let read = read.recv_timeout(std::time::Duration::from_secs(2));
+        drop(held);
+        (busy, read, repair.join().unwrap())
+    });
+    assert!(busy.is_ok());
+    assert_eq!(read.unwrap().unwrap(), diagnosis.revision);
+    let kept = applied.unwrap().snapshot.expect("a snapshot was asked for");
     let guard = state.admit_renderer_operation().unwrap();
     let listed = with_store_mutex_admitted(&state, &guard, |store| store.snapshot_list()).unwrap();
-    assert!(listed.iter().any(|snapshot| snapshot.id == kept));
+    let listed: Vec<_> = listed.into_iter().map(|snapshot| snapshot.id).collect();
+    assert_eq!(listed, vec![kept], "the repair keeps the count it was sent");
 }
 
 #[test]
@@ -462,7 +486,7 @@ fn a_backup_never_carries_the_diagnosis_or_a_repair_journal() {
 
 fn apply_selected(state: &PersistentStoreState, health: &DataHealthState, selection: &[String], snapshot: bool) -> StoreResult<RepairApplied> {
     let diagnosis = last_result(state)?.unwrap();
-    apply_repair(state, health, selection, snapshot, diagnosis.revision, diagnosis.scanned_at)
+    apply_repair(state, health, selection, snapshot.then_some(KeepCount::MAX), diagnosis.revision, diagnosis.scanned_at)
 }
 
 #[test]
@@ -502,7 +526,7 @@ fn diagnosis_identity_rejects_a_replaced_scan_at_the_same_revision() {
     let health = DataHealthState::default();
     let selection = damaged_alias_selection(&state, &health);
     let diagnosis = last_result(&state).unwrap().unwrap();
-    let error = apply_repair(&state, &health, &selection, false, diagnosis.revision, diagnosis.scanned_at - 1).unwrap_err();
+    let error = apply_repair(&state, &health, &selection, None, diagnosis.revision, diagnosis.scanned_at - 1).unwrap_err();
     assert!(matches!(error, StoreError::Validation { .. }));
     assert!(journals(&state).unwrap().is_empty());
 }

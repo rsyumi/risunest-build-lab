@@ -10,6 +10,9 @@ import {
 import corpus from "../tokenizer/native-tokenizer-corpus.json";
 import { createNativeTokenizerBenchmarkSeam } from "../tokenizer/nativeTokenizerBenchmark";
 import { persistence, reload, regex, guard, check, pause } from "./contracts";
+import { showNativeHarness } from "../nativeAppLock";
+import { failureRecord } from "../failureRecord";
+import { SyncStepError, syncFailureRecord } from "../sync-ui/driver";
 
 const report = (stage: string, result: unknown) =>
   invoke("macos_bench_report", { stage, result });
@@ -354,6 +357,17 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
 async function main() {
   await guard();
   const phase = await invoke<string>("macos_bench_phase");
+  if (/^app-lock-(immediate|timed|immediate-mutant)$/.test(phase)) {
+    const { appLockFixture } = await import('../appLock/fixture');
+    const { initialize } = await import('./contracts');
+    await appLockFixture('macos', phase, initialize);
+    return;
+  }
+  if (phase !== "app" && !/^appearance-(seed|app)-(light|dark)$/.test(phase)
+    && !/^sync-(publish|receive|pull)$/.test(phase)
+    && !/^(external-storage|external-sync|backup-file)(-restart)?$/.test(phase)) {
+    await showNativeHarness();
+  }
   if (phase.startsWith("session-dispatch-")) {
     await (await import("./terminationDispatch")).terminationDispatch(phase);
   } else if (/^appearance-(seed|app)-(light|dark)$/.test(phase)) {
@@ -555,7 +569,7 @@ async function main() {
           passed: true, revision: saved.revision, conversationId, marker: nativeMarker,
         });
       } catch (error) {
-        await report("failure", { passed: false, message: String(error), detail: failureDetail(error) });
+        await report("failure", { passed: false, ...failureRecord(error), message: String(error), detail: failureDetail(error) });
         throw error;
       }
     };
@@ -652,13 +666,14 @@ async function main() {
 }
 void main().catch(async (error) => {
   await report("failure", {
+    // A Sync step keeps the error it wraps, which is redacted as the step's own message is.
+    ...(error instanceof SyncStepError ? syncFailureRecord(error) : failureRecord(error)),
     message:
       error instanceof Error
         ? error.message
         : typeof error === "string"
           ? error
           : JSON.stringify(error),
-    stack: error instanceof Error ? error.stack : undefined,
     detail: failureDetail(error),
   });
   // The controller records the failure and terminates this isolated process.

@@ -1,7 +1,7 @@
 // Android observes build-only call sites because the native bridge is immutable.
 export const androidObservation = `(() => {
     window.__startupObserveCall = function(command, invoke) {
-        if (!['pds_open','pds_read_root','pds_materialize','pds_commit','pds_replace_commit'].includes(command)) return invoke();
+        if (!['pds_open','pds_read_root','pds_read_revision','pds_materialize','pds_commit','pds_replace_commit'].includes(command)) return invoke();
         const entry = {command, start: performance.now(), ms: null, success: false, bytes: null};
         window.__startupMetrics.calls.push(entry);
         window.__startupBegin?.(command);

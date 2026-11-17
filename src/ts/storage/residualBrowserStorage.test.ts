@@ -26,6 +26,8 @@ import {
 const NATIVE_RESIDUAL: Record<string, string> = {
     'localStorage risunest.windowsAppearance':
         'the window init script reads it before the page loads',
+    'localStorage risunest-gallery-size':
+        'gallery cell size for this device; losing it shows the normal size',
     'localStorage dynamic src/ts/storage/bootAttempt.ts':
         'risunest-boot-stage and risunest-boot-suspect are written while the native store is unavailable',
     'localStorage strongBan_*':

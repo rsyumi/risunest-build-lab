@@ -5,12 +5,14 @@
     import { sleep } from "src/ts/util"
     import { alertError } from "../../ts/alert"
     import { addMetadataToElement, getDistance, ParseMarkdown, postTranslationParse, trimMarkdown, type CbsConditions, type simpleCharacterArgument } from "../../ts/parser/parser.svelte"
-    import { getLLMCache, translateHTML, type TranslateHTMLContext } from "../../ts/translator/translator"
+    import { getLLMCache, isExpTranslator, translateHTML, type TranslateHTMLContext } from "../../ts/translator/translator"
+    import { doingChat } from 'src/ts/process/generationState'
+    import { get } from 'svelte/store'
     import { getModuleAssets } from "src/ts/process/modules";
     import { getCurrentCharacter } from "src/ts/storage/database.svelte";
     import { getFileSrc } from "src/ts/globalApi.svelte";
     import { DeferredInlayMarkerRegistry, mountDeferredInlaySources, resolveDeferredInlaySources } from "src/ts/process/files/inlayRenderSource";
-    import { onDestroy, tick } from 'svelte'
+    import { onDestroy, tick, untrack } from 'svelte'
     import type { FrozenChatScreenshotRenderContext } from 'src/ts/chatScreenshotRange'
     import type { ProcessScriptCaptureContext } from 'src/ts/process/scripts'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
@@ -21,6 +23,7 @@
     import type { StreamingThoughtMode } from '../../ts/storage/database.svelte'
     import { mountBoundedThoughtExpansion, type BoundedThoughtExpansion } from './boundedThoughtExpansion'
     import { DisplayReadRecord, recordChatVariableReads, type DisplayRowReads } from 'src/ts/process/scriptVariableReads'
+    import { nextDisplayListenerOrder } from 'src/ts/process/luaDisplayTimeouts'
 
     interface Props {
         character?: simpleCharacterArgument|string|null
@@ -49,6 +52,8 @@
         parserAbortSignal?: AbortSignal
         onDisplaySettled?: () => void
         displayRow?: DisplayRowReads
+        /** When the view asked for this row, from `nextDisplayListenerOrder`. */
+        displayRequestOrder?: number
     }
 
     let {
@@ -78,13 +83,13 @@
         parserAbortSignal,
         onDisplaySettled,
         displayRow,
+        displayRequestOrder,
     }: Props =  $props()
 
     // svelte-ignore non_reactive_update
     let lastParsed = ''
     let lastCharArg:string|simpleCharacterArgument = null
     let lastChatId = -10
-    let renderRoot = $state<HTMLElement | undefined>(undefined)
     let thoughtOpenStates: boolean[] = []
     let previewThoughtOpen: boolean | undefined
 
@@ -107,6 +112,9 @@
         releaseObjectUrls: () => void
         thoughtExpansion: BoundedThoughtExpansion | null
         reads?: DisplayReadRecord
+        rebuildRevision: number
+        translatedDuringGeneration: boolean
+        displayRequestOrder: number
     }
 
     let activeParseJob: ChatBodyParseJob|null = null
@@ -123,6 +131,18 @@
 
     let parseGeneration = 0
     let lastRenderedRevision: number | null = null
+    // The translator leaves a live row untranslated while a reply is generated,
+    // so a row translated then parses again once the generation ends.
+    let generationEndRevision = $state(0)
+    let generating = false
+    const unsubscribeGeneration = doingChat.subscribe((busy) => {
+        if (generating && !busy && activeParseJob?.translatedDuringGeneration) generationEndRevision += 1
+        generating = busy
+    })
+
+    function noteGenerationTranslation(job: ChatBodyParseJob) {
+        if (!captureContext && get(doingChat) && isExpTranslator(DBState.db)) job.translatedDuringGeneration = true
+    }
 
     function parserChara(): string | CharacterRecord {
         const parserCharacter = captureContext?.parserContext.character
@@ -165,6 +185,7 @@
                 : parserProjection?.projectedChatID ?? idx,
             chara: parserChara() as unknown as TranslateHTMLContext['chara'],
             cbsConditions: getCbsCondition(),
+            ...(captureContext ? {} : { liveProjection: true as const }),
         }
     }
 
@@ -238,6 +259,9 @@
               }
             : pendingPreview,
     )
+    // Rendered markup stays a direct child of the parent text root, as upstream
+    // renders it. While a preview is shown, no rendered markup is mounted there.
+    let renderRoot = $derived(displayedPreview ? undefined : (bodyRoot ?? undefined))
 
     function trackLiveParseDependencies(
         charArg: string | simpleCharacterArgument,
@@ -292,6 +316,14 @@
         }
     }
 
+    function alertParseError(error: any) {
+        const wrapped = new Error(`Error while parsing chat message: ${error?.message ?? error}`)
+        if(error instanceof Error){
+            wrapped.stack = error.stack
+        }
+        alertError(wrapped)
+    }
+
     const markParsing = async (data: string, charArg: string | simpleCharacterArgument, chatID: number, job:ChatBodyParseJob, tries?:number):Promise<string> => {
         const thoughtMode = captureContext ? 'off' : streamingThoughtMode
         job.controller.signal.throwIfAborted()
@@ -324,6 +356,7 @@
                     ? captureParserIndex
                     : parserProjection?.projectedChatID,
                 variableReads: job.reads,
+                displayRequestOrder: job.displayRequestOrder,
             })
         )
         // track 'translated' and 'retranslate' state
@@ -331,6 +364,7 @@
         retranslate;
         let lastParsedQueue = ''
         let mode = 'notrim' as const
+        let translationAttempted = false
         try {
             if((!isEqual(lastCharArg, charArg)) || (chatID !== lastChatId)){
                 lastParsedQueue = ''
@@ -371,6 +405,7 @@
                 }
             }
             if(retranslate || translated){
+                translationAttempted = true
                 // Translation runs its own script pass, which this record does not follow.
                 job.reads?.markUntracked()
                 const settings = captureContext?.settings ?? DBState.db
@@ -389,6 +424,7 @@
                 if(settings.translatorType === 'llm' && settings.translateBeforeHTMLFormatting){
                     await sleep(100)
                     translating = true
+                    noteGenerationTranslation(job)
                     data = await translateHTML(
                         data,
                         false,
@@ -407,6 +443,7 @@
                 else if(!settings.legacyTranslation){
                     const marked = await parseForRender(data, 'pretranslate')
                     translating = true
+                    noteGenerationTranslation(job)
                     const translated = await postTranslationParse(await translateHTML(
                         marked,
                         false,
@@ -424,6 +461,7 @@
                 else{
                     const marked = await parseForRender(data, mode)
                     translating = true
+                    noteGenerationTranslation(job)
                     const translated = await translateHTML(
                         marked,
                         false,
@@ -453,10 +491,23 @@
             }   
         } catch (error) {
             if (job.controller.signal.aborted) throw error
+            if (translationAttempted && !captureContext) {
+                translating = false
+                // A failed translation leaves the message as it renders untranslated.
+                job.deferredInlays.clear()
+                job.deferredInlays = new DeferredInlayMarkerRegistry()
+                const marked = await parseForRender(data, mode).catch(() => null)
+                if (marked !== null) {
+                    alertParseError(error)
+                    lastParsedQueue = marked
+                    lastCharArg = charArg
+                    return marked
+                }
+            }
             //retry
             if(tries > 2){
                 if(captureContext) throw error
-                alertError(`Error while parsing chat message: ${translated}, ${error.message}, ${error.stack}`)
+                alertParseError(error)
                 return data
             }
             if(job.disposed) return data
@@ -562,6 +613,15 @@
         }
     }
 
+    // The parse the view asked for keeps the view's request order. A later parse is a new request.
+    let consumedDisplayRequestOrder: number | undefined
+    function takeDisplayRequestOrder(): number {
+        const requested = untrack(() => displayRequestOrder)
+        if (requested === undefined || requested === consumedDisplayRequestOrder) return nextDisplayListenerOrder()
+        consumedDisplayRequestOrder = requested
+        return requested
+    }
+
     function startParsing(requestedRevision: number):ChatBodyParseJob {
         const controller = new AbortController()
         const externalSignal = parserAbortSignal
@@ -588,6 +648,9 @@
             releaseObjectUrls: () => {},
             thoughtExpansion: null,
             reads,
+            rebuildRevision: displayRow?.rebuildRevision ?? 0,
+            translatedDuringGeneration: false,
+            displayRequestOrder: takeDisplayRequestOrder(),
         }
         job.promise = markParsing(msgDisplay, character, idx, job)
         return job
@@ -607,6 +670,7 @@
 
     let markParsingResult = $derived.by(() => {
         void reloadRevision
+        void generationEndRevision
         return currentThoughtPreview || shouldRenderRawStreaming
             ? null
             : startParsing(renderRevision)
@@ -645,8 +709,10 @@
             ).map((element) => element.open)
             if (openThoughts.length) thoughtOpenStates = openThoughts
 
+            // Identical markup keeps its DOM unless a script reloaded the row.
             const retainMarkup =
-                html === displayedHtml && previousDisplay?.settledNotified
+                html === displayedHtml && previousDisplay?.settledNotified &&
+                job.rebuildRevision === previousDisplay.rebuildRevision
             if (retainMarkup) {
                 job.releaseObjectUrls = previousDisplay.releaseObjectUrls
                 previousDisplay.releaseObjectUrls = () => {}
@@ -725,6 +791,7 @@
 
     onDestroy(() => {
         destroyed = true
+        unsubscribeGeneration()
         disposeParseJob(activeParseJob)
         disposeParseJob(displayedParseJob)
     })
@@ -768,9 +835,7 @@
         <span class="whitespace-pre-wrap">{displayedPreview.source}</span>
     {/if}
 {:else}
-    <span style="display:contents" bind:this={renderRoot}>
-        {#key displayEpoch}
-            {@html displayedHtml}
-        {/key}
-    </span>
+    {#key displayEpoch}
+        {@html displayedHtml}
+    {/key}
 {/if}

@@ -1,6 +1,23 @@
 import { expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
-import { doingChat, generationCancellation, reserveGeneration } from './generationState'
+import { bindGenerationRegexOwner, getGenerationRegexScope, doingChat, generationCancellation, reserveGeneration, setGenerationBackground } from './generationState'
+
+it('shares regex timeouts only with the owning generation and conversation', () => {
+    const first = reserveGeneration()!
+    bindGenerationRegexOwner(first, 'char', 'chat')
+    first.regexScope!.skipped.add('rule')
+    expect(getGenerationRegexScope('char', 'chat')?.skipped.has('rule')).toBe(true)
+    expect(getGenerationRegexScope('other', 'chat')).toBeUndefined()
+    first.release()
+    expect(getGenerationRegexScope('char', 'chat')).toBeUndefined()
+    const second = reserveGeneration()!
+    try {
+        bindGenerationRegexOwner(first, 'char', 'chat')
+        expect(getGenerationRegexScope('char', 'chat')).toBeUndefined()
+        bindGenerationRegexOwner(second, 'char', 'chat')
+        expect(getGenerationRegexScope('char', 'chat')?.skipped.has('rule')).toBe(false)
+    } finally { second.release() }
+})
 
 it('keeps ownership until cleanup after an idempotent cancellation request', () => {
     const cancel = vi.fn()
@@ -38,5 +55,22 @@ it('ignores an obsolete Stop callback and release after another send starts', ()
         expect(secondCancel).toHaveBeenCalledOnce()
     } finally {
         second.release()
+    }
+})
+
+it('holds one generation background from the reservation until its release', () => {
+    const end = vi.fn(async () => {})
+    const start = vi.fn(() => ({ signal: new AbortController().signal, progress() {}, settle() {}, takeExpiry: () => false, end }))
+    setGenerationBackground(start)
+    try {
+        const reservation = reserveGeneration()!
+        expect(reserveGeneration()).toBeNull()
+        expect(start).toHaveBeenCalledOnce()
+        expect(end).not.toHaveBeenCalled()
+        reservation.release()
+        reservation.release()
+        expect(end).toHaveBeenCalledOnce()
+    } finally {
+        setGenerationBackground(undefined)
     }
 })

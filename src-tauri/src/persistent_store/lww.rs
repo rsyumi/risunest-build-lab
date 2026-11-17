@@ -69,6 +69,51 @@ CREATE TABLE lww_unpublished_proofs(proof_id TEXT PRIMARY KEY,authority TEXT NOT
 CREATE TABLE lww_new_device_authorizations(authorization_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,authority TEXT NOT NULL,staging_id TEXT NOT NULL,old_writer_id TEXT NOT NULL,writer_id TEXT NOT NULL,selection_change TEXT NOT NULL,authorized INTEGER NOT NULL CHECK(authorized IN (0,1)));
 "#;
 
+/// The finished receives that no longer belong to the newest part of their stream, before
+/// proofs are considered. Streams and rows are read through `lww_receive_stream`, so a page's
+/// body is walked only to compare an external page's cursor, and only back to the first page
+/// whose cursor differs from the newest one.
+fn superseded_receives(device: &Connection) -> StoreResult<Vec<String>> {
+    let streams: Vec<(String, String)> = {
+        let mut statement = device.prepare("SELECT DISTINCT kind,writer_id FROM lww_receive")?;
+        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        rows
+    };
+    let mut superseded = Vec::new();
+    for (kind, writer) in streams {
+        let newest: Option<i64> = device
+            .query_row(
+                "SELECT rowid FROM lww_receive WHERE kind=?1 AND writer_id=?2 AND finished=1 ORDER BY rowid DESC LIMIT 1",
+                params![kind, writer],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(newest) = newest else { continue };
+        let before = if kind == "server" {
+            newest
+        } else {
+            let cursor: String =
+                device.query_row("SELECT cursor FROM lww_receive WHERE rowid=?1", [newest], |r| r.get(0))?;
+            let moved: Option<i64> = device
+                .query_row(
+                    "SELECT rowid FROM lww_receive WHERE kind=?1 AND writer_id=?2 AND finished=1 AND rowid<?3 AND cursor<>?4 ORDER BY rowid DESC LIMIT 1",
+                    params![kind, writer, newest, cursor],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(moved) = moved else { continue };
+            moved + 1
+        };
+        let mut statement = device.prepare(
+            "SELECT request_id FROM lww_receive WHERE kind=?1 AND writer_id=?2 AND finished=1 AND rowid<?3",
+        )?;
+        for request_id in statement.query_map(params![kind, writer, before], |r| r.get::<_, String>(0))? {
+            superseded.push(request_id?);
+        }
+    }
+    Ok(superseded)
+}
+
 /// The receive rows a deferred drain applies again.
 pub(super) const DRAIN_ROWS_SQL: &str = "SELECT request_id,key,stamp,value,status FROM lww_receive_rows WHERE status IN ('staged','held','deferred') ORDER BY key";
 /// Replays of one intent that may fail before recovery sets it aside.
@@ -91,8 +136,11 @@ pub(super) fn inline(value: &Value) -> StoreResult<UnitValue> {
 /// content object. The choice depends only on the bytes, so equal values have
 /// equal units on every device.
 pub(super) fn unit_value(db: &Connection, value: &Value) -> StoreResult<UnitValue> {
+    canonical_unit_value(db, wire(risunest_sync_wire::payload_value::encode(value))?)
+}
+/// `unit_value` of the value whose `payload_value` encoding is `canonical`.
+pub(super) fn canonical_unit_value(db: &Connection, canonical: Vec<u8>) -> StoreResult<UnitValue> {
     use base64::Engine;
-    let canonical = wire(risunest_sync_wire::payload_value::encode(value))?;
     if canonical.len() <= MAX_INLINE_UNIT_BYTES {
         return Ok(UnitValue::Inline {
             bytes: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(canonical),
@@ -274,6 +322,10 @@ enum Intent<'a> {
         commit: WorkingSetCommit,
         aliases: Vec<super::AssetAlias>,
     },
+    GuardedGalleryDelete {
+        commit: WorkingSetCommit,
+        aliases: Vec<super::AssetAlias>,
+    },
     PluginClaim {
         owner: String,
         key: String,
@@ -357,7 +409,7 @@ fn quarantine_disposition(library: &Connection, device: &Connection, request_id:
     if let Some((committed_digest, revision, generation)) = receipt {
         if committed_digest != digest || risunest_sync_wire::hash(body.as_bytes()) != digest { return Ok(QuarantineDisposition::Unfinished); }
         return Ok(match serde_json::from_str::<Intent>(body) {
-            Ok(Intent::Commit { .. } | Intent::PluginClaim { .. } | Intent::PluginAssign { .. } | Intent::Archive { .. }) => QuarantineDisposition::Delete,
+            Ok(Intent::Commit { .. } | Intent::GuardedGalleryDelete { .. } | Intent::PluginClaim { .. } | Intent::PluginAssign { .. } | Intent::Archive { .. }) => QuarantineDisposition::Delete,
             Ok(Intent::Replacement { staging_id, base_revision, device_sections: None, .. })
                 if base_revision.checked_add(1) == Some(revision) && generation.as_deref() == Some(staging_id.as_str()) => QuarantineDisposition::KeepReceipt,
             _ => QuarantineDisposition::Unfinished,
@@ -377,6 +429,15 @@ fn quarantine_disposition(library: &Connection, device: &Connection, request_id:
 }
 
 impl Intent<'_> {
+    fn for_commit(input: &WorkingSetCommit, aliases: &[super::AssetAlias]) -> Self {
+        // Older readers ignore unknown commit fields, so guarded deletes need a kind they reject.
+        if input.gallery_pending_fence.is_some() || input.device_plugin_fence.is_some() {
+            Self::GuardedGalleryDelete { commit: input.clone(), aliases: aliases.to_vec() }
+        } else {
+            Self::Commit { commit: input.clone(), aliases: aliases.to_vec() }
+        }
+    }
+
     fn device_revision(&self) -> Option<i64> {
         match self {
             Self::Replacement { device_revision, device_sections: Some(_), .. }
@@ -405,6 +466,7 @@ pub(crate) struct CommitIntentInput(Intent<'static>);
 std::thread_local! {
     static BACKUP_CAPTURE_PINNED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BACKUP_CAPTURE_RELEASED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static BEFORE_HELD_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn device_revision(db: &Connection) -> StoreResult<i64> {
@@ -554,6 +616,12 @@ pub(super) fn put_unit(
     version: &str,
     publish: Option<DecimalU64>,
 ) -> StoreResult<()> {
+    let superseded = superseded_objects(db, key, value)?;
+    if !superseded.is_empty() {
+        let since = super::commands::current_time_ms()?
+            .saturating_sub(super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS - super::SUPERSEDED_OBJECT_GRACE_MS);
+        super::message_pages::mark_unreferenced(db, superseded.iter().map(String::as_str), since)?;
+    }
     let identity = value_identity(value)?;
     let stamp = serde_json::to_string(stamp)?;
     let value = serde_json::to_string(value)?;
@@ -576,6 +644,25 @@ pub(super) fn put_unit(
         suppress_retired(db, key)?;
     }
     Ok(())
+}
+/// Objects the stored value of a plugin or messages key names and `value` does
+/// not. Plugin values are rewritten in whole, and a conversation's last page,
+/// manifest and descriptor on every message, so these wait a short grace
+/// instead of the one for objects whose last reference is unknown. Nothing is
+/// marked when the stored value or a tree node of either value cannot be read,
+/// since a sweep finds those objects later.
+fn superseded_objects(db: &Connection, key: &UnitKey, value: &UnitValue) -> StoreResult<Vec<String>> {
+    if !matches!(key.components()[0].as_str(), "plugin" | "plugin-local" | "messages") {
+        return Ok(Vec::new());
+    }
+    let Ok(Some((_, previous @ UnitValue::Object { .. }))) = read_unit(db, key) else {
+        return Ok(Vec::new());
+    };
+    let named = |value| super::message_pages::named_objects(db, value);
+    let (Some(previous), Some(current)) = (named(&previous)?, named(value)?) else {
+        return Ok(Vec::new());
+    };
+    Ok(previous.difference(&current).cloned().collect())
 }
 fn parent_keys(key: &UnitKey) -> StoreResult<Vec<UnitKey>> {
     let c = key.components();
@@ -795,87 +882,98 @@ impl PersistentStore {
     pub(crate) fn lww_visit_backup_units(&self, lease: &str, probe: &dyn crate::local_backup::CancellationProbe,
         emit: &mut dyn FnMut(UnitKey, UnitValue) -> StoreResult<()>) -> StoreResult<()> {
         let reader = self.revision_leases.get(lease).ok_or(StoreError::SnapshotReleased)?;
-        if current_revision(&reader.connection)? != reader.target.revision
-            || active_generation(&reader.connection)? != reader.target.generation
-        { return Err(error("backup-lease-identity-changed")); }
-        let pinned: bool = reader.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name='backup_device')", [], |row| row.get(0))?;
-        if !pinned { return Err(error("backup-capture-lease-required")); }
-        let authority: String = reader.connection.query_row("SELECT binding_authority FROM backup_device.lww_clock WHERE singleton=1", [], |row| row.get(0))?;
-        let authority: DecimalU64 = wire(authority.try_into())?;
-        let mut statement = reader.connection.prepare("SELECT key,stamp,value FROM lww_units ORDER BY key")?;
-        let rows = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
-        let scratch = crate::external_storage::leftovers::managed_scratch(&self.repository_root, "backup-units-")
-            .map_err(|error| StoreError::Store { message: error.to_string() })?;
-        let values = crate::sqlite_open::open(scratch.path().join("units.sqlite"))?;
-        values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
-            CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
-        'units: for row in rows {
-            if probe.is_cancelled() { return Err(error("cancelled")); }
-            let (key,stamp,value) = row?;
-            let key: UnitKey = wire(key.try_into())?;
-            for parent in parent_keys(&key)? {
-                if is_retired(&reader.connection, &parent)? { continue 'units; }
-            }
-            let stamp: Stamp = serde_json::from_str(&stamp)?;
-            wire(stamp.validate())?;
-            let value: UnitValue = serde_json::from_str(&value)?;
-            wire({
-                let result = value.validate();
-                #[cfg(test)]
-                crate::persistent_store::hash_work::validation(&value);
-                result
-            })?;
-            if !projection::is_device(&key) { values.execute("INSERT INTO units VALUES(?1,?2,?3)",params![key.as_str(),serde_json::to_string(&stamp)?,serde_json::to_string(&value)?])?; }
-        }
-        let mut statement = reader.connection.prepare("SELECT rows.request_id,rows.key,rows.stamp,rows.value,proof.digest,proof.body FROM lww_receive_rows rows JOIN backup_device.lww_receive proof ON proof.request_id=rows.request_id WHERE rows.status IN ('held','deferred') AND proof.applied=1 AND proof.finished=1 AND proof.authority=?1 ORDER BY rows.request_id,rows.key")?;
-        let rows = statement.query_map([authority.0.to_string()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?)))?;
-        let mut proof: Option<(String,StageReceive)> = None;
-        for row in rows {
-            if probe.is_cancelled() { return Err(error("cancelled")); }
-            let (request_id,key,stamp,value,digest,body) = row?;
-            if proof.as_ref().is_none_or(|(id,_)| id != &request_id) {
-                #[cfg(test)]
-                crate::persistent_store::hash_work::observe("native_backup_receive_proof", body.len());
-                if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
-                let request: StageReceive = serde_json::from_str(&body)?;
-                if request.header.request_id != request_id || request.header.binding_authority != authority { return Err(error("request-id-integrity")); }
-                proof = Some((request_id.clone(),request));
-            }
-            let change = Change { key:wire(key.try_into())?, stamp:serde_json::from_str(&stamp)?, value:serde_json::from_str(&value)? };
-            let request = &proof.as_ref().unwrap().1;
-            if !request.changes.contains(&change) || change.stamp.physical_ms > request.admitted_time_upper_ms { return Err(error("request-id-integrity")); }
-            wire(change.stamp.validate())?;
-            wire({
-                let result = change.value.validate();
-                #[cfg(test)]
-                crate::persistent_store::hash_work::validation(&change.value);
-                result
-            })?;
-            projection::validate_received(&reader.connection,&change.key,&change.value)?;
-            if projection::is_device(&change.key) || parent_status(&reader.connection,&change.key)?=="retired" { continue; }
-            let previous: Option<(String,String)> = values.query_row("SELECT stamp,value FROM units WHERE key=?1",[change.key.as_str()],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-            let decision = match previous {
-                Some((stamp,value)) => wire({
-                    let stamp: Stamp = serde_json::from_str(&stamp)?;
-                    let value: UnitValue = serde_json::from_str(&value)?;
-                    let result=compare_version(&stamp,&value,&change.stamp,&change.value);
-                    #[cfg(test)]
-                    crate::persistent_store::hash_work::comparison(&value,&change.value,&result);
-                    result
-                })?,
-                None => LwwDecision::ApplyRemote,
-            };
-            if decision==LwwDecision::ApplyRemote { values.execute("INSERT INTO units VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET stamp=excluded.stamp,value=excluded.value",params![change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?])?; }
-        }
-        values.execute_batch("COMMIT")?;
-        let mut query = values.prepare("SELECT key,value FROM units ORDER BY key")?;
-        let mut rows = query.query([])?;
-        while let Some(row) = rows.next()? {
-            if probe.is_cancelled() { return Err(error("cancelled")); }
-            emit(wire(row.get::<_,String>(0)?.try_into())?,serde_json::from_str(&row.get::<_,String>(1)?)?)?;
-        }
-        Ok(())
+        visit_backup_units(reader, &self.repository_root, probe, emit)
     }
+}
+
+/// Visits the units a backup of `reader`'s revision holds, in key order. The reader owns its
+/// connection, so a detached lease is visited without the store.
+pub(super) fn visit_backup_units(reader: &super::snapshot::RevisionReadLease, repository_root: &std::path::Path,
+    probe: &dyn crate::local_backup::CancellationProbe,
+    emit: &mut dyn FnMut(UnitKey, UnitValue) -> StoreResult<()>) -> StoreResult<()> {
+    if current_revision(&reader.connection)? != reader.target.revision
+        || active_generation(&reader.connection)? != reader.target.generation
+    { return Err(error("backup-lease-identity-changed")); }
+    let pinned: bool = reader.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name='backup_device')", [], |row| row.get(0))?;
+    if !pinned { return Err(error("backup-capture-lease-required")); }
+    let authority: String = reader.connection.query_row("SELECT binding_authority FROM backup_device.lww_clock WHERE singleton=1", [], |row| row.get(0))?;
+    let authority: DecimalU64 = wire(authority.try_into())?;
+    let mut statement = reader.connection.prepare("SELECT key,stamp,value FROM lww_units ORDER BY key")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
+    let scratch = crate::external_storage::leftovers::managed_scratch(repository_root, "backup-units-")
+        .map_err(|error| StoreError::Store { message: error.to_string() })?;
+    let values = crate::sqlite_open::open(scratch.path().join("units.sqlite"))?;
+    values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
+        CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
+    'units: for row in rows {
+        if probe.is_cancelled() { return Err(error("cancelled")); }
+        let (key,stamp,value) = row?;
+        let key: UnitKey = wire(key.try_into())?;
+        for parent in parent_keys(&key)? {
+            if is_retired(&reader.connection, &parent)? { continue 'units; }
+        }
+        let stamp: Stamp = serde_json::from_str(&stamp)?;
+        wire(stamp.validate())?;
+        let value: UnitValue = serde_json::from_str(&value)?;
+        wire({
+            let result = value.validate();
+            #[cfg(test)]
+            crate::persistent_store::hash_work::validation(&value);
+            result
+        })?;
+        if !projection::is_device(&key) { values.execute("INSERT INTO units VALUES(?1,?2,?3)",params![key.as_str(),serde_json::to_string(&stamp)?,serde_json::to_string(&value)?])?; }
+    }
+    let mut statement = reader.connection.prepare("SELECT rows.request_id,rows.key,rows.stamp,rows.value,proof.digest,proof.body FROM lww_receive_rows rows JOIN backup_device.lww_receive proof ON proof.request_id=rows.request_id WHERE rows.status IN ('held','deferred') AND proof.applied=1 AND proof.finished=1 AND proof.authority=?1 ORDER BY rows.request_id,rows.key")?;
+    let rows = statement.query_map([authority.0.to_string()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?)))?;
+    let mut proof: Option<(String,StageReceive)> = None;
+    for row in rows {
+        if probe.is_cancelled() { return Err(error("cancelled")); }
+        let (request_id,key,stamp,value,digest,body) = row?;
+        if proof.as_ref().is_none_or(|(id,_)| id != &request_id) {
+            #[cfg(test)]
+            crate::persistent_store::hash_work::observe("native_backup_receive_proof", body.len());
+            if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
+            let request: StageReceive = serde_json::from_str(&body)?;
+            if request.header.request_id != request_id || request.header.binding_authority != authority { return Err(error("request-id-integrity")); }
+            proof = Some((request_id.clone(),request));
+        }
+        let change = Change { key:wire(key.try_into())?, stamp:serde_json::from_str(&stamp)?, value:serde_json::from_str(&value)? };
+        let request = &proof.as_ref().unwrap().1;
+        if !request.changes.contains(&change) || change.stamp.physical_ms > request.admitted_time_upper_ms { return Err(error("request-id-integrity")); }
+        wire(change.stamp.validate())?;
+        wire({
+            let result = change.value.validate();
+            #[cfg(test)]
+            crate::persistent_store::hash_work::validation(&change.value);
+            result
+        })?;
+        projection::validate_received(&reader.connection,&change.key,&change.value)?;
+        if projection::is_device(&change.key) || parent_status(&reader.connection,&change.key)?=="retired" { continue; }
+        let previous: Option<(String,String)> = values.query_row("SELECT stamp,value FROM units WHERE key=?1",[change.key.as_str()],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let decision = match previous {
+            Some((stamp,value)) => wire({
+                let stamp: Stamp = serde_json::from_str(&stamp)?;
+                let value: UnitValue = serde_json::from_str(&value)?;
+                let result=compare_version(&stamp,&value,&change.stamp,&change.value);
+                #[cfg(test)]
+                crate::persistent_store::hash_work::comparison(&value,&change.value,&result);
+                result
+            })?,
+            None => LwwDecision::ApplyRemote,
+        };
+        if decision==LwwDecision::ApplyRemote { values.execute("INSERT INTO units VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET stamp=excluded.stamp,value=excluded.value",params![change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?])?; }
+    }
+    values.execute_batch("COMMIT")?;
+    let mut query = values.prepare("SELECT key,value FROM units ORDER BY key")?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        if probe.is_cancelled() { return Err(error("cancelled")); }
+        emit(wire(row.get::<_,String>(0)?.try_into())?,serde_json::from_str(&row.get::<_,String>(1)?)?)?;
+    }
+    Ok(())
+}
+
+impl PersistentStore {
     pub(crate) fn lww_backup_unit_values(&self, lease: &str) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
         let mut values = BTreeMap::new();
         self.lww_visit_backup_units(lease, &crate::local_backup::NeverCancelled, &mut |key,value| { values.insert(key,value); Ok(()) })?;
@@ -899,7 +997,10 @@ impl PersistentStore {
         if stored_authority != authority || stage != staging_id || risunest_sync_wire::hash(body.as_bytes()) != digest {
             return Err(error("request-id-integrity"));
         }
-        let Some((revision, generation)) = activated else { return Err(error("restore-activation-pending")); };
+        // A complete intent without an activation receipt was closed without changes and is never replayed.
+        let Some((revision, generation)) = activated else {
+            return if complete { Ok(None) } else { Err(error("restore-activation-pending")) };
+        };
         let applied_digest: String = self.connection.query_row(
             "SELECT digest FROM lww_requests WHERE request_id=?1", [request_id], |row| row.get(0),
         )?;
@@ -1037,6 +1138,13 @@ impl PersistentStore {
     pub(crate) fn lww_verified_object_present(&self, hash: &str) -> StoreResult<bool> {
         super::message_pages::retained_object_present(&self.connection, hash)
     }
+    /// Like `lww_verified_object_present`, but a marked body that is still here
+    /// is kept instead of reported missing. A reused control catalog lists the
+    /// pages a later value replaced, which that write marked, and fetching them
+    /// again would store the same bytes.
+    pub(crate) fn lww_keep_verified_object(&self, hash: &str) -> StoreResult<bool> {
+        super::message_pages::keep_verified_object(&self.connection, hash)
+    }
     /// The bodies a new value of `key` most likely shares bytes with: the value
     /// this device holds and the one last published under `binding`.
     pub(crate) fn lww_unit_object_bases(&self, key: &UnitKey, binding: DecimalU64) -> StoreResult<Vec<String>> {
@@ -1049,16 +1157,26 @@ impl PersistentStore {
         Ok(rows.collect::<Result<_, _>>()?)
     }
     /// Device units are applied inside the device store, so their large bodies
-    /// are copied there from the library store where receive placed them.
-    fn copy_device_unit_bodies<'a>(&self, changes: impl IntoIterator<Item = &'a Change>) -> StoreResult<()> {
+    /// and the parts a plugin value names are copied there from the library
+    /// store where receive placed them. Returns the keys of values whose parts
+    /// are missing: those are left out, never applied without their parts,
+    /// while the rest of the page applies.
+    fn copy_device_unit_bodies<'a>(&self, changes: impl IntoIterator<Item = &'a Change>) -> StoreResult<BTreeSet<String>> {
         let device = self.device_store()?.connection();
-        for change in changes {
+        let mut missing = BTreeSet::new();
+        'changes: for change in changes {
             let UnitValue::Object { descriptor, .. } = &change.value else { continue };
-            if !projection::is_device(&change.key)
-                || super::message_pages::retained_object_present(device, &descriptor.object_hash)?
-            {
-                continue;
+            if !projection::is_device(&change.key) { continue; }
+            for part in &descriptor.dependencies {
+                if !super::message_pages::retained_object_present(device, part)? {
+                    let Some(body) = super::message_pages::object_body(&self.connection, part)? else {
+                        missing.insert(change.key.as_str().to_owned());
+                        continue 'changes;
+                    };
+                    super::message_pages::put_object(device, part, &body)?;
+                }
             }
+            if super::message_pages::retained_object_present(device, &descriptor.object_hash)? { continue; }
             if change.key.components()[0] == "plugin-local"
                 && device_store::plugin_values::text_value::object_row(&self.connection, &descriptor.object_hash)?.1
                     > device_store::plugin_values::text_value::PART_BYTES as u64
@@ -1073,7 +1191,7 @@ impl PersistentStore {
                 .ok_or_else(|| error("unit-object-body-required"))?;
             super::message_pages::put_object(device, &descriptor.object_hash, &body)?;
         }
-        Ok(())
+        Ok(missing)
     }
     pub(crate) fn lww_put_object(&self, hash: &str, body: &[u8]) -> StoreResult<()> {
         super::message_pages::put_object(&self.connection, hash, body)
@@ -1174,6 +1292,13 @@ impl PersistentStore {
     }
     pub(crate) fn lww_clock_state(&self) -> StoreResult<ClockState> {
         clock_state(self.device_store()?.connection())
+    }
+    /// A stamp for a unit this device publishes outside its outbox.
+    pub(crate) fn lww_reserve_stamp(&mut self) -> StoreResult<Stamp> {
+        let tx = self.device_store_mut()?.transaction()?;
+        let stamp = reserve_stamp(&tx)?;
+        tx.commit()?;
+        Ok(stamp)
     }
     fn intent_device_revision(&self, request_id: &str) -> StoreResult<i64> {
         let db = self.device_store()?.connection();
@@ -1297,6 +1422,19 @@ impl PersistentStore {
         &mut self,
         input: &WorkingSetCommit,
         aliases: &[super::AssetAlias],
+        committed_revision: &mut Option<i64>,
+    ) -> StoreResult<RevisionResult> {
+        self.lww_commit_holding(input, aliases, committed_revision, |_| Ok(()))
+    }
+    /// Takes `hold` once the intent is reserved and keeps it until the library commit ends, so a
+    /// check of state other connections write still holds when the commit lands. A failed hold
+    /// completes the intent, so recovery never applies it unchecked.
+    pub(super) fn lww_commit_holding<G>(
+        &mut self,
+        input: &WorkingSetCommit,
+        aliases: &[super::AssetAlias],
+        committed_revision: &mut Option<i64>,
+        hold: impl FnOnce(&Self) -> StoreResult<G>,
     ) -> StoreResult<RevisionResult> {
         self.lww_recover_intents()?;
         let header = Header {
@@ -1308,11 +1446,17 @@ impl PersistentStore {
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
         };
-        let intent = Intent::Commit {
-            commit: input.clone(),
-            aliases: aliases.to_vec(),
-        };
+        let intent = Intent::for_commit(input, aliases);
         let (stamp, digest) = self.reserve_intent(&header, &intent)?;
+        let held = match hold(self) {
+            Ok(held) => held,
+            Err(error) => {
+                self.complete_intent(&header, intent.kept_after_completion())?;
+                return Err(error);
+            }
+        };
+        #[cfg(test)]
+        BEFORE_HELD_COMMIT.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
         let result = commit::commit_lww(
             &mut self.connection,
             input,
@@ -1321,6 +1465,8 @@ impl PersistentStore {
             &stamp,
             &digest,
         );
+        drop(held);
+        *committed_revision = result.as_ref().ok().map(|value| value.revision);
         if result.is_ok()
             || matches!(
                 result,
@@ -1595,10 +1741,22 @@ impl PersistentStore {
             self.completed_intent(&header, &intent)?;
         }
         match intent {
-            Intent::Commit {
-                commit: input,
-                aliases,
-            } => {
+            Intent::Commit { commit: input, aliases }
+            | Intent::GuardedGalleryDelete { commit: input, aliases } => {
+                // The device plugin values the interrupted call checked must still be current,
+                // and their writers stay out until the commit ends, as they did for that call.
+                let _barrier = match &input.device_plugin_fence {
+                    Some(fence) => {
+                        if !self.device_store()?.plugin_gc_fence_is_current(fence)? {
+                            return Err(StoreError::RevisionConflict {
+                                expected: input.expected_revision,
+                                actual: current_revision(&self.connection)?,
+                            });
+                        }
+                        Some(self.device_store()?.acquire_plugin_gc_barrier(fence)?)
+                    }
+                    None => None,
+                };
                 commit::commit_lww(
                     &mut self.connection,
                     &input,
@@ -1917,7 +2075,7 @@ impl PersistentStore {
                     vars.insert(p[1].clone(), value);
                 }
             }
-            if !projection::known(&key) && !projection::is_device(&key) {
+            if !projection::known(&key) && !projection::is_device(&key) && !risunest_sync_wire::library_format::is_key(&key) {
                 count += 1;
             }
         }
@@ -2126,7 +2284,7 @@ impl PersistentStore {
         Ok(())
     }
     fn stage_receive_rows(&mut self, request: &StageReceive) -> StoreResult<()> {
-        self.copy_device_unit_bodies(&request.changes)?;
+        let missing = self.copy_device_unit_bodies(&request.changes)?;
         for db in [
             &mut self.connection,
             &mut self.device_store.as_mut().map_err(|e| error(e))?.connection,
@@ -2136,7 +2294,7 @@ impl PersistentStore {
                 .is_some_and(|p| p.ends_with(device_store::DEVICE_DATABASE_FILE));
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for change in &request.changes {
-                if projection::is_device(&change.key) != device {
+                if projection::is_device(&change.key) != device || missing.contains(change.key.as_str()) {
                     continue;
                 }
                 tx.execute(
@@ -2174,7 +2332,10 @@ impl PersistentStore {
             });
         }
         self.stage_receive_rows(&staged)?;
-        let archived = self.restore_incoming_archives(&staged)?;
+        let archived = self.restore_incoming_archives(
+            request.header.binding_authority,
+            Some(&request.header.request_id),
+        )?;
         let mut result = self.apply_receive_rows(&request.generating, false)?;
         result.affected_keys.extend(archived);
         let tx = self.device_store_mut()?.transaction()?;
@@ -2245,37 +2406,66 @@ impl PersistentStore {
         }
         Ok(missing.into_iter().collect())
     }
-    fn restore_incoming_archives(&mut self, staged: &StageReceive) -> StoreResult<Vec<UnitKey>> {
+    /// Archives or restores, as this device does itself, every character a pending received
+    /// row flips here, whichever receive staged it, before any row is projected.
+    fn restore_incoming_archives(
+        &mut self,
+        binding_authority: DecimalU64,
+        own_request: Option<&str>,
+    ) -> StoreResult<Vec<UnitKey>> {
         self.lww_recover_intents()?;
+        let pending = {
+            let mut statement = self.connection.prepare(
+                "SELECT request_id,key,stamp,value FROM lww_receive_rows WHERE status IN ('staged','held') AND json_extract(key,'$[0]')='archive' ORDER BY key",
+            )?;
+            let rows = statement.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+            })?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (id, key, stamp, value) = row?;
+                pending.push((id, Change {
+                    key: wire(key.try_into())?,
+                    stamp: serde_json::from_str(&stamp)?,
+                    value: serde_json::from_str(&value)?,
+                }));
+            }
+            pending
+        };
         let mut affected = Vec::new();
-        for change in &staged.changes {
+        for (request_id, change) in &pending {
             let Some(restore) = self.incoming_archive_transition(change)? else {
                 continue;
             };
             let p = change.key.components();
             // A receive brings these bodies here before it is applied, so one that is still
-            // missing fails the apply before anything changes.
+            // missing fails the apply before anything changes. Another receive's row waits
+            // for that receive, which brings its bodies again.
+            let missing = |code: &str| if own_request == Some(request_id.as_str()) { Err(error(code)) } else { Ok(()) };
             let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
             if restore {
                 let generation = active_generation(&self.connection)?;
-                let archived =
-                    super::archive::read_archived_object(&self.connection, &generation, &p[1])?
-                        .ok_or_else(|| error("archive-object-missing"))?;
-                if cas.stat_object(&archived.object_hash)?.is_none() {
-                    return Err(error("archive-object-missing"));
+                let body = match super::archive::read_archived_object(&self.connection, &generation, &p[1])? {
+                    Some(archived) => cas.stat_object(&archived.object_hash)?,
+                    None => None,
+                };
+                if body.is_none() {
+                    missing("archive-object-missing")?;
+                    continue;
                 }
             } else if let Some(manifest) =
                 super::archive::owner_manifest_hash(&self.connection, &p[1])?
             {
                 if cas.stat_object(&manifest)?.is_none() {
-                    return Err(error("archive-manifest-missing"));
+                    missing("archive-manifest-missing")?;
+                    continue;
                 }
             }
             let header = Header {
-                binding_authority: staged.header.binding_authority,
+                binding_authority,
                 request_id: format!(
                     "archive-transition:{}:{}",
-                    staged.header.request_id,
+                    request_id,
                     {
                         let hash_input = change.key.as_str().as_bytes();
                         #[cfg(test)]
@@ -2368,6 +2558,17 @@ impl PersistentStore {
                     1
                 }
             });
+            // A character that was here before this apply is archived or restored only by
+            // `restore_incoming_archives`, which keeps what this device holds, so a flip it
+            // has not made waits. One this apply brings in has nothing here to keep.
+            let mut ready_archives = BTreeSet::new();
+            if !device {
+                for (_, change, _) in &changes {
+                    if change.key.components()[0] == "archive" && parent_status(&tx, &change.key)? == "ready" {
+                        ready_archives.insert(change.key.as_str().to_owned());
+                    }
+                }
+            }
             let revision = if device {
                 device_store::begin_mutation_remote(&tx)?
             } else {
@@ -2412,6 +2613,13 @@ impl PersistentStore {
                     } else {
                         LwwDecision::ApplyRemote
                     };
+                    if decision == LwwDecision::ApplyRemote
+                        && ready_archives.contains(change.key.as_str())
+                        && matches!(change.value, UnitValue::Deleted)
+                            == super::archive::is_archived(&tx, &generation, &c[1])?
+                    {
+                        continue;
+                    }
                     let new_retirement = hard_delete
                         && read_unit(&tx, &change.key)?
                             .is_none_or(|(_, v)| !matches!(v, UnitValue::Deleted));
@@ -2508,10 +2716,12 @@ impl PersistentStore {
         self.prune_receive_history()
     }
     /// Drops the receive history no proof needs. A finished receive stays while a held or
-    /// deferred row points at it, or until a later finished receive of its progress stream
-    /// moves the cursor. Pages that repeat the cursor belong to a group still arriving, and
-    /// acknowledging the last page reads it back. `done` rows go once their receive has
-    /// finished.
+    /// deferred row points at it. Otherwise only the newest finished server page stays: the
+    /// operation log hands out one server page at a time, never an older one again, and
+    /// acknowledging a page reads back only that page. An external page stays until a later
+    /// finished page of its stream moves the cursor, because pages that repeat the cursor belong
+    /// to a group still arriving, which may be delivered again under the same request ids.
+    /// `done` rows go once their receive has finished.
     fn prune_receive_history(&mut self) -> StoreResult<()> {
         let unfinished: Vec<String> = {
             let device = self.device_store()?.connection();
@@ -2526,31 +2736,25 @@ impl PersistentStore {
                 [&unfinished],
             )?;
         }
-        let superseded: Vec<String> = {
-            let device = self.device_store()?.connection();
-            let mut statement = device.prepare(
-                "SELECT request_id FROM lww_receive old WHERE finished=1 AND EXISTS(
-                     SELECT 1 FROM lww_receive newer WHERE newer.finished=1 AND newer.kind=old.kind
-                     AND newer.writer_id=old.writer_id AND newer.rowid>old.rowid AND newer.cursor<>old.cursor)",
+        let superseded = superseded_receives(self.device_store()?.connection())?;
+        if superseded.is_empty() {
+            return Ok(());
+        }
+        let mut proofs = BTreeSet::new();
+        for db in [&self.connection, self.device_store()?.connection()] {
+            let mut statement = db.prepare(
+                "SELECT DISTINCT request_id FROM lww_receive_rows WHERE status IN ('held','deferred')",
             )?;
-            let ids = statement.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-            ids
-        };
-        for request_id in superseded {
-            let mut proof = false;
-            for db in [&self.connection, self.device_store()?.connection()] {
-                proof |= db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM lww_receive_rows WHERE request_id=?1 AND status IN ('held','deferred'))",
-                    [&request_id],
-                    |r| r.get::<_, bool>(0),
-                )?;
+            for request_id in statement.query_map([], |r| r.get::<_, String>(0))? {
+                proofs.insert(request_id?);
             }
-            if !proof {
-                self.device_store()?.connection().execute(
-                    "DELETE FROM lww_receive WHERE request_id=?1 AND finished=1",
-                    [&request_id],
-                )?;
-            }
+        }
+        let device = self.device_store()?.connection();
+        for request_id in superseded.iter().filter(|id| !proofs.contains(*id)) {
+            device.execute(
+                "DELETE FROM lww_receive WHERE request_id=?1 AND finished=1",
+                [request_id],
+            )?;
         }
         Ok(())
     }
@@ -2562,7 +2766,9 @@ impl PersistentStore {
             self.device_store()?.connection(),
             request.header.binding_authority,
         )?;
-        let result = self.apply_receive_rows(&request.generating, true)?;
+        let archived = self.restore_incoming_archives(request.header.binding_authority, None)?;
+        let mut result = self.apply_receive_rows(&request.generating, true)?;
+        result.affected_keys.extend(archived);
         self.prune_receive_history()?;
         Ok(result)
     }
@@ -3123,14 +3329,16 @@ impl PersistentStore {
             }),
         )?;
         if target {
+            let mut missing = BTreeSet::new();
             changes.visit(false, |key, stamp, value, _| {
                 let change = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
-                self.copy_device_unit_bodies(std::iter::once(&change))
+                missing.extend(self.copy_device_unit_bodies(std::iter::once(&change))?);
+                Ok(())
             })?;
             let tx = self.device_store_mut()?.transaction()?;
             verify(&tx, header.binding_authority)?;
             verify_device_intent_revision(&tx, &header.request_id)?;
-            reset_target_device_rows(&tx, header, changes, header.binding_authority)?;
+            reset_target_device_rows(&tx, header, changes, header.binding_authority, &missing)?;
             tx.execute("UPDATE lww_intents SET complete=1 WHERE request_id=?1", [&header.request_id])?;
             tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id])?;
             tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
@@ -3220,6 +3428,10 @@ fn replacement_changes(
     drop(captured);
     for unit in source.into_iter().flat_map(|source| replacement_source::units(tx, source)) {
         let (key, _) = unit?;
+        // The format level belongs to the library, so a backup never sets it.
+        if risunest_sync_wire::library_format::is_key(&key) {
+            continue;
+        }
         let captured: bool = changes.db.query_row("SELECT EXISTS(SELECT 1 FROM captured WHERE key=?1)", [key.as_str()], |row| row.get(0))?;
         if !captured {
             let skip = archived_character(&key).map(|id| archived(&id)).transpose()?.unwrap_or(false);
@@ -3364,12 +3576,15 @@ fn reset_target_device(
     header: &Header,
     received: &[Change],
     binding: DecimalU64,
+    missing: &BTreeSet<String>,
 ) -> StoreResult<()> {
     let rows = FrozenRows::new(root)?;
     for change in received { rows.insert(intent_rows::target_row(change)?)?; }
-    reset_target_device_rows(tx, header, &rows, binding)
+    reset_target_device_rows(tx, header, &rows, binding, missing)
 }
-fn reset_target_device_rows(tx: &Transaction<'_>, header: &Header, received: &FrozenRows, binding: DecimalU64) -> StoreResult<()> {
+/// Replaces the device rows with `received`, leaving out the values in
+/// `missing` whose parts this device could not find.
+fn reset_target_device_rows(tx: &Transaction<'_>, header: &Header, received: &FrozenRows, binding: DecimalU64, missing: &BTreeSet<String>) -> StoreResult<()> {
     tx.execute("DELETE FROM hypa_embeddings", [])?;
     tx.execute("DELETE FROM plugin_device_storage", [])?;
     tx.execute("DELETE FROM lww_units", [])?;
@@ -3378,7 +3593,7 @@ fn reset_target_device_rows(tx: &Transaction<'_>, header: &Header, received: &Fr
     received.visit(false, |key, stamp, value, _| {
         let c = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
         observe(tx, &c.stamp)?;
-        if projection::is_device(&c.key) {
+        if projection::is_device(&c.key) && !missing.contains(c.key.as_str()) {
             projection::apply(tx, "", &c.key, &c.value)?;
             put_unit(tx, &c.key, &c.stamp, &c.value, &header.request_id, None)?;
             witness_received(tx, &c, binding)?;

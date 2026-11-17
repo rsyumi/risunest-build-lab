@@ -299,6 +299,16 @@ describe('parser asset resolution parity', () => {
         parserMocks.selIdState.selId = -1
     })
 
+    it('builds the asset index only for a pass that has asset tags', async () => {
+        parserMocks.getModuleAssets.mockClear()
+        expect(await ParseMarkdown('plain text', character, 'back', 7)).toBe('plain text')
+        expect(parserMocks.getModuleAssets).not.toHaveBeenCalled()
+
+        vi.mocked(processScriptFull).mockImplementationOnce(async (_char, data) => ({ data: `${data}|{{raw::theme}}`, emoChanged: false }))
+        expect(await ParseMarkdown('plain text', character, 'back', 7)).toBe('plain text|resolved:theme.mp3')
+        expect(parserMocks.getModuleAssets).toHaveBeenCalledOnce()
+    })
+
     it('uses frozen module and source assets without selected-character lookups', async () => {
         parserMocks.getCurrentCharacter.mockClear()
         parserMocks.getModuleAssets.mockClear()

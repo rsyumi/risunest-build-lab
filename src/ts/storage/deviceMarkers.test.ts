@@ -9,6 +9,7 @@ import {
     installDeviceMarkers,
 } from './deviceMarkers'
 import type { NativeDeviceSettings } from './nativeDeviceSettings'
+import { createDisplayRecovery } from '../displayRecovery.svelte'
 
 function settingsBackend() {
     const stored = new Map<string, unknown>()
@@ -68,10 +69,53 @@ describe('device markers', () => {
 
         vi.mocked(settings.set).mockRejectedValueOnce(new Error('device file is read only'))
         markers.setItem('nightlyWarned', 'true')
+        // The display recovery record waits for its own write without taking that failure.
+        await createDisplayRecovery(markers).beginWork({ characterId: 'synthetic-character', conversationId: 'synthetic-chat' }).ready
         await expect(markers.flush()).rejects.toThrow('device file is read only')
     })
 
-    it('rejects a key that is not a device marker', () => {
+    it('keeps durable cache values unchanged on failure and persists an identical retry across reopening', async () => {
+        const { stored, settings } = settingsBackend()
+        stored.set('risuNestAppLock', 'previous')
+        const markers = await initializeDeviceMarkers(settings)
+        vi.mocked(settings.set).mockRejectedValueOnce(new Error('synthetic storage failure'))
+        await expect(markers.commitItem!('risuNestAppLock', 'next')).rejects.toThrow('synthetic storage failure')
+        expect(markers.getItem('risuNestAppLock')).toBe('previous')
+        expect(stored.get('risuNestAppLock')).toBe('previous')
+        await markers.flush()
+        await markers.commitItem!('risuNestAppLock', 'next')
+        expect(markers.getItem('risuNestAppLock')).toBe('next')
+        installDeviceMarkers(null)
+        expect((await initializeDeviceMarkers(settings)).getItem('risuNestAppLock')).toBe('next')
+    })
+
+    it('publishes durable values only once native storage has accepted them', async () => {
+        const { stored, settings } = settingsBackend()
+        let complete: () => void
+        vi.mocked(settings.set).mockImplementationOnce(async (key, value) => {
+            await new Promise<void>((resolve) => { complete = resolve })
+            stored.set(key, value)
+        })
+        const markers = await initializeDeviceMarkers(settings)
+        const pending = markers.commitItem!('risuNestAppLock', 'next')
+        await Promise.resolve()
+        expect(markers.getItem('risuNestAppLock')).toBeNull()
+        complete!()
+        await pending
+        expect(markers.getItem('risuNestAppLock')).toBe('next')
+    })
+
+    it('keeps a malformed app lock marker invalid without breaking unrelated startup markers', async () => {
+        const { stored, settings } = settingsBackend()
+        stored.set('risuNestAppLock', { wrongType: true })
+        stored.set('hub', 'nightly')
+        const markers = await initializeDeviceMarkers(settings)
+        expect(markers.getItem('risuNestAppLock')).not.toBeNull()
+        expect(() => JSON.parse(markers.getItem('risuNestAppLock')!)).toThrow()
+        expect(markers.getItem('hub')).toBe('nightly')
+    })
+
+    it('rejects a key that is not a device marker' , () => {
         const { settings } = settingsBackend()
         const markers = createNativeDeviceMarkers(settings, DEVICE_MARKER_KEYS.map(() => null))
         expect(() => markers.setItem('fallbackRisuToken', 'x')).toThrow('not a device marker')
@@ -104,6 +148,20 @@ describe('device markers', () => {
         stored.delete('risuNestDeviceSettings')
         await reopened.reload!()
         expect(reopened.getItem('risuNestDefaultPluginsAttempted')).toBe(attempted)
+    })
+
+    it('keeps the display recovery record of a run that ended during display work for the next launch', async () => {
+        const { stored, settings } = settingsBackend()
+        const target = { characterId: 'synthetic-character', conversationId: 'synthetic-chat' }
+        const work = createDisplayRecovery(await initializeDeviceMarkers(settings)).beginWork(target)
+        await work.ready
+        expect(settings.set).toHaveBeenCalledExactlyOnceWith('risuNestDisplayRecovery', expect.any(String))
+
+        installDeviceMarkers(null)
+        const relaunched = createDisplayRecovery(await initializeDeviceMarkers(settings))
+        await relaunched.settled
+        expect(relaunched.isMarked(target)).toBe(true)
+        expect(JSON.parse(stored.get('risuNestDisplayRecovery') as string)).toEqual({ working: [], marked: [target] })
     })
 
     it('falls back to local storage on the web build', () => {

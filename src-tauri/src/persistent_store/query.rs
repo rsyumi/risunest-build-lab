@@ -1,16 +1,17 @@
 use super::{
     active_generation, compare_plugin_storage_keys, current_revision, AnchorOccurrence,
-    ArchivedCharacterSummary, AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead,
+    ArchivedCharacterSummary, AssetAlias, AuthorNotePresetUsage, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead,
     AssetOwnerLocator, CharacterPage, CharacterQuery,
     CharacterSummary, ConversationPage, ConversationQuery, ConversationSummary,
     ConversationMessageMetadata, ConversationMessageMetadataWindow, ConversationWindow,
     ConversationWindowQuery, PluginStorageCatalog, PluginStorageListItem, PluginStorageSummary,
     PluginStorageValue, PluginStorageValueCursor, PluginStorageValueQuery, PluginStorageValuePage,
-    PresetCatalog, PresetSummary, QueryOrder, ReadTarget, StoreError, StoreResult, Versioned,
-    CONVERSATION_RANGE_MAX_LIMIT, JAVASCRIPT_MAX_SAFE_INTEGER,
+    PresetCatalog, PresetSummary, QueryOrder, ReadTarget, StoreError, StoreResult,
+    StoredConversation, StoredJson, Versioned, CONVERSATION_RANGE_MAX_LIMIT,
+    JAVASCRIPT_MAX_SAFE_INTEGER,
 };
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{Map, Value};
+use serde_json::{value::RawValue, Map, Value};
 use std::collections::HashSet;
 
 pub(super) fn read_root(
@@ -684,6 +685,37 @@ pub(super) fn read_character(
     }))
 }
 
+pub(super) fn query_author_note_preset_usage(
+    connection: &Connection,
+    preset_id: &str,
+    target: &ReadTarget,
+) -> StoreResult<Vec<AuthorNotePresetUsage>> {
+    let mut statement = connection.prepare(
+        "SELECT c.character_id, k.name, c.conversation_id, c.name,
+             json_extract(c.detail, '$.note'), json_extract(c.detail, '$.authorNotePreset.fingerprint')
+         FROM conversations c JOIN characters k
+             ON k.generation = c.generation AND k.character_id = c.character_id
+         WHERE c.generation = ?1 AND json_extract(c.detail, '$.authorNotePreset.id') = ?2
+         ORDER BY k.configured_index, c.configured_index",
+    )?;
+    let mut rows = statement.query(params![target.generation, preset_id])?;
+    let mut items = Vec::new();
+    while let Some(row) = rows.next()? {
+        let note: Option<String> = row.get(4).ok().flatten();
+        let fingerprint: Option<String> = row.get(5).ok().flatten();
+        if fingerprint.as_deref() != Some(&super::author_note::fingerprint(note.as_deref().unwrap_or(""))) {
+            continue;
+        }
+        items.push(AuthorNotePresetUsage {
+            character_id: row.get(0)?,
+            character_name: row.get(1)?,
+            conversation_id: row.get(2)?,
+            conversation_name: row.get(3)?,
+        });
+    }
+    Ok(items)
+}
+
 pub(super) fn query_conversations(
     connection: &Connection,
     query: &ConversationQuery,
@@ -762,6 +794,41 @@ pub(super) fn read_conversation(
     }))
 }
 
+pub(super) fn read_stored_conversation(
+    connection: &Connection,
+    character_id: &str,
+    conversation_id: &str,
+    target: &ReadTarget,
+) -> StoreResult<Option<Versioned<StoredConversation>>> {
+    let detail: Option<String> = connection
+        .query_row(
+            "SELECT detail FROM conversations WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3",
+            params![target.generation, character_id, conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(detail) = detail else {
+        return Ok(None);
+    };
+    let detail = into_object(
+        serde_json::from_str(&detail)?,
+        "Conversation detail must be an object",
+    )?;
+    let messages = read_message_rows(
+        connection,
+        &target.generation,
+        character_id,
+        conversation_id,
+        0,
+        i64::MAX,
+        stored_message,
+    )?;
+    Ok(Some(Versioned {
+        revision: target.revision,
+        value: StoredConversation { detail, messages },
+    }))
+}
+
 pub(super) fn read_conversation_metadata(
     connection: &Connection,
     character_id: &str,
@@ -804,6 +871,23 @@ pub(super) fn read_conversation_window(
     query: &ConversationWindowQuery,
     target: &ReadTarget,
 ) -> StoreResult<Option<Versioned<ConversationWindow>>> {
+    read_conversation_window_with(connection, query, target, parsed_message)
+}
+
+pub(super) fn read_stored_conversation_window(
+    connection: &Connection,
+    query: &ConversationWindowQuery,
+    target: &ReadTarget,
+) -> StoreResult<Option<Versioned<ConversationWindow<StoredJson>>>> {
+    read_conversation_window_with(connection, query, target, stored_message)
+}
+
+fn read_conversation_window_with<M>(
+    connection: &Connection,
+    query: &ConversationWindowQuery,
+    target: &ReadTarget,
+    decode: fn(String) -> StoreResult<M>,
+) -> StoreResult<Option<Versioned<ConversationWindow<M>>>> {
     if query.anchor_occurrence.is_some() && query.anchor_message_id.is_none() {
         return Err(StoreError::Validation {
             message: "conversation anchor occurrence requires anchorMessageId".to_owned(),
@@ -896,13 +980,14 @@ pub(super) fn read_conversation_window(
             }
         },
     };
-    let messages = read_messages(
+    let messages = read_message_rows(
         connection,
         &target.generation,
         &query.character_id,
         &query.conversation_id,
         start_index,
         end_index,
+        decode,
     )?;
     Ok(Some(Versioned {
         revision: target.revision,
@@ -1231,20 +1316,30 @@ fn order_sql(order: QueryOrder) -> &'static str {
     }
 }
 
-fn read_messages(
+fn parsed_message(row: String) -> StoreResult<Value> {
+    Ok(serde_json::from_str(&row)?)
+}
+
+/// Validates the stored text without building a value; the renderer parses it once.
+fn stored_message(row: String) -> StoreResult<StoredJson> {
+    Ok(RawValue::from_string(row)?)
+}
+
+fn read_message_rows<M>(
     connection: &Connection,
     generation: &str,
     character_id: &str,
     conversation_id: &str,
     start: i64,
     end: i64,
-) -> StoreResult<Vec<Value>> {
+    decode: fn(String) -> StoreResult<M>,
+) -> StoreResult<Vec<M>> {
     let mut statement = connection.prepare("SELECT value FROM messages WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3 AND message_index >= ?4 AND message_index < ?5 ORDER BY message_index ASC")?;
     let rows = statement.query_map(
         params![generation, character_id, conversation_id, start, end],
         |row| row.get::<_, String>(0),
     )?;
-    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    rows.map(|row| decode(row?)).collect()
 }
 
 fn conversation_value(
@@ -1260,13 +1355,14 @@ fn conversation_value(
     )?;
     value.insert(
         "message".to_owned(),
-        Value::Array(read_messages(
+        Value::Array(read_message_rows(
             connection,
             generation,
             character_id,
             conversation_id,
             0,
             i64::MAX,
+            parsed_message,
         )?),
     );
     Ok(Value::Object(value))

@@ -4,7 +4,7 @@ import { get } from 'svelte/store'
 import { selectedCharID } from '../../../stores.svelte'
 import { getDatabase } from '../../database.svelte'
 import { flushDeviceStateBeforeRestore, refreshDeviceStateAfterRestore } from '../../deviceStateRestore'
-import { hasMobileBackgroundTasks, subscribeMobileBackgroundTasks, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
+import { beginMobileBackgroundTask, hasMobileBackgroundTasks, subscribeMobileBackgroundTasks, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import {
     acquireDestructiveReplacementFence,
     capturePersistentMutationToken,
@@ -46,6 +46,8 @@ interface ProductionRuntime {
     controller: ExternalStorageController
     scheduler: ExternalStorageScheduler
     session: ExternalExecutionSession
+    /** Native holds the hidden session, which ended the jobs of the previous one. */
+    hidden?: boolean
     lifecycle: Promise<void>
     dispose(): void
 }
@@ -80,14 +82,20 @@ function recoverVerifiedConnections(current: ProductionRuntime, state: ExternalS
             current.scheduler.recovered(connection.id)
         }
     }
+    // A removed connection can no longer be signed in, so the backups that waited on it run again.
+    for (const previous of current.state.connections) {
+        if (!state.connections.some(connection => connection.id === previous.id)) current.scheduler.recovered(previous.id)
+    }
 }
 
 async function refreshForeground(current: ProductionRuntime): Promise<void> {
     if (isLibraryFileOperationReserved()) return
     const bridge = getExternalStorageBridge()
-    if (!hasMobileBackgroundTasks()) {
+    // Routine work that began on return to the screen must not keep the hidden session.
+    if (current.hidden || !hasMobileBackgroundTasks()) {
         current.session = newSession('foreground')
         await bridge.setExecutionSession(current.session)
+        current.hidden = false
     }
     const state = await bridge.getState()
     recoverVerifiedConnections(current, state)
@@ -160,8 +168,9 @@ export function installExternalStorageProduction(): Promise<() => void> {
         disposers.push(controller.subscribe(snapshot => {
             for (const [connectionId, job] of snapshot.activeJobs) {
                 if (job.error?.action !== 'reauthenticate' && job.error?.action !== 'unlock-key') continue
+                const fixedOn = job.error.connectionId || connectionId
                 current.state = { ...current.state, connections: current.state.connections.map(connection =>
-                    connection.id === connectionId ? { ...connection, status: job.error?.action === 'reauthenticate' ? 'reauth-required' as const : 'key-locked' as const, lastError: job.error } : connection) }
+                    connection.id === fixedOn ? { ...connection, status: job.error?.action === 'reauthenticate' ? 'reauth-required' as const : 'key-locked' as const, lastError: job.error } : connection) }
             }
         }))
         disposers.push(subscribeLocalPersistentRevision(value => {
@@ -191,6 +200,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
                     if (hasMobileBackgroundTasks()) return
                     current.session = { kind: 'foreground', id: crypto.randomUUID() }
                     await bridge.setExecutionSession({ kind: 'hidden', id: current.session.id })
+                    current.hidden = true
                     await scheduler.suspend(() => false)
                 } else await refreshForeground(current)
             }).catch(() => {})
@@ -357,6 +367,25 @@ export async function requestExternalStorageDeleteHistory(
     }, undefined, true)
 }
 
+/** Starts a keep or check job and holds background time until it settles. */
+export async function startExternalStorageMaintenanceJob(request: StartExternalJobRequest): Promise<ExternalJobSummary> {
+    const background = await beginMobileBackgroundTask('maintenance', undefined, true)
+    let job: ExternalJobSummary
+    try { job = await getExternalStorageBridge().startJob(request) }
+    catch (error) { await background.dispose(); throw error }
+    if (background.protection?.state === 'refused') { await background.dispose(); return job }
+    void (async () => {
+        try {
+            while (['queued', 'running', 'waiting'].includes(job.state) && !externalJobIsPaused(job)) {
+                await new Promise(resolve => setTimeout(resolve, 500))
+                job = await readBackgroundJob(job.id, background)
+                background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
+            }
+        } catch {} finally { await background.dispose(job.state === 'succeeded') }
+    })()
+    return job
+}
+
 async function retryPausedJob(
     job: ExternalJobSummary,
     request: StartExternalJobRequest,
@@ -455,6 +484,7 @@ export async function requestExternalStorageRestore(
             let adoptionSelected = false
             let pluginsAdopted = false
             let adoptionComplete = false
+            let unchangedReleased = false
             const operation = runExternalApplication({
                 jobId,
                 fence,
@@ -532,12 +562,17 @@ export async function requestExternalStorageRestore(
                 },
                 settled: async () => {
                     if (committed) await pause!.finish()
-                    else {
+                    // A retry after a failed plugin restart finds the unchanged library already released.
+                    else if (!unchangedReleased) {
                         await pause!.abortUnchanged(replacement!.assertAuthority)
-                        await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
+                        unchangedReleased = true
                     }
-                    await replacement!.resume()
-                    current.scheduler.resume()
+                    // A failed plugin restart is still reported, after sync resumes.
+                    try { if (!committed) await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement() }
+                    finally {
+                        await replacement!.resume()
+                        current.scheduler.resume()
+                    }
                 },
             })
             handedOff = true
@@ -549,10 +584,9 @@ export async function requestExternalStorageRestore(
                     if (replacementFenced && replacement) {
                         if (pause) await pause.abortUnchanged(replacement.assertAuthority)
                         else await replacement.assertAuthority()
-                        if (pluginsFenced) {
-                            await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
-                        }
-                        await replacement.resume()
+                        try {
+                            if (pluginsFenced) await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
+                        } finally { await replacement.resume() }
                     } else fence?.release()
                 } finally {
                     replacement?.release()

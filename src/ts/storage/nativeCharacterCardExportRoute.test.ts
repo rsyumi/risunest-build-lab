@@ -6,9 +6,39 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: vi.fn(),
 }))
 
+import { get } from 'svelte/store'
 import { exportNativeCharacterCardFromPicker } from './nativeCharacterCardExportRoute'
+import { isLibraryFileOperationReserved, registerLibraryFileOperationGate } from './libraryFileOperation'
+import { nativeFileOperation, nativeFileOperationOutcome } from './nativeFileJobManager'
+import type { NativeFileJobResult } from './nativeFileJobs'
 
 describe('native character card export route', () => {
+    it('waits for sync and backups to settle before opening the picker', async () => {
+        const calls: string[] = []
+        let settle!: () => void
+        const unregister = registerLibraryFileOperationGate(() => new Promise<void>(resolve => { settle = resolve }))
+        try {
+            const exporting = exportNativeCharacterCardFromPicker({
+                characterId: 'json-character', suggestedName: 'JSON.json', format: 'json-card', projectCharacter: () => ({}),
+            }, {}, {
+                isDesktop: () => true,
+                isAndroid: () => false,
+                chooseDestination: async () => { calls.push('pick'); return '/chosen/JSON.json' },
+                runtime: () => ({ revision: 5, flushPendingData: async () => { calls.push('flush') } }),
+                readCharacter: async () => { calls.push('read'); return {} as never },
+                runExport: async () => { calls.push('export'); return { revision: 5 } as NativeFileJobResult },
+            })
+            await vi.waitFor(() => expect(get(nativeFileOperation)?.waitingForSync).toBe(true))
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            expect(calls).toEqual([])
+            settle()
+            await expect(exporting).resolves.toEqual({ revision: 5 })
+        } finally { unregister() }
+        expect(calls).toEqual(['pick', 'flush', 'read', 'export'])
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'export', state: 'succeeded' })
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+
     it('projects JSON metadata from the exact leased revision after destination selection', async () => {
         const calls: unknown[] = []
         const leasedCharacter = {
@@ -95,6 +125,39 @@ describe('native character card export route', () => {
         ])
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
         expect(JSON.stringify(calls)).not.toContain('data:image')
+    })
+
+    it.each(['success', 'export', 'cancel', 'decode'])('cleans the staged rendition on %s without reopening the picker', async outcome => {
+        const owned = new Map([['/owned/rendition', 'png']])
+        const controller = new AbortController()
+        let destination = 'previous'
+        let picks = 0
+        const action = exportNativeCharacterCardFromPicker({
+            characterId: 'avif', suggestedName: 'card.png', format: 'png-card', projectCharacter: () => ({}),
+        }, { signal: controller.signal }, {
+            isDesktop: () => true, isAndroid: () => false,
+            chooseDestination: async () => { picks++; return '/chosen/card.png' },
+            runtime: () => ({ revision: 7, flushPendingData: async () => {} }),
+            readCharacter: async () => ({ image: 'assets/old.png' }) as never,
+            preparePortrait: async (_character, revision) => {
+                expect(revision).toBe(7)
+                if (outcome === 'decode') { owned.clear(); throw new Error('decode failed') }
+                if (outcome === 'cancel') controller.abort()
+                return { descriptor: { sourceHash: 'a'.repeat(64), path: '/owned/rendition' }, release: async () => { owned.clear() } }
+            },
+            runExport: async input => {
+                expect(input.portraitRendition?.sourceHash).toBe('a'.repeat(64))
+                expect(owned.get(input.portraitRendition!.path)).toBe('png')
+                if (outcome === 'export') throw new Error('export failed')
+                destination = 'new card'
+                return null
+            },
+        })
+        if (outcome === 'success') await action
+        else await expect(action).rejects.toBeDefined()
+        expect(picks).toBe(1)
+        expect(owned.size).toBe(0)
+        expect(destination).toBe(outcome === 'success' ? 'new card' : 'previous')
     })
 
     it('leaves Web and a cancelled picker on the compatibility path', async () => {

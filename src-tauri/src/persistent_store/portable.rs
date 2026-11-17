@@ -320,7 +320,9 @@ impl PersistentStore {
         }
         let temporary=tempfile::tempdir_in(&self.snapshots_dir)?;
         let certified=crate::sqlite_open::open(temporary.path().join("certified.sqlite"))?;
-        certified.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
+        // A scratch table that is dropped with its directory, so no commit needs to be durable.
+        certified.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-16384; PRAGMA temp_store=FILE;
+            CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL); BEGIN")?;
         let read_manifest = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
         };
@@ -349,6 +351,7 @@ impl PersistentStore {
                 certified.execute("INSERT INTO controls VALUES(?1,?2)",rusqlite::params![hash,body])?;
                 Ok(())
             })?;
+        certified.execute_batch("COMMIT")?;
         let controls:i64=source.query_row("SELECT COUNT(*) FROM backup_controls",[],|row|row.get(0))?;
         if usize::try_from(controls).ok()!=Some(inventory.controls.len()) {return Err(invalid("unreferenced original control"));}
         for hash in inventory.controls.keys() {
@@ -498,6 +501,25 @@ impl PersistentStore {
             }
             if digest_tables(&transaction, Some(&stage.staging_id), probe)? != expected {
                 return Err(invalid("portable staging changed raw SQL values"));
+            }
+            // A library saved before activation gave every embedded module an id may hold one
+            // without it, and every later root save names that module's owner by its id.
+            {
+                let mut roots = transaction.prepare(
+                    "SELECT rowid,value FROM root WHERE generation=?1 AND typeof(value)='text' AND json_valid(value)",
+                )?;
+                let roots = roots
+                    .query_map([&stage.staging_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (rowid, raw) in roots {
+                    let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+                    if value.as_object_mut().is_some_and(super::record_projection::assign_embedded_module_ids) {
+                        transaction.execute(
+                            "UPDATE root SET value=?1 WHERE rowid=?2",
+                            rusqlite::params![serde_json::to_string(&value)?, rowid],
+                        )?;
+                    }
+                }
             }
             {
                 let mut conversations = transaction

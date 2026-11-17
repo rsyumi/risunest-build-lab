@@ -62,6 +62,7 @@ export interface InlayBlobMetadata {
     inlayType: InlayBlobType
     width?: number
     height?: number
+    metadata?: Record<string, unknown>
     preservationReason?: 'animation-cost' | 'color-profile'
 }
 
@@ -73,6 +74,11 @@ export type BlobWriteMetadata =
 export interface BlobReadRange {
     start: number
     endExclusive: number
+}
+
+export interface BlobReadOptions {
+    /** A background read starts after the waiting foreground reads of native storage. */
+    background?: boolean
 }
 
 export interface BlobListQuery {
@@ -95,13 +101,16 @@ export interface BlobStore {
     resolveImageSource?(key: string): Promise<BlobImageSource | null>
     captureConditionalWrite?(key: string): Promise<ConditionalBlobWrite | null>
     put(key: string, data: Uint8Array, metadata: BlobWriteMetadata): Promise<BlobMetadata>
+    /** Verifies prepared native bytes before publishing their alias. */
+    putVerified?(key: string, data: Uint8Array, metadata: BlobWriteMetadata, beforeActivate?: () => Promise<void>): Promise<BlobMetadata>
     putNewInlayImage?(
         key: string,
         data: Uint8Array,
-        input: { name: string, options?: InlayEncodeOptions },
+        input: { name: string, options?: InlayEncodeOptions, metadata?: Record<string, unknown> },
     ): Promise<InlayBlobMetadata>
-    read(key: string, range?: BlobReadRange): Promise<Uint8Array | null>
+    read(key: string, range?: BlobReadRange, options?: BlobReadOptions): Promise<Uint8Array | null>
     stat(key: string): Promise<BlobMetadata | null>
+    statMany?(keys: readonly string[]): Promise<(BlobMetadata | null)[]>
     list(query?: BlobListQuery): Promise<BlobMetadata[]>
     remove(key: string): Promise<void>
     resolveUrl(key: string): Promise<string | null>

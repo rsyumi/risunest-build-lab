@@ -1,13 +1,13 @@
 import { get } from "svelte/store"
 import { CbsHistoryAccessError } from '../cbsHistoryAccess'
 import { parseChatML } from "../parser/chatML";
-import { getDatabase, type character, type customscript, type Database } from "../storage/database.svelte"
+import { getCurrentCharacter, getDatabase, type character, type customscript, type Database } from "../storage/database.svelte"
 import {
     defaultTranslatorPrompt,
     getCurrentTranslatorPresetFromState,
     type TranslatorPreset,
 } from "./presets";
-import { globalFetch } from "../globalApi.svelte"
+import { fetchNative, globalFetch } from "../globalApi.svelte"
 import { isTauri } from "src/ts/platform"
 import { alertError } from "../alert"
 import { requestChatData } from "../process/request/request"
@@ -17,13 +17,39 @@ import { selectedCharID } from "../stores.svelte"
 import { getModuleRegexScripts } from "../process/modules"
 import { getNodetextToSentence, sleep } from "../util"
 import { processScriptFull, type ProcessScriptCaptureContext } from "../process/scripts"
+import { displayRecoveryTarget, withDisplayWork } from "../displayRecovery.svelte"
 import localforage from "localforage"
 import sendSound from '../../etc/send.mp3'
+import { ByteBudgetLru } from "../util/byteBudgetLru"
+import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from "../runtimePerformanceProfile"
 
-let cache={
-    origin: [''],
-    trans: ['']
+// Translations made this session. A key carries the settings the request
+// depends on, so a changed language, translator or DeepLX server translates again.
+let translationCache: ByteBudgetLru<string, string> | null = null
+subscribeRuntimePerformanceProfile(() => { translationCache = null })
+
+function cachedTranslations(): ByteBudgetLru<string, string> {
+    return translationCache ??= new ByteBudgetLru<string, string>(
+        getRuntimePerformanceBudgets().translationCacheBytes,
+        (key, value) => (key.length + value.length) * 2 + 32,
+    )
 }
+
+function translationCacheKey(db: Database, from: string, target: string, reverse: boolean, text: string): string {
+    const server = db.translatorType === 'deeplX' ? db.deeplXOptions?.url ?? null : null
+    return JSON.stringify([reverse, db.translatorType, db.translatorInputLanguage, from, target, server, !!db.useExperimentalGoogleTranslator]) + text
+}
+
+function rememberTranslation(key: string, value: string): void {
+    const cache = cachedTranslations()
+    if (cache.get(key) === undefined) cache.set(key, value)
+}
+
+// Requests still in flight, so overlapping parses of one row pay for a text once.
+// A translation reports its failure in one error mode, so its key carries the mode;
+// an LLM request returns its failure for each caller to report.
+const pendingTranslations = new Map<string, Promise<string>>()
+const pendingLLMTranslations = new Map<string, Promise<string>>()
 
 let bergamotTranslate: (text: string, from: string, to: string, html?: boolean) => Promise<string>|null = null
 
@@ -33,39 +59,59 @@ export const LLMCacheStorage = localforage.createInstance({
 
 let waitTrans = 0
 
+// Google refuses some client names with 429 in some regions while it still answers others.
+const googleTranslateClients = ['dict-chrome-ex', 'at', 'gtx']
+// The client that answered last, which later requests ask first.
+let googleTranslateClient = 0
+
 export interface TranslateHTMLContext {
     scriptContext: ProcessScriptCaptureContext
     projectedChatID?: number
     chara?: character | string
     cbsConditions?: CbsConditions
+    /** A row of the live chat, which shares the translations made this session. */
+    liveProjection?: true
+}
+
+function sharesLiveTranslation(captureContext?: TranslateHTMLContext): boolean {
+    return !captureContext || captureContext.liveProjection === true
 }
 
 export function getCurrentTranslatorPreset(database: Database = getDatabase()): TranslatorPreset {
     return getCurrentTranslatorPresetFromState(database)
 }
 
+function sessionTranslation(db: Database, reverse: boolean, text: string): string | undefined {
+    if(text === ''){
+        return ''
+    }
+    const target = db.aiModel.startsWith('novellist') ? 'ja' : 'en'
+    return cachedTranslations().get(translationCacheKey(db, db.translator, target, reverse, text))
+}
+
 export async function translate(text:string, reverse:boolean, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert') {
     let db = captureContext?.scriptContext.parserContext.database ?? getDatabase()
-    if(!captureContext){
-        if(!reverse){
-            const ind = cache.origin.indexOf(text)
-            if(ind !== -1){
-                return cache.trans[ind]
-            }
+    const target = db.aiModel.startsWith('novellist') ? 'ja' : 'en'
+    if(sharesLiveTranslation(captureContext)){
+        const cached = sessionTranslation(db, reverse, text)
+        if(cached !== undefined){
+            return cached
         }
-        else{
-            const ind = cache.trans.indexOf(text)
-            if(ind !== -1){
-                return cache.origin[ind]
-            }
+        const key = errorMode + translationCacheKey(db, db.translator, target, reverse, text)
+        let pending = pendingTranslations.get(key)
+        if(!pending){
+            pending = runTranslator(text, reverse, db.translator, target, undefined, captureContext, errorMode)
+                .finally(() => pendingTranslations.delete(key))
+            pendingTranslations.set(key, pending)
         }
+        return pending
     }
 
     return runTranslator(
         text,
         reverse,
         db.translator,
-        db.aiModel.startsWith('novellist') ? 'ja' : 'en',
+        target,
         undefined,
         captureContext,
         errorMode,
@@ -110,7 +156,7 @@ export async function runTranslator(text:string, reverse:boolean, from:string,ta
                 fullResult.push(chunk[0])
                 continue
             }
-            const result = await translateMain(trimed, arg, captureContext, errorMode);
+            const result = await translateMain(trimed, arg, captureContext);
 
             if(result.startsWith('ERR::')){
                 if (errorMode === 'throw') throw new Error(result)
@@ -128,9 +174,12 @@ export async function runTranslator(text:string, reverse:boolean, from:string,ta
 
     const result = fullResult.join("\n").trim()
 
-    if(!captureContext){
-        cache.origin.push(reverse ? result : text)
-        cache.trans.push(reverse ? text : result)
+    if(sharesLiveTranslation(captureContext)){
+        const db = captureContext?.scriptContext.parserContext.database ?? getDatabase()
+        const origin = reverse ? result : text
+        const translated = reverse ? text : result
+        rememberTranslation(translationCacheKey(db, from, target, false, origin), translated)
+        rememberTranslation(translationCacheKey(db, from, target, true, translated), origin)
     }
 
 
@@ -138,11 +187,11 @@ export async function runTranslator(text:string, reverse:boolean, from:string,ta
 
 }
 
-async function translateMain(text:string, arg:{from:string, to:string, host:string, translatorNote?:string}, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert'){
+async function translateMain(text:string, arg:{from:string, to:string, host:string, translatorNote?:string}, captureContext?: TranslateHTMLContext){
     let db = captureContext?.scriptContext.parserContext.database ?? getDatabase()
     if(db.translatorType === 'llm'){
         const tr = arg.to || 'en'
-        return translateLLM(text, {to: tr, from: arg.from, translatorNote: arg.translatorNote}, captureContext, errorMode)
+        return translateLLM(text, {to: tr, from: arg.from, translatorNote: arg.translatorNote}, captureContext)
     }
     if(db.translatorType === 'deepl'){
         const body = {
@@ -218,12 +267,16 @@ async function translateMain(text:string, arg:{from:string, to:string, host:stri
                         "Accept": "*/*",
                     },
                     method: "GET",
+                    // The page is HTML, which the default JSON response would fail to parse.
+                    rawResponse: true,
                 })
-                const parser = new DOMParser()
-                const dom = parser.parseFromString(d.data, 'text/html')
-                const result = dom.querySelector('.result-container')?.textContent?.trim()
-                if(result){
-                    return result
+                if(d.ok){
+                    const parser = new DOMParser()
+                    const dom = parser.parseFromString(new TextDecoder().decode(d.data), 'text/html')
+                    const result = dom.querySelector('.result-container')?.textContent?.trim()
+                    if(result){
+                        return result
+                    }
                 }
             } catch (error) {
                 
@@ -232,15 +285,51 @@ async function translateMain(text:string, arg:{from:string, to:string, host:stri
     }
 
 
-    const url = `https://${arg.host}/translate_a/single?client=gtx&dt=t&sl=${db.translatorInputLanguage}&tl=${arg.to}&q=` + encodeURIComponent(text)
+    // The text goes in the body, which has no URL length limit.
+    const request = {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: 'q=' + encodeURIComponent(text),
+    }
+    let f: Response | null = null
+    let networkError: unknown
+    // Another translation may change the remembered client while this one walks the list.
+    const firstClient = googleTranslateClient
+    for(let attempt = 0; attempt < googleTranslateClients.length; attempt++){
+        // Release the refused response before asking the next client.
+        await f?.body?.cancel().catch(() => {})
+        f = null
+        const client = (firstClient + attempt) % googleTranslateClients.length
+        const url = `https://${arg.host}/translate_a/single?client=${googleTranslateClients[client]}&dt=t&sl=${db.translatorInputLanguage}&tl=${arg.to}`
+        // Google can refuse one HTTP client while it still answers another, and a refusal
+        // may reach the WebView only as a network error.
+        try {
+            f = await fetch(url, request)
+        } catch (error) {
+            networkError = error
+        }
+        if(isTauri && (f === null || f.status === 429)){
+            await f?.body?.cancel().catch(() => {})
+            try {
+                f = await fetchNative(url, { ...request, logFetch: false })
+            } catch (error) {
+                networkError = error
+            }
+        }
+        if(f !== null && f.status !== 429){
+            googleTranslateClient = client
+            break
+        }
+    }
+    if(f === null){
+        throw networkError
+    }
 
-
-
-    const f = await fetch(url, {
-
-        method: "GET",
-
-    })
+    if(!f.ok){
+        // An unread native body keeps its response open until the idle timeout.
+        await f.body?.cancel().catch(() => {})
+        return `ERR::Google Translate Error ${f.status}`
+    }
 
     const res = await f.json()
 
@@ -309,7 +398,7 @@ export async function translateHTML(
             chaId: 'simple'
         }
     }
-    let DoingChat = captureContext ? false : get(doingChat)
+    let DoingChat = sharesLiveTranslation(captureContext) ? get(doingChat) : false
     const parser = captureContext?.scriptContext.parserContext
     if (parser?.prepareHistory) {
         const historyAccess = await parser.prepareHistory([
@@ -319,18 +408,27 @@ export async function translateHTML(
         captureContext = { ...captureContext, scriptContext: { ...captureContext.scriptContext,
             parserContext: { ...parser, historyAccess } } }
     }
+    let sessionTranslationsOnly = false
     if(DoingChat){
         if(isExpTranslator(db)){
             if(!(db.translatorType === 'llm' && await getLLMCache(html) !== null)){
-                return html
+                if(db.translatorType === 'llm' || !captureContext){
+                    return html
+                }
+                // A live row keeps the translations made earlier this session.
+                sessionTranslationsOnly = true
             }
         }
     }
     if(db.translatorType === 'llm'){
         const tr = db.translator || 'en'
         const from = db.translatorInputLanguage
-        const r = await translateLLM(html, {to: tr, from: from, regenerate}, captureContext)
+        let r = await translateLLM(html, {to: tr, from: from, regenerate}, captureContext)
         signal?.throwIfAborted()
+        if(r.startsWith('ERR::')){
+            alertError(r)
+            r = html
+        }
         if(db.playMessageOnTranslateEnd){
             const audio = new Audio(sendSound);
             audio.play().catch(() => {});
@@ -350,6 +448,18 @@ export async function translateHTML(
         const translated = await bergamotTranslate(html, from, to, true)
         signal?.throwIfAborted()
         return applyEdittransRegex(translated, charArg, alwaysExistChar, chatID, captureContext)
+    }
+    let missedSessionTranslation = false
+    const translateText = async (text: string) => {
+        if(!sessionTranslationsOnly){
+            return translate(text, reverse, captureContext)
+        }
+        const cached = sessionTranslation(db, reverse, text)
+        if(cached === undefined){
+            missedSessionTranslation = true
+            return text
+        }
+        return cached
     }
     const dom = new DOMParser().parseFromString(html, 'text/html');
     console.log(html)
@@ -385,7 +495,7 @@ export async function translateHTML(
             return
         }
 
-        const translated = await translate(text, reverse, captureContext)
+        const translated = await translateText(text)
 
         const split = translated.split('■')
 
@@ -395,8 +505,7 @@ export async function translateHTML(
             //try translating one by one
             for(let i = 0; i < currentChunk.chunks.length; i++){
                 currentChunk.resolvers[i](
-                    await translate(currentChunk.chunks[i]
-                , reverse, captureContext))
+                    await translateText(currentChunk.chunks[i]))
             }
         }
         
@@ -424,7 +533,7 @@ export async function translateHTML(
             const translateChunks = (node.textContent || '').split(/\n\n+/g);
             let translatedChunksPromises: Promise<string>[] = [];
             for (const chunk of translateChunks) {
-                const translatedPromise = translate(chunk, reverse, captureContext);
+                const translatedPromise = translateText(chunk);
                 translatedChunksPromises.push(translatedPromise);
             }
 
@@ -436,18 +545,21 @@ export async function translateHTML(
                 return;
             }
             
-            const { data: processedTranslated } = await processScriptFull(
-                alwaysExistChar,
-                translated,
-                "editdisplay",
-                chatID,
-                captureContext?.cbsConditions,
-                {
-                    captureContext: captureContext?.scriptContext,
-                    projectedChatID: captureContext?.projectedChatID,
-                    cache: captureContext ? 'bypass' : 'normal',
-                    signal,
-                },
+            const { data: processedTranslated } = await withDisplayWork(
+                displayRecoveryTarget(() => getCurrentCharacter(), alwaysExistChar.chaId),
+                () => processScriptFull(
+                    alwaysExistChar,
+                    translated,
+                    "editdisplay",
+                    chatID,
+                    captureContext?.cbsConditions,
+                    {
+                        captureContext: captureContext?.scriptContext,
+                        projectedChatID: captureContext?.projectedChatID,
+                        cache: captureContext ? 'bypass' : 'normal',
+                        signal,
+                    },
+                ),
             );
             // If the translation is the same, don't replace the node
             if (translated == processedTranslated) {
@@ -538,6 +650,9 @@ export async function translateHTML(
 
     await Promise.all(promises)
     signal?.throwIfAborted()
+    if(missedSessionTranslation){
+        return html
+    }
     // Serialize the DOM back to HTML
     const serializer = new XMLSerializer();
     let translatedHTML = serializer.serializeToString(dom);
@@ -565,7 +680,22 @@ function normalizeLLMCacheKey(key:string):string{
     return key.replace(inlaySlotMarkerRegex, '')
 }
 
-async function translateLLM(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert'):Promise<string>{
+/** The translation, or an `ERR::` message that the caller reports like the other translators' errors. */
+function translateLLM(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext):Promise<string>{
+    if(arg.regenerate){
+        return requestLLMTranslation(text, arg, captureContext)
+    }
+    const key = normalizeLLMCacheKey(text)
+    let pending = pendingLLMTranslations.get(key)
+    if(!pending){
+        pending = requestLLMTranslation(text, arg, captureContext)
+            .finally(() => pendingLLMTranslations.delete(key))
+        pendingLLMTranslations.set(key, pending)
+    }
+    return pending
+}
+
+async function requestLLMTranslation(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext):Promise<string>{
     if(!arg.regenerate){
         const cacheMatch = await LLMCacheStorage.getItem(normalizeLLMCacheKey(text))
         if(cacheMatch !== null){
@@ -628,14 +758,10 @@ async function translateLLM(text:string, arg:{to:string, from:string, regenerate
     }, 'translate')
 
     if(rq.type === 'fail'){
-        if (errorMode === 'throw') throw new Error(rq.result)
-        alertError(rq.result)
-        return text
+        return 'ERR::' + rq.result
     }
     if(rq.type === 'streaming' || rq.type === 'multiline'){
-        if (errorMode === 'throw') throw new Error('Unexpected response type')
-        alertError('Unexpected response type')
-        return text
+        return 'ERR::Unexpected response type'
     }
     const result = rq.result.replace(/<style-data style-index="(\d+)" ?\/?>/g, (match, p1) => {
         return styleDecodes[parseInt(p1)] ?? ''

@@ -8,6 +8,7 @@ const maintenance = vi.hoisted(() => ({
     deepScanNativeDataHealth: vi.fn(),
     getNativeDataHealthResult: vi.fn().mockResolvedValue(null),
     cancelNativeDataHealthScan: vi.fn(),
+    holdNativeDataHealthScan: vi.fn(<T,>(operation: (signal?: AbortSignal) => Promise<T>) => operation()),
     planNativeDataHealthRepair: vi.fn().mockResolvedValue([]),
     previewNativeDataHealthRepair: vi.fn(),
     applyNativeDataHealthRepair: vi.fn(),

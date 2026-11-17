@@ -1,3 +1,4 @@
+import { imageFormatForName } from '../media/imageFormats'
 import { invoke } from '@tauri-apps/api/core'
 
 import {
@@ -53,17 +54,17 @@ function abortError(): DOMException {
     return new DOMException('Native JPEG asset import was cancelled', 'AbortError')
 }
 
-function jpegExtension(displayName: string): 'jpg' | 'jpeg' {
+function jpegExtension(displayName: string): 'jpg' {
     const extension = displayName.split('.').at(-1)?.toLocaleLowerCase('en-US')
     if (extension !== 'jpg' && extension !== 'jpeg') {
         throw new TypeError('Native JPEG asset import requires a .jpg or .jpeg display name')
     }
-    return extension
+    return imageFormatForName(displayName)!.ext as 'jpg'
 }
 
 export async function importNativeJpegAsset(
     input: NativeJpegAssetImportInput,
-    options: NativeFileJobOptions = {},
+    options: NativeFileJobOptions & { beforeStart?: () => Promise<void> } = {},
     dependencies: NativeJpegAssetImportDependencies = productionDependencies,
 ): Promise<NativeJpegAssetImportResult> {
     const extension = jpegExtension(input.displayName)
@@ -94,6 +95,7 @@ export async function importNativeJpegAsset(
         if (options.signal?.aborted) throw abortError()
         // An earlier refresh can release its fence while its continuation still owns recovery.
         if (hasCommittedWorkingSetContinuation(runtime, runtime.getStorageAuthorityEpoch())) throw new PersistentMutationFencedError()
+        await options.beforeStart?.()
         const started = await dependencies.invoke('native_file_job_start', {
             request: {
                 kind: 'import-jpeg-asset',

@@ -2,9 +2,15 @@ use super::*;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub(super) fn capture<R: Read>(target: Option<&Connection>, space: &str, mut source: impl FnMut() -> StoreResult<R>) -> StoreResult<SectionValueRow> {
+    let mut structure = None;
     if space == "json" {
-        serde_json::from_reader::<_, serde::de::IgnoredAny>(std::io::BufReader::new(source()?))
-            .map_err(|_| invalid("Section value object is not JSON"))?;
+        match structure::validate_text(&mut source)? {
+            Some(prefix) => structure = Some(part_references(&prefix)?),
+            None => {
+                serde_json::from_reader::<_, serde::de::IgnoredAny>(std::io::BufReader::new(source()?))
+                    .map_err(|_| invalid("Section value object is not JSON"))?;
+            }
+        }
     }
     let object = match target {
         Some(target) => text_value::store_encoded(target, &mut source)?,
@@ -34,7 +40,7 @@ pub(super) fn capture<R: Read>(target: Option<&Connection>, space: &str, mut sou
         Ok(())
     })?;
     flush(&mut buffer)?;
-    Ok(SectionValueRow::PluginObject { space: space.into(), object, parts })
+    Ok(SectionValueRow::PluginObject { space: space.into(), object, parts, structure })
 }
 
 impl SectionSpoolBuilder {
@@ -49,22 +55,18 @@ impl SectionSpoolBuilder {
     }
 
     pub(super) fn decode_entry(&self, entry: SectionEntry, versioned: bool, mut object: impl FnMut(&ObjectReference) -> StoreResult<Vec<u8>>) -> StoreResult<SectionRow> {
-        let SectionValue::LocalPlugin(LocalPluginValue { space, value: PluginValue::Objects(parts) }) = &entry.value else {
-            return SectionRow::from_entry(entry, versioned, object);
+        let value = match &entry.value {
+            SectionValue::LocalPlugin(LocalPluginValue { space, value: PluginValue::Objects(parts) }) => {
+                entry.validate().map_err(section_format_error)?;
+                let space = match space { PluginSpace::String => "string", PluginSpace::Json => "json" };
+                self.capture_text(space, parts, &mut object)?
+            }
+            SectionValue::LocalPlugin(LocalPluginValue { value: PluginValue::Structured(value), .. }) => {
+                entry.validate().map_err(section_format_error)?;
+                self.decode_structured(value, &mut object)?
+            }
+            _ => return SectionRow::from_entry(entry, versioned, object),
         };
-        entry.validate().map_err(section_format_error)?;
-        let space = match space { PluginSpace::String => "string", PluginSpace::Json => "json" };
-        let mut raw = tempfile::tempfile()?;
-        for reference in parts {
-            let bytes = read_object(reference, &mut object)?;
-            raw.write_all(&bytes)?;
-            self.connection.execute("INSERT OR IGNORE INTO section_objects(hash,bytes) VALUES(?1,?2)",
-                params![hex::encode(reference.content_sha256), bytes])?;
-        }
-        let mut value = capture(Some(&self.connection), space, || {
-            let mut file = raw.try_clone()?; file.seek(SeekFrom::Start(0))?; Ok(file)
-        })?;
-        if let SectionValueRow::PluginObject { parts: stored, .. } = &mut value { *stored = parts.clone(); }
         let (key1, key2, key3) = decode_entry_key(entry.kind, &entry.key)?;
         let (write_clock, writer_id) = match entry.version {
             Some(version) => (version.write_clock, version.writer_id),
@@ -73,13 +75,72 @@ impl SectionSpoolBuilder {
         };
         Ok(SectionRow { key1, key2, key3, value, write_clock, writer_id })
     }
+
+    fn capture_text(&self, space: &str, parts: &[ObjectReference], object: &mut impl FnMut(&ObjectReference) -> StoreResult<Vec<u8>>) -> StoreResult<SectionValueRow> {
+        let mut raw = tempfile::tempfile()?;
+        for reference in parts {
+            let bytes = read_object(reference, object)?;
+            raw.write_all(&bytes)?;
+            self.connection.execute("INSERT OR IGNORE INTO section_objects(hash,bytes) VALUES(?1,?2)",
+                params![hex::encode(reference.content_sha256), bytes])?;
+        }
+        let mut value = capture(Some(&self.connection), space, || {
+            let mut file = raw.try_clone()?; file.seek(SeekFrom::Start(0))?; Ok(file)
+        })?;
+        if let SectionValueRow::PluginObject { parts: stored, .. } = &mut value { *stored = parts.to_vec(); }
+        Ok(value)
+    }
+
+    /// The text must name exactly the entry's parts, and the stored size must
+    /// fit before any part reaches the device.
+    fn decode_structured(&self, value: &StructuredPluginValue, object: &mut impl FnMut(&ObjectReference) -> StoreResult<Vec<u8>>) -> StoreResult<SectionValueRow> {
+        let text = match &value.text {
+            StructureText::Inline(text) => Some(text.clone()),
+            StructureText::Object(reference) => Some(object_text(reference, object, false)?),
+            StructureText::Objects(_) => None,
+        };
+        let (row, named, encoded) = match text {
+            Some(text) => {
+                let named = structure::validate_text(|| Ok(text.as_bytes()))?.as_ref().map(part_references).transpose()?;
+                let encoded = text_value::encoded_length(&text);
+                (SectionValueRow::Plugin { space: "json".into(), value: text }, named, encoded)
+            }
+            None => {
+                let row = self.capture_text("json", value.text.references(), object)?;
+                let SectionValueRow::PluginObject { object: info, structure, .. } = &row else { unreachable!() };
+                let (named, encoded) = (structure.clone(), info.encoded_length);
+                (row, named, encoded)
+            }
+        };
+        if named.as_ref() != Some(&value.parts) { return Err(invalid("Structured plugin value names other parts")); }
+        let size = value.parts.iter().try_fold(encoded, |size, part| size.checked_add(part.byte_length));
+        if size.is_none_or(|size| size > text_value::MAX_VALUE_BYTES) { return Err(invalid("plugin device value is too large")); }
+        for reference in &value.parts {
+            let bytes = read_object(reference, object)?;
+            self.connection.execute("INSERT OR IGNORE INTO section_objects(hash,bytes) VALUES(?1,?2)",
+                params![hex::encode(reference.content_sha256), bytes])?;
+        }
+        Ok(row)
+    }
 }
 
 impl PreparedSectionRows {
+    /// Installs the text objects and structure parts the rows name, so the
+    /// rows can be written afterwards.
     pub(crate) fn retain_plugin_objects(&self, target: &Transaction<'_>) -> StoreResult<()> {
         self.visit(|row| {
-            if let SectionValueRow::PluginObject { object, .. } = row.value {
-                text_value::copy_object(&self.connection, target, &object)?;
+            let parts = match row.value {
+                SectionValueRow::PluginObject { object, structure, .. } => {
+                    text_value::copy_object(&self.connection, target, &object)?;
+                    structure
+                }
+                SectionValueRow::Plugin { space, value } if space == "json" => structure_references(&value)?,
+                _ => None,
+            };
+            for reference in parts.iter().flatten() {
+                let hash = hex::encode(reference.content_sha256);
+                let bytes: Vec<u8> = self.connection.query_row("SELECT bytes FROM section_objects WHERE hash=?1", [&hash], |row| row.get(0))?;
+                if structure::put_part(target, &bytes)? != hash { return Err(invalid("Section object does not match its reference")); }
             }
             Ok(())
         })

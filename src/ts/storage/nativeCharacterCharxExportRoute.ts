@@ -1,3 +1,4 @@
+import { prepareCharacterPortraitRendition } from './characterPortraitRendition'
 import { save } from './fileSelection'
 
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
@@ -11,7 +12,10 @@ import {
     type NativeFileJobResult,
 } from './nativeFileJobs'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
-import { prepareNativeContentExportFromPicker } from './nativeContentExportPicker'
+import {
+    runNativeContentExport,
+    type NativeContentExportPickerDependencies,
+} from './nativeContentExportPicker'
 
 interface NativeCharacterCharxPickerInput {
     characterId: string
@@ -32,6 +36,7 @@ interface NativeCharacterCharxExportRouteDependencies {
     isDesktop(): boolean
     isAndroid(): boolean
     isIOS?(): boolean
+    reserveAndroidDestination?: NativeContentExportPickerDependencies['reserveAndroidDestination']
     chooseDestination(
         suggestedName: string,
         container: NativeCharacterCharxPickerInput['container'],
@@ -41,6 +46,7 @@ interface NativeCharacterCharxExportRouteDependencies {
         characterId: string,
         revision: DataRevision,
     ): Promise<CharacterDetail>
+    preparePortrait?: typeof prepareCharacterPortraitRendition
     runExport(
         input: NativeCharacterCharxExportInput,
         options?: NativeFileJobOptions,
@@ -67,6 +73,7 @@ const productionDependencies: NativeCharacterCharxExportRouteDependencies = {
             characterId,
             revision,
         ),
+    preparePortrait: prepareCharacterPortraitRendition,
     runExport: runNativeCharacterCharxExport,
 }
 
@@ -75,25 +82,30 @@ export async function exportNativeCharacterCharxFromPicker(
     options: NativeFileJobOptions = {},
     dependencies: NativeCharacterCharxExportRouteDependencies = productionDependencies,
 ): Promise<NativeFileJobResult | null | undefined> {
-    const flow = await prepareNativeContentExportFromPicker({
+    return runNativeContentExport({
         suggestedName: input.suggestedName,
         flushReason: 'native-character-charx-export',
         chooseDestination: () =>
             dependencies.chooseDestination(input.suggestedName, input.container),
-    }, options, dependencies)
-    if (flow.kind === 'unsupported') return undefined
-    if (flow.kind === 'cancelled') return null
-    const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
-    const projected = input.projectCharacter(character)
-    return dependencies.runExport(
-        {
-            characterId: input.characterId,
-            destination: flow.destination,
-            expectedRevision: flow.expectedRevision,
-            ...(input.container ? { container: input.container } : {}),
-            card: projected.card,
-            module: projected.module,
-        },
-        options,
-    )
+    }, options, dependencies, 'dialog', async (flow, options) => {
+        const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
+        const projected = input.projectCharacter(character)
+        const rendition = input.container === 'appended-charx-jpeg'
+            ? await dependencies.preparePortrait?.(character, flow.expectedRevision, 'appended-charx-jpeg', options.signal) : undefined
+        try {
+            options.signal?.throwIfAborted()
+            return await dependencies.runExport(
+                {
+                    characterId: input.characterId,
+                    destination: flow.destination,
+                    expectedRevision: flow.expectedRevision,
+                    ...(rendition ? { portraitRendition: rendition.descriptor } : {}),
+                    ...(input.container ? { container: input.container } : {}),
+                    card: projected.card,
+                    module: projected.module,
+                },
+                options,
+            )
+        } finally { await rendition?.release() }
+    })
 }

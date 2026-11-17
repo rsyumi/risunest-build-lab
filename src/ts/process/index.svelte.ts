@@ -4,6 +4,7 @@ import { registerGeneratingConversation } from '../storage/generatingConversatio
 import { openGenerationRequestPhase } from './generationRequestPhase'
 import { noteGenerationMessage, noteGenerationStarted } from './generationEnd'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
+import { generationDiagnostics, type GenerationDiagnosticAdmission, type GenerationDiagnosticFallback, type GenerationDiagnosticOutcome, type GenerationDiagnosticPhase, type GenerationDiagnosticPhaseDetails, type GenerationDiagnosticTrace, type GenerationFailureReason, type GenerationSavePath } from '../generationDiagnostics'
 import { get, writable } from "svelte/store";
 import { type character, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
@@ -13,6 +14,7 @@ import { language } from "../../lang";
 import { alertError, alertToast, alertNormal } from "../alert";
 import { parseChatML } from "../parser/chatML";
 import { loadLoreBookV3Prompt } from "./lorebook.svelte";
+import { effectiveAuthorNote } from "../authorNotePresets";
 import { findCharacterbyId, getAuthorNoteDefaultText, getPersonaPrompt, getUserName, isLastCharPunctuation, trimUntilPunctuation, parseToggleSyntax, prebuiltAssetCommand } from "../util";
 import { requestChatData } from "./request/request";
 import { stableDiff } from "./stableDiff";
@@ -43,6 +45,8 @@ import { dispatchChatOutputListeners } from '../plugins/pluginChatOutputListener
 import { createProductionPluginChatOutputProjector } from '../plugins/pluginDatabaseAccess'
 import { activatePresetChainForRequest } from "./presetChain";
 import {
+    joinGenerationSignal,
+    bindGenerationRegexOwner,
     reserveGeneration,
     type GenerationReservation,
 } from './generationState'
@@ -58,11 +62,14 @@ import {
     captureWindowedConversationMutationController,
     captureSelectedConversationTarget,
     flushPendingData,
+    flushPendingDataLocallyForCheckpoint,
+    capturesImmutableCharacters,
+    pendingConversationMutationDiagnostics,
     getActiveConversationSession,
     invalidateActiveConversationSession,
 } from '../storage/persistentDataRuntime.svelte'
 import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
-import { ensureCurrentConversationMessageIds } from '../conversationMutations'
+import { ensureCurrentConversationMessageIds, writeConversationMetadata } from '../conversationMutations'
 import { PersistentMutationFencedError } from '../storage/saveCoordinator'
 import { requireCurrentConversationSession } from '../storage/activeConversationSession'
 import {
@@ -75,7 +82,7 @@ import {
     createLivePromptHistoryCompatibilitySnapshot,
     ensurePromptHistoryEntryId,
     ensurePromptHistoryMessageId,
-    iteratePromptHistory,
+    iteratePromptHistoryTargets,
     selectPromptHistory,
     type PromptHistoryCompatibilitySnapshot,
 } from './promptHistory'
@@ -93,8 +100,7 @@ import {
     type CompleteConversationLease,
     type WindowedConversationMutationController,
 } from '../storage/activeWorkingSet.svelte'
-import { beginAndroidGenerationKeepAlive, endAndroidGenerationKeepAlive } from '../androidGenerationKeepAlive'
-import { beginIOSGeneration, notifyIOSGenerationComplete, isBackgroundExpiryReason } from "../iosNative";
+import { notifyIOSGenerationComplete } from "../iosNative";
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from "../platform";
 import { notifyDesktop } from "../desktopNotifications";
 import { planChatParserHistory } from '../chatParserHistory'
@@ -145,7 +151,7 @@ const projectPluginChatOutput = createProductionPluginChatOutputProjector(
     <T>(value: T) => $state.snapshot(value) as T,
 )
 
-export async function runChatOutputListeners(char: any, chat: any, messageIndex: number, signal?: AbortSignal){
+export async function runChatOutputListeners(char: any, chat: any, messageIndex: number, signal?: AbortSignal, diagnostics?: GenerationDiagnosticTrace){
     if(pluginV2.chatOutput.size === 0){
         return
     }
@@ -155,8 +161,11 @@ export async function runChatOutputListeners(char: any, chat: any, messageIndex:
         chat,
         resolvePosition: resolvePinnedConversationPosition,
         messageIndex,
+        windowStart: getHistoryWindowStart(chat) ?? 0,
+        fullHistory: !getDeviceSettings().pluginOutputCurrentChatOnly,
         signal,
         projectScalable: projectPluginChatOutput,
+        onPayload: diagnostics ? (payload) => diagnostics.listenerPayload(payload) : undefined,
         onError: (error) => console.error(error),
     })
 }
@@ -220,6 +229,73 @@ interface GenerationCompletionLifecycle {
     reroll: boolean
     responseApplied: boolean
     acknowledgementAttempted: boolean
+    diagnostics: GenerationDiagnosticTrace
+    admission: GenerationDiagnosticAdmission
+    diagnosticOutcome?: GenerationDiagnosticOutcome
+    /** Why the open phase is failing; recorded only with a failed exit. */
+    diagnosticReason?: GenerationFailureReason
+    enterDiagnosticPhase(phase: GenerationDiagnosticPhase, details?: GenerationDiagnosticPhaseDetails): void
+    finishDiagnosticPhase(outcome?: GenerationDiagnosticOutcome): void
+    savePath(): GenerationSavePath
+}
+
+function preparationFailed(lifecycle: GenerationCompletionLifecycle, reason: GenerationFailureReason): false {
+    lifecycle.diagnosticReason = reason
+    return false
+}
+
+function diagnosticFallback(reason: string | null): GenerationDiagnosticFallback {
+    switch (reason) {
+        case null: return 'none'
+        case 'selected-conversation-unavailable':
+        case 'standard-hypa-v3-disabled':
+        case 'selected-conversation-not-windowed':
+        case 'custom-or-remote-tokenizer':
+        case 'experimental-hypa-v3':
+        case 'plugin-editprocess':
+        case 'plugin-editoutput':
+        case 'plugin-chat-output':
+        case 'generation-trigger':
+        case 'history-regex':
+        case 'old-history-lorebook-consumer':
+        case 'additional-text-consumer':
+        case 'inlay-view-consumer':
+        case 'dynamic-history-indirection':
+        case 'explicit-history-reference': return reason
+        default: return 'unknown'
+    }
+}
+
+async function acknowledgeGenerationWithDiagnostics(lifecycle: GenerationCompletionLifecycle): Promise<void> {
+    let savePath: GenerationSavePath = 'unknown'
+    try {
+        lifecycle.finishDiagnosticPhase()
+        savePath = lifecycle.savePath()
+        lifecycle.diagnostics.phase('final-acknowledgement', 'enter', { savePath })
+    } catch {}
+    let outcome: GenerationDiagnosticOutcome = 'failed'
+    try {
+        await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
+        outcome = 'ok'
+    } finally {
+        try {
+            lifecycle.diagnostics.phase('final-acknowledgement', 'exit', { outcome, savePath })
+            const session = getActiveConversationSession()
+            const matchingSession = session?.isActive
+                && session.characterId === lifecycle.generationTarget?.characterId
+                && session.conversationId === lifecycle.generationTarget?.conversationId
+            const authorityCurrent = outcome === 'ok' && lifecycle.isTargetCurrent()
+            const authority = authorityCurrent && !matchingSession ? captureSelectedConversationAuthority() : null
+            const matchingAuthority = authority?.characterId === lifecycle.generationTarget?.characterId
+                && authority?.conversationId === lifecycle.generationTarget?.conversationId
+            lifecycle.diagnostics.persistence({
+                boundary: 'final', savePath, ...pendingConversationMutationDiagnostics(),
+                dirtyRecords: matchingSession ? session.pinCount('dirty') : undefined,
+                acknowledgedRevision: !authorityCurrent ? undefined : matchingSession ? session.storeRevision
+                    : matchingAuthority ? authority?.storeRevision : undefined,
+            })
+        } catch {}
+    }
 }
 
 export async function notifyGenerationCompletion(result: string): Promise<void> {
@@ -250,6 +326,7 @@ interface GenerationConversationResources {
 }
 
 interface GenerationHistoryWindow {
+    totalMessages: number
     start: number
     endedAtAllBefore: boolean
     hypaPlan: HistoryWindowHypaPlan | null
@@ -477,6 +554,7 @@ async function prepareGenerationHistoryWindow(
     attachHistoryWindow(chat, start)
     return {
         start,
+        totalMessages: prepared.selection.totalMessages,
         endedAtAllBefore: prepared.selection.endedAtAllBefore,
         hypaPlan: prepared.hypaPlan,
         chat,
@@ -664,6 +742,9 @@ export async function sendChat(arg:{
         windowedController: null,
         unbindWindowedController: null,
     }
+    const diagnostics = generationDiagnostics.generation()
+    const deviceSettings = getDeviceSettings()
+    let activeDiagnosticPhase: GenerationDiagnosticPhase | null = null
     const lifecycle: GenerationCompletionLifecycle = {
         generationTarget: characterId && conversationId ? { characterId, conversationId } : undefined,
         authorityEpoch,
@@ -674,15 +755,49 @@ export async function sendChat(arg:{
         ]?.rerollRecovery,
         responseApplied: false,
         acknowledgementAttempted: false,
+        diagnostics,
+        admission: {
+            intent: arg.continue ? 'continue' : initialConversation?.rerollRecovery ? 'reroll' : 'normal',
+            displayMode: DBState.db.streamingDisplayOptimizationMode === 'balanced' ? 'normal'
+                : DBState.db.streamingDisplayOptimizationMode === 'strong' ? 'strong' : 'off',
+            profile: deviceSettings.performanceProfile === 'low-spec' ? 'low-spec' : 'normal',
+            historyLimitEnabled: arg.historyLimit === true && deviceSettings.generationHistoryLimitEnabled,
+            historyLimitMultiplier: deviceSettings.generationHistoryLimitMultiplier,
+            route: 'unknown',
+            totalMessages: initialConversation && !isMetadataOnlySelectedConversation(initialConversation)
+                ? initialConversation.message.length : undefined,
+        },
+        enterDiagnosticPhase(phase, details) {
+            lifecycle.finishDiagnosticPhase()
+            activeDiagnosticPhase = phase
+            diagnostics.phase(phase, 'enter', details)
+        },
+        finishDiagnosticPhase(outcome = 'ok') {
+            if (activeDiagnosticPhase) diagnostics.phase(activeDiagnosticPhase, 'exit', {
+                outcome, reason: outcome === 'failed' ? lifecycle.diagnosticReason : undefined,
+            })
+            activeDiagnosticPhase = null
+        },
+        savePath() {
+            const session = getActiveConversationSession()
+            if (session?.isActive && session.characterId === characterId && session.conversationId === conversationId) {
+                return session.residencyFallbackActive ? 'fallback' : 'complete'
+            }
+            if (conversationResources.windowedController
+                && initialConversation && isMetadataOnlySelectedConversation(initialConversation)) return 'windowed'
+            return 'unknown'
+        },
     }
+    diagnostics.phase('send-admitted', 'enter')
+    diagnostics.admission(lifecycle.admission)
+    diagnostics.phase('send-admitted', 'exit', { outcome: 'ok' })
     let releaseGeneration: (() => void) | null = null
     let enteredGeneration = false
     let generationReturned = false
-    let generationKeepAliveAcquired = false
-    let iosGeneration:
-      | Awaited<ReturnType<typeof beginIOSGeneration>>
-      | undefined;
+    const background = reservation.background
+    let generationSignal: ReturnType<typeof joinGenerationSignal> | undefined
     try {
+        lifecycle.enterDiagnosticPhase('history-materialization')
         const initialTarget = captureSelectedConversationTarget()
         const mayUseBoundedHistory = (DBState.db.hypaV3 || getHistoryWindowMemoryMode(arg.historyLimit) !== null)
             && initialTarget !== null
@@ -695,7 +810,7 @@ export async function sendChat(arg:{
                     initialTarget,
                 )
             } catch (error) {
-                if (error instanceof SelectedConversationPromotionStaleError) return false
+                if (error instanceof SelectedConversationPromotionStaleError) { lifecycle.diagnosticOutcome = 'stale'; return false }
                 throw error
             }
         }
@@ -703,19 +818,20 @@ export async function sendChat(arg:{
         enteredGeneration = true
         if (!arg.preview && !arg.previewPrompt) noteGenerationStarted(lifecycle.generationTarget)
         if (lifecycle.generationTarget) lifecycle.releaseGeneration = releaseGeneration = registerGeneratingConversation(lifecycle.generationTarget)
-        generationKeepAliveAcquired = await beginAndroidGenerationKeepAlive()
-        iosGeneration = await beginIOSGeneration(arg.signal)
-        lifecycle.onProgress = iosGeneration.progress;
+        generationSignal = joinGenerationSignal(arg.signal, background?.signal)
+        if (background) lifecycle.onProgress = completed => background.progress(completed)
         const result = await sendChatInternal(
-          { ...arg, signal: iosGeneration.signal },
+          { ...arg, signal: generationSignal.signal },
           lifecycle,
           reservation,
           conversationResources,
         );
         generationReturned = true
+        lifecycle.diagnosticOutcome ??= result ? 'ok' : 'failed'
         return lifecycle.isTargetCurrent() && result
     } catch (error) {
-        if (iosGeneration?.signal?.aborted || arg.signal?.aborted) {
+        lifecycle.diagnosticReason ??= error instanceof PersistentMutationFencedError ? 'fenced' : 'error'
+        if (generationSignal?.signal?.aborted || arg.signal?.aborted) {
             generationReturned = true
             return false
         }
@@ -729,39 +845,51 @@ export async function sendChat(arg:{
         }
         throw error
     } finally {
-        releaseGeneration?.()
-        // Receives held for the registered conversation are drained even when the
-        // selection moved away during generation.
-        if (lifecycle.generationTarget && !lifecycle.acknowledgementAttempted &&
-            isAuthorityCurrent()) {
-            try {
-                if (lifecycle.responseApplied) {
-                    lifecycle.acknowledgementAttempted = true
-                    await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
-                    lifecycle.onProgress?.(3)
-                } else {
-                    await drainDeferredLwwReceives(lifecycle.authorityEpoch)
+        let settledSavePath: GenerationSavePath = 'unknown'
+        try {
+            settledSavePath = lifecycle.savePath()
+            lifecycle.finishDiagnosticPhase(generationSignal?.signal?.aborted || arg.signal?.aborted ? 'aborted'
+                : !lifecycle.isTargetCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed')
+        } catch {}
+        try {
+            releaseGeneration?.()
+            // Receives held for the registered conversation are drained even when the
+            // selection moved away during generation.
+            if (lifecycle.generationTarget && !lifecycle.acknowledgementAttempted &&
+                isAuthorityCurrent()) {
+                try {
+                    if (lifecycle.responseApplied) {
+                        lifecycle.acknowledgementAttempted = true
+                        await acknowledgeGenerationWithDiagnostics(lifecycle)
+                        lifecycle.onProgress?.(3)
+                    } else {
+                        await drainDeferredLwwReceives(lifecycle.authorityEpoch)
+                    }
+                } catch (acknowledgeError) {
+                    console.error(acknowledgeError)
                 }
-            } catch (acknowledgeError) {
-                console.error(acknowledgeError)
             }
+            conversationResources.unbindWindowedController?.()
+            conversationResources.windowedController?.release()
+            await conversationResources.preparation?.release()
+            conversationResources.completeLease?.release()
+            generationSignal?.release()
+            background?.settle(generationReturned && lifecycle.responseCompleted && !generationSignal?.signal?.aborted)
+            if (background?.takeExpiry() && !arg.signal?.aborted) {
+                alertNormal(language.generationInterruptedInBackground)
+            }
+            ownedReservation?.release({
+                preserveBusy: enteredGeneration && !generationReturned,
+            })
+        } finally {
+            try {
+                const outcome = generationSignal?.signal?.aborted || arg.signal?.aborted ? 'aborted'
+                    : !lifecycle.isTargetCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed'
+                lifecycle.finishDiagnosticPhase(outcome)
+                diagnostics.phase('settled', 'enter')
+                diagnostics.phase('settled', 'exit', { outcome, savePath: settledSavePath })
+            } catch {}
         }
-        conversationResources.unbindWindowedController?.()
-        conversationResources.windowedController?.release()
-        await conversationResources.preparation?.release()
-        conversationResources.completeLease?.release()
-        await endAndroidGenerationKeepAlive(generationKeepAliveAcquired)
-        await iosGeneration
-          ?.dispose(generationReturned && lifecycle.responseCompleted && !iosGeneration.signal?.aborted)
-          .catch((error) =>
-            console.error("iOS generation cleanup failed", error),
-          );
-        if (isBackgroundExpiryReason(iosGeneration?.signal?.reason) && !arg.signal?.aborted) {
-            alertNormal(language.generationInterruptedInBackground)
-        }
-        ownedReservation?.release({
-            preserveBusy: enteredGeneration && !generationReturned,
-        })
     }
 }
 
@@ -819,21 +947,29 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     function runCurrentChatFunction(chat:Chat){
         if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
         const controller = conversationResources.windowedController
-        const source = controller?.chat === chat ? structuredClone(chat) : chat
-        const parsed = runCurrentChatParserPass({
-            chat: source,
-            database: DBState.db,
-            ownerCharacterId: nowChatroom.chaId,
-            parserCharacter: currentChar,
-            session: controller ? null : getActiveConversationSession(),
-            parser: risuChatParser,
+        if (controller?.chat !== chat) {
+            return runCurrentChatParserPass({
+                chat,
+                database: DBState.db,
+                ownerCharacterId: nowChatroom.chaId,
+                parserCharacter: currentChar,
+                session: controller ? null : getActiveConversationSession(),
+                parser: risuChatParser,
+            })
+        }
+        // The window is parsed in order without copying it, and the rows the parser changed are
+        // written as one range, so a stale controller publishes none of them.
+        const messages = chat.message.slice()
+        const parsed = messages.map((message) => {
+            const data = risuChatParser(message.data, { chara: currentChar, runVar: true })
+            return data === message.data ? message : { ...message, data }
         })
-        if (!controller) return parsed
-        for (let index = 0; index < parsed.message.length; index++) {
-            if (JSON.stringify(parsed.message[index]) === JSON.stringify(chat.message[index])) continue
-            if (!controller.applyRange(index, 1, [parsed.message[index]], 'edit')) {
-                throw new PersistentMutationFencedError()
-            }
+        const start = parsed.findIndex((message, index) => message !== messages[index])
+        if (start === -1) return chat
+        let end = parsed.length
+        while (parsed[end - 1] === messages[end - 1]) end--
+        if (!controller.applyRange(start, end - start, parsed.slice(start, end), end - start === 1 ? 'edit' : 'replace-range')) {
+            throw new PersistentMutationFencedError()
         }
         return chat
     }
@@ -944,6 +1080,8 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             ? getSelectedBoundedGenerationFallbackReason()
             : 'history-window'
         const boundedAdmission = boundedFallbackReason === null
+        lifecycle.admission.fallback = historyWindowMemory !== null ? 'none' : diagnosticFallback(boundedFallbackReason)
+        if (authority) lifecycle.admission.totalMessages = authority.totalMessages
         if (historyWindowMemory !== null) {
             try {
                 historyWindow = await prepareGenerationHistoryWindow(
@@ -974,6 +1112,8 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 unbind()
             }
             boundedChat = historyWindow.chat
+            lifecycle.admission.route = 'history-window'
+            lifecycle.admission.totalMessages = historyWindow.totalMessages
             console.debug('[Generation history] window', {
                 start: historyWindow.start,
                 messages: historyWindow.chat.message.length,
@@ -1030,9 +1170,11 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                     bindWindowedGenerationController(decision.preparation.chat, controller)
                 boundedChat = decision.preparation.chat
                 summaryAwareHistoryPlan = decision.preparation.plan
+                lifecycle.admission.route = 'summary-aware'
                 console.debug('[Generation history] bounded summary-aware', decision.preparation.metrics)
                 }
             } else {
+                lifecycle.admission.fallback = 'compatibility'
                 console.debug('[Generation history] complete materialization', {
                     reason: decision.reason,
                 })
@@ -1049,12 +1191,21 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                     target,
                 )
             } catch (error) {
-                if (error instanceof SelectedConversationPromotionStaleError) return false
+                if (error instanceof SelectedConversationPromotionStaleError) { lifecycle.diagnosticOutcome = 'stale'; return false }
                 throw error
             }
         }
     }
     if (!lifecycle.isTargetCurrent()) return false
+
+    const admittedConversation = boundedChat ?? DBState.db.characters[get(selectedCharID)]?.chats[
+        DBState.db.characters[get(selectedCharID)]?.chatPage
+    ]
+    if (!boundedChat) lifecycle.admission.route = 'complete'
+    lifecycle.admission.admittedMessages = admittedConversation?.message.length
+    if (!boundedChat) lifecycle.admission.totalMessages = admittedConversation?.message.length
+    lifecycle.diagnostics.admission(lifecycle.admission)
+    lifecycle.enterDiagnosticPhase('prompt-preparation')
 
     DBState.db.statics.messages += 1
     selectedChar = get(selectedCharID)
@@ -1069,7 +1220,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     if (interactionAuthority) {
         if (interactionAuthority.characterId !== nowChatroom.chaId
             || interactionAuthority.conversationId !== nowChatroom.chats[nowChatroom.chatPage]?.id
-            || !recordSelectedCharacterLastInteraction(interactionAuthority, nowChatroom.lastInteraction, interactionTime)) return false
+            || !recordSelectedCharacterLastInteraction(interactionAuthority, nowChatroom.lastInteraction, interactionTime)) return preparationFailed(lifecycle, 'conversation-changed')
         nowChatroom.lastInteraction = interactionTime
     } else if (characterDetailWritable()) {
         nowChatroom.lastInteraction = interactionTime
@@ -1083,7 +1234,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             nowChatroom.chaId,
             historyWindow ? nowChatroom.chats[selectedChat] : selectedConversation,
         )
-    ) return false
+    ) return preparationFailed(lifecycle, 'conversation-changed')
     if (!boundedChat) {
         ensureCurrentConversationMessageIds(
             nowChatroom,
@@ -1131,7 +1282,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
     let chatAdditonalTokens = arg.chatAdditonalTokens ?? caculatedChatTokens
     const tokenizer = new ChatTokenizer(chatAdditonalTokens, DBState.db.aiModel.startsWith('gpt') ? 'noName' : 'name',
-        nowChatroom.supaMemory && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable)
+        true)
     let currentChat = runCurrentChatFunction(selectedConversation)
     if (!boundedChat) nowChatroom.chats[selectedChat] = currentChat
     let maxContextTokens = DBState.db.maxContext
@@ -1235,10 +1386,11 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     let beforeDescriptionPrompts:OpenAIChat[] = []
     let afterDescriptionPrompts:OpenAIChat[] = []
 
-    if(currentChat.note){
+    const authorNote = effectiveAuthorNote(DBState.db.authorNotePresets, currentChat)
+    if(authorNote){
         unformated.authorNote.push({
             role: 'system',
-            content: risuChatParser(currentChat.note, {chara: currentChar})
+            content: risuChatParser(authorNote, {chara: currentChar})
         })
     }
     else if(getAuthorNoteDefaultText() !== ''){
@@ -1350,10 +1502,11 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         }
     }
 
-    if(DBState.db.personaPrompt){
+    const personaPrompt = getPersonaPrompt()
+    if(personaPrompt){
         unformated.personaPrompt.push({
             role: 'system',
-            content: risuChatParser(getPersonaPrompt(), {chara: currentChar})
+            content: risuChatParser(personaPrompt, {chara: currentChar})
         })
     }
     
@@ -1673,7 +1826,8 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     if (historyWindow && !historyWindow.controller.reconcileMetadata()) {
         throw new PersistentMutationFencedError()
     }
-    const triggerResult = await runTrigger(currentChar, 'start', {chat: currentChat})
+    bindGenerationRegexOwner(reservation, nowChatroom.chaId, currentChat.id)
+    const triggerResult = await runTrigger(currentChar, 'start', {chat: currentChat, regexScope: reservation.regexScope, regexGeneration: abortSignal})
     if(triggerResult){
         if (historyWindow) {
             if (!writeHistoryWindowChat(historyWindow.controller, triggerResult.chat)) {
@@ -1696,7 +1850,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         if (!historyWindow) setCurrentChat(currentChat)
         currentTokens += triggerResult.tokens
         if(triggerResult.stopSending){
-            return false
+            return preparationFailed(lifecycle, 'trigger-stop')
         }
     }
 
@@ -1750,12 +1904,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 }
                 : promptHistorySelection,
         )).entries
-        : iteratePromptHistory(promptHistory, promptHistorySelection)
+        : iteratePromptHistoryTargets(promptHistory, promptHistorySelection)
     for(const entry of promptHistoryEntries){
         promptScriptOperationScope.assertOwnerCurrent()
         const { relativeIndex: index } = entry
         let msg: Message
-        if (requiresLivePromptCompatibility) {
+        if ('message' in entry) {
             ensurePromptHistoryMessageId(entry.message, v4)
             msg = entry.message
         } else {
@@ -1780,6 +1934,8 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             chatRole: msg.role,
         }, {
             promptOperationScope: promptScriptOperationScope ?? undefined,
+            regexGeneration: abortSignal,
+            regexScope: reservation.regexScope,
         })).data
         let name = ''
         if(msg.role === 'char'){
@@ -1959,7 +2115,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     if (historyWindow && !historyWindow.controller.reconcileMetadata()) {
         throw new PersistentMutationFencedError()
     }
-    console.log(JSON.stringify(chats, null, 2))
 
     const depthPrompts = lorepmt.actives.filter(v => {
         return (v.pos === 'depth' && v.depth > 0) || v.pos === 'reverse_depth'
@@ -1973,6 +2128,13 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         currentTokens += await tokenizer.tokenizeChat(chat)
     }
     
+    // A session-owned chat records memory state through its session, so the save covers it.
+    const writeChatMetadata = (chat: Chat, values: Partial<Omit<Chat, 'message'>>) =>
+        writeConversationMetadata(nowChatroom, chat, getActiveConversationSession(), values)
+    const writeMemoryMetadata = (values: Partial<Omit<Chat, 'message'>>) => {
+        writeChatMetadata(currentChat, values)
+        writeChatMetadata(DBState.db.characters[selectedChar].chats[selectedChat], values)
+    }
     if(nowChatroom.supaMemory && (DBState.db.supaModelType !== 'none' || DBState.db.hanuraiEnable || DBState.db.hypav2 || DBState.db.hypaV3)){
         stageTimings.stage1Duration = Date.now() - stageTimings.stage1Start
         chatProcessStage.set(2)
@@ -1985,7 +2147,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             })
 
             if(hn === false){
-                return false
+                return preparationFailed(lifecycle, 'memory-failed')
             }
 
             chats = hn.chats
@@ -1998,12 +2160,11 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 if (abortSignal.aborted) return false
                 console.log(sp)
                 throwError(sp.error)
-                return false
+                return preparationFailed(lifecycle, 'memory-failed')
             }
             chats = sp.chats
             currentTokens = sp.currentTokens
-            currentChat.hypaV2Data = sp.memory ?? currentChat.hypaV2Data
-            DBState.db.characters[selectedChar].chats[selectedChat].hypaV2Data = currentChat.hypaV2Data
+            writeMemoryMetadata({ hypaV2Data: sp.memory ?? currentChat.hypaV2Data })
 
             currentChat = DBState.db.characters[selectedChar].chats[selectedChat];
             console.log("[Expected to be updated] chat's HypaV2Data: ", currentChat.hypaV2Data)
@@ -2029,29 +2190,29 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             if(sp.error){
                 // Save new summary
                 if (sp.memory) {
-                    currentChat.hypaV3Data = sp.memory
                     if (conversationResources.windowedController) {
+                        currentChat.hypaV3Data = sp.memory
                         if (!conversationResources.windowedController.applyRange(
                             0, 0, [], 'update-metadata',
                         )) throw new PersistentMutationFencedError()
                     } else {
-                        DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
+                        writeMemoryMetadata({ hypaV3Data: sp.memory })
                     }
                 }
                 if (abortSignal.aborted) return false
                 console.log(sp)
                 throwError(sp.error)
-                return false
+                return preparationFailed(lifecycle, 'memory-failed')
             }
             chats = sp.chats
             currentTokens = sp.currentTokens
-            currentChat.hypaV3Data = sp.memory ?? currentChat.hypaV3Data
             if (conversationResources.windowedController) {
+                currentChat.hypaV3Data = sp.memory ?? currentChat.hypaV3Data
                 if (!conversationResources.windowedController.applyRange(
                     0, 0, [], 'update-metadata',
                 )) throw new PersistentMutationFencedError()
             } else {
-                DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
+                writeMemoryMetadata({ hypaV3Data: sp.memory ?? currentChat.hypaV3Data })
                 currentChat = DBState.db.characters[selectedChar].chats[selectedChat];
             }
             if (abortSignal.aborted) return false
@@ -2063,14 +2224,13 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             })
             if(sp.error){
                 throwError(sp.error)
-                return false
+                return preparationFailed(lifecycle, 'memory-failed')
             }
             chats = sp.chats
             currentTokens = sp.currentTokens
-            currentChat.supaMemoryData = sp.memory ?? currentChat.supaMemoryData
-            DBState.db.characters[selectedChar].chats[selectedChat].supaMemoryData = currentChat.supaMemoryData
+            writeMemoryMetadata({ supaMemoryData: sp.memory ?? currentChat.supaMemoryData })
             console.log(currentChat.supaMemoryData)
-            currentChat.lastMemory = sp.lastId ?? currentChat.lastMemory;
+            writeChatMetadata(currentChat, { lastMemory: sp.lastId ?? currentChat.lastMemory })
         }
         stageTimings.stage2Duration = Date.now() - stageTimings.stage2Start
         chatProcessStage.set(1)
@@ -2081,13 +2241,13 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             if(chats.length <= 1){
                 throwError(language.errors.toomuchtoken + "\n\nRequired Tokens: " + currentTokens)
 
-                return false
+                return preparationFailed(lifecycle, 'token-limit')
             }
 
             currentTokens -= await tokenizer.tokenizeChat(chats[0])
             chats.splice(0, 1)
         }
-        currentChat.lastMemory = chats[0].memo
+        writeChatMetadata(currentChat, { lastMemory: chats[0].memo })
     }
 
     let biases:[string,number][] = DBState.db.bias.concat(currentChar.bias).map((v) => {
@@ -2446,7 +2606,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         while(inputTokens > maxContextTokens){
             if(pointer >= formated.length){
                 throwError(language.errors.toomuchtoken + "\n\nAt token rechecking. Required Tokens: " + inputTokens)
-                return false
+                return preparationFailed(lifecycle, 'token-limit')
             }
             if(formated[pointer].removable){
                 inputTokens -= await tokenizer.tokenizeChat(formated[pointer])
@@ -2608,6 +2768,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         },
     })
     let req: Awaited<ReturnType<typeof requestChatData>>
+    lifecycle.enterDiagnosticPhase('awaiting-provider')
     try {
         req = await requestChatData({
             formated: formated,
@@ -2622,10 +2783,17 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             escape: nowChatroom.escapeOutput,
             rememberToolUsage: DBState.db.rememberToolUsage,
         }, 'model', abortSignal)
+        lifecycle.finishDiagnosticPhase(abortSignal.aborted ? 'aborted' : req.type === 'fail' ? 'failed' : 'ok')
+        const resultKind = req.type === 'success' ? 'buffered' : req.type === 'fail' ? 'failed' : req.type
+        lifecycle.enterDiagnosticPhase('host-response', { resultKind })
     } finally {
         await closeRequestPhase()
     }
-    if(!isRequestSourceCurrent()){
+    const requestSourceCurrent = isRequestSourceCurrent()
+    lifecycle.finishDiagnosticPhase(abortSignal.aborted ? 'aborted'
+        : !requestSourceCurrent ? 'stale' : req.type === 'fail' ? 'failed' : 'ok')
+    if(!requestSourceCurrent){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
 
@@ -2657,15 +2825,17 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
         lifecycle.acknowledgementAttempted = true
         lifecycle.releaseGeneration?.()
-        await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
+        await acknowledgeGenerationWithDiagnostics(lifecycle)
         lifecycle.onProgress?.(3)
     }
     
     const responseApplication = await applyGenerationResponse({
+        diagnostics: lifecycle.diagnostics,
         response: req,
         abortSignal,
         continueGeneration: arg.continue === true,
         sayingCharacterId: currentChar.chaId,
+        ownerCharacterId: requestSourceCharacterId,
         generationId,
         generationInfo,
         promptInfo,
@@ -2709,13 +2879,15 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                           'editoutput',
                           messageIndex,
                           {},
-                          processing,
+                          { ...processing, regexScope: reservation.regexScope, regexGeneration: abortSignal },
                       )
                     : processScriptFull(
                           nowChatroom,
                           reformatContent(data),
                           'editoutput',
                           messageIndex,
+                          {},
+                          { regexScope: reservation.regexScope, regexGeneration: abortSignal },
                       ),
             runCurrentChatParser: runCurrentChatFunction,
             runInlay: (data) => runInlayScreen(currentChar, data),
@@ -2723,13 +2895,16 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 runTrigger(currentChar, 'output', {
                     chat,
                     onConversationCommit,
+                    regexGeneration: abortSignal,
+                    regexScope: reservation.regexScope,
                 }),
             runOutputListeners: (chat, messageIndex) =>
                 runChatOutputListeners(
                     currentChar,
                     chat,
-                    historyWindow ? toWindowIndex(chat, messageIndex) : messageIndex,
+                    messageIndex,
                     abortSignal,
+                    lifecycle.diagnostics,
                 ),
             speak: async (data) => {
                 try {
@@ -2746,21 +2921,32 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             },
             onProviderFailure: throwError,
         },
+        checkpoint: {
+            savePath: () => lifecycle.savePath(),
+            capturesImmutableCharacters,
+            flush: () => flushPendingDataLocallyForCheckpoint('generation-checkpoint'),
+        },
     })
-    if (!responseApplication) return false
+    if (!responseApplication) {
+        lifecycle.diagnosticOutcome = abortSignal.aborted ? 'aborted' : req.type === 'fail' ? 'failed' : 'stale'
+        return false
+    }
     lifecycle.responseCompleted = true
     lifecycle.onProgress?.(2)
     result = responseApplication.result
     emoChanged = responseApplication.emoChanged
     resendChat = responseApplication.resendChat
+    lifecycle.enterDiagnosticPhase('completion-processing')
 
     try {
     if(!responseApplication.hasOutputOwnership()){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
     let needsAutoContinue = false
     const resultTokens = await tokenize(result) + (arg.usedContinueTokens || 0)
     if(!responseApplication.hasOutputOwnership()){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
     if(DBState.db.autoContinueMinTokens > 0 && resultTokens < DBState.db.autoContinueMinTokens){
@@ -2797,6 +2983,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             ...message,
             data: message.data + rq,
         }))){
+            lifecycle.diagnosticOutcome = 'stale'
             return false
         }
     }
@@ -2811,6 +2998,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
     if(resendChat){
         if(!responseApplication.hasOutputOwnership()){
+            lifecycle.diagnosticOutcome = 'stale'
             return false
         }
         stageTimings.stage4Duration = Date.now() - stageTimings.stage4Start
@@ -2827,6 +3015,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             ...message,
             generationInfo,
         }))) {
+            lifecycle.diagnosticOutcome = 'stale'
             return false
         }
 
@@ -3073,6 +3262,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     }
     
     if(!responseApplication.hasOutputOwnership()){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
     const currentOutput = responseApplication.readOutput()
@@ -3080,6 +3270,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         ...message,
         generationInfo,
     }))) {
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
 

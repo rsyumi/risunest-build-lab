@@ -60,6 +60,8 @@ describe('ConversationHistoryOperation', () => {
 
         expect(session.pinCount('prompt')).toBe(0)
         expect(() => operation.readLatest(1)).toThrow(ConversationHistoryOperationDisposedError)
+        expect(() => operation.readMetadataRange(0, 1)).toThrow(ConversationHistoryOperationDisposedError)
+        expect(() => operation.scanMetadataBackward()).toThrow(ConversationHistoryOperationDisposedError)
     })
 
     it('keeps reading across variable commits and rejects every later read when messages change', () => {
@@ -77,10 +79,14 @@ describe('ConversationHistoryOperation', () => {
 
         expect(operation.readRange(0, 1).messages).toEqual([message('before')])
         expect(operation.resolveMessage(locator).data).toBe('before')
+        expect(operation.readMetadataRange(0, 1).messages).toEqual([{ disabled: undefined }])
+        expect(operation.scanMetadataBackward().entries).toEqual([{ absoluteIndex: 0, disabled: undefined }])
         session.append(message('after'))
 
         expect(() => operation.assertCurrent()).toThrow(ConversationSessionStaleError)
         expect(() => operation.readRange(0, 1)).toThrow(ConversationSessionStaleError)
+        expect(() => operation.readMetadataRange(0, 1)).toThrow(ConversationSessionStaleError)
+        expect(() => operation.scanMetadataBackward()).toThrow(ConversationSessionStaleError)
         operation.dispose()
         expect(session.pinCount('prompt')).toBe(0)
     })

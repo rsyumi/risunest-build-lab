@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Message } from '../storage/database.svelte'
-import { createCompatibilityConversationHistorySnapshot } from '../storage/conversationHistoryOperation'
+import { ConversationHistoryOperationDisposedError, createCompatibilityConversationHistorySnapshot } from '../storage/conversationHistoryOperation'
 import { WindowedConversationHistoryOperation } from './historyWindowHistory'
-import { iteratePromptHistory, selectPromptHistory } from './promptHistory'
+import { ensurePromptHistoryEntryId, iteratePromptHistoryTargets, selectPromptHistory } from './promptHistory'
 
 function windowOf(count: number, start: number, overrides: Record<number, Partial<Message>> = {}) {
     const messages = Array.from({ length: count }, (_, index): Message => ({
@@ -67,6 +67,10 @@ describe('WindowedConversationHistoryOperation', () => {
         expect(history.readLatest(3)).toMatchObject({ messages: [], startIndex: 5, endIndex: 5 })
         expect(history.readRange(1, 2)).toMatchObject({ messages: [], startIndex: 5, endIndex: 5 })
         expect(history.scanBackward(5, 2).entries).toEqual([])
+        expect(history.readMetadataRange(1, 2)).toMatchObject({ messages: [], startIndex: 5, endIndex: 5 })
+        expect(history.scanMetadataBackward(5, 2).entries).toEqual([])
+        history.dispose()
+        expect(() => history.readMetadataRange(1, 2)).toThrow(ConversationHistoryOperationDisposedError)
     })
 
     it('scans backward with absolute indices and stops at the window start', () => {
@@ -84,12 +88,18 @@ describe('WindowedConversationHistoryOperation', () => {
 
         const selection = selectPromptHistory(history, 2)
         expect(selection).toMatchObject({ startIndex: 0, endIndex: 10, messageCount: 3, resetByAllBefore: false })
-        const entries = [...iteratePromptHistory(history, selection, 2)]
-        expect(entries.map((entry) => [entry.absoluteIndex, entry.relativeIndex, entry.message.data])).toEqual([
-            [6, 0, 'm6'],
-            [8, 1, 'm8'],
-            [9, 2, 'm9'],
-        ])
+        const targets = [...iteratePromptHistoryTargets(history, selection, 2)]
+        expect(targets.map((entry) => [
+            entry.absoluteIndex,
+            entry.relativeIndex,
+            ensurePromptHistoryEntryId(history, entry, () => 'unused').data,
+        ])).toEqual([[6, 0, 'm6'], [8, 1, 'm8'], [9, 2, 'm9']])
+        expect(history.readMetadataRange(4, 4)).toMatchObject({
+            startIndex: 6, endIndex: 8, messages: [{ disabled: undefined }, { disabled: true }],
+        })
+        expect(history.scanMetadataBackward(9, 2)).toMatchObject({
+            startIndexExclusive: 9, entries: [{ absoluteIndex: 8 }, { absoluteIndex: 7, disabled: true }],
+        })
     })
 
     it('reports an allBefore marker inside the window', () => {
@@ -97,6 +107,6 @@ describe('WindowedConversationHistoryOperation', () => {
 
         const selection = selectPromptHistory(history)
         expect(selection).toMatchObject({ startIndex: 7, resetByAllBefore: true, messageCount: 3 })
-        expect([...iteratePromptHistory(history, selection)].map((entry) => entry.absoluteIndex)).toEqual([7, 8, 9])
+        expect([...iteratePromptHistoryTargets(history, selection)].map((entry) => entry.absoluteIndex)).toEqual([7, 8, 9])
     })
 })

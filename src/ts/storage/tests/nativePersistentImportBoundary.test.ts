@@ -76,6 +76,8 @@ class InMemoryNativeCommandDouble {
                 const { characters: _characters, botPresets: _botPresets, ...root } = this.database
                 return { revision: this.revision, value: structuredClone(root) }
             }
+            case 'pds_read_revision':
+                return this.revision
             case 'pds_replace_begin': {
                 const stagingId = `staging-${++this.stagingSequence}`
                 this.staging.set(stagingId, { root: null, presets: [], characters: [] })

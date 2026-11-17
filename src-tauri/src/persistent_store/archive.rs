@@ -152,6 +152,25 @@ pub(super) fn read_archived_object(
         .transpose()
 }
 
+/// Hands the decompressed JSON text of the archive in `file` to `write` in pieces, until it ends
+/// or `write` returns false.
+pub(super) fn read_payload_text(
+    file: impl Read,
+    mut write: impl FnMut(&[u8]) -> io::Result<bool>,
+) -> StoreResult<()> {
+    let mut decoder = GzDecoder::new(BufReader::new(file)).take(MAX_DECODED_ARCHIVE_BYTES.saturating_add(1));
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = decoder.read(&mut buffer)?;
+        if decoder.limit() == 0 {
+            return validation("archived character exceeds the decoded size limit");
+        }
+        if read == 0 || !write(&buffer[..read])? {
+            return Ok(());
+        }
+    }
+}
+
 /// Brings the one stored body an archive or a restore reads (the owner manifest it lists, or the
 /// archive itself) to this device from the storage that holds it, before anything changes.
 pub(super) fn fetch_operation_body(
@@ -889,7 +908,8 @@ fn stage_payload_with_limit(
     let decoder = GzDecoder::new(BufReader::new(CancellationAwareIo::new(file, is_cancelled)));
     let mut limited = decoder.take(max_decoded_bytes.saturating_add(1));
     let payload = {
-        let mut deserializer = serde_json::Deserializer::from_reader(&mut limited);
+        // serde_json reads one byte at a time; unbuffered, each byte is its own inflate call.
+        let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(&mut limited));
         let payload = ArchivePayloadSeed {
             connection,
             is_cancelled,
@@ -951,6 +971,11 @@ mod decoding_tests {
         let checksum = damaged.len() - 8;
         damaged[checksum] ^= 1;
         assert!(decompress(&damaged).is_err());
+        let connection = Connection::open_in_memory().unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&[compressed.clone(), compressed.clone()].concat()).unwrap();
+        let error = stage_payload_with_limit(&connection, file.reopen().unwrap(), &|| false, MAX_DECODED_ARCHIVE_BYTES).err().unwrap();
+        assert!(error.to_string().contains("archived character has trailing compressed data"));
         assert!(decompress(&[compressed.clone(), compressed].concat()).is_err());
         assert!(decompress(&encoded(&[PAYLOAD, b"{}"].concat())).is_err());
     }
@@ -1010,20 +1035,25 @@ pub(super) fn archive_character_with_limit(
     )?;
     let shared_asset_hashes=if let Some(incoming)=context.and_then(|c|c.incoming){super::lww::archive_metadata(connection,&incoming.value)?.shared_asset_hashes}else{super::snapshot::collect_shared_character_asset_hashes(connection,cas,&generation,character_id)?};
     let mut staging = cas.create_ipc_staging_file()?;
+    let mut names = super::archive_asset_names::NameScan::new();
     let metadata = {
         let mut encoder = GzEncoder::new(
             CancellationAwareIo::new(staging.as_file_mut(), is_cancelled),
             Compression::default(),
         );
+        // serde_json writes token by token and the encoder deflates on every write. into_inner
+        // drains the buffer without a sync flush, so the archive bytes and hashes stay the same.
+        let mut buffered = io::BufWriter::with_capacity(64 * 1024, &mut encoder);
         let metadata = write_payload_to(
             connection,
             &generation,
             character_id,
-            &mut encoder,
+            super::archive_asset_names::NameTee { inner: &mut buffered, scan: &mut names },
             is_cancelled,
             false,
             max_decoded_bytes,
         )?;
+        buffered.into_inner().map_err(|error| StoreError::from(error.into_error()))?;
         encoder.finish()?;
         metadata
     };
@@ -1031,6 +1061,7 @@ pub(super) fn archive_character_with_limit(
     staging.as_file_mut().seek(SeekFrom::Start(0))?;
     let mut reader = CancellationAwareIo::new(staging.as_file_mut(), is_cancelled);
     let prepared = cas.prepare_reader(&mut reader)?;
+    super::archive_asset_names::write_new(cas.repository_root(), &prepared.content_hash, names);
     ensure_not_cancelled(is_cancelled)?;
     super::AssetObjectCatalog::new(connection).register(
         &[super::asset_object_catalog::AssetObjectRegistration {
@@ -1040,7 +1071,12 @@ pub(super) fn archive_character_with_limit(
         now_ms,
     )?;
     let shared_object_hash=if let Some(incoming)=context.and_then(|c|c.incoming){super::lww::archive_metadata(connection,&incoming.value)?.object_hash}else{
-        let mut shared=cas.create_ipc_staging_file()?;let mut encoder=GzEncoder::new(CancellationAwareIo::new(shared.as_file_mut(),is_cancelled),Compression::default());write_payload_to(connection,&generation,character_id,&mut encoder,is_cancelled,true,max_decoded_bytes)?;encoder.finish()?;shared.as_file_mut().seek(SeekFrom::Start(0))?;let object=cas.prepare_reader(&mut CancellationAwareIo::new(shared.as_file_mut(),is_cancelled))?;
+        let mut shared=cas.create_ipc_staging_file()?;let mut encoder=GzEncoder::new(CancellationAwareIo::new(shared.as_file_mut(),is_cancelled),Compression::default());let mut buffered=io::BufWriter::with_capacity(64*1024,&mut encoder);
+        // The payload other devices restore from, which this one does too once its archive is
+        // projected from the received unit.
+        let mut names=super::archive_asset_names::NameScan::new();
+        write_payload_to(connection,&generation,character_id,super::archive_asset_names::NameTee{inner:&mut buffered,scan:&mut names},is_cancelled,true,max_decoded_bytes)?;buffered.into_inner().map_err(|error|StoreError::from(error.into_error()))?;encoder.finish()?;shared.as_file_mut().seek(SeekFrom::Start(0))?;let object=cas.prepare_reader(&mut CancellationAwareIo::new(shared.as_file_mut(),is_cancelled))?;
+        super::archive_asset_names::write_new(cas.repository_root(),&object.content_hash,names);
         super::AssetObjectCatalog::new(connection).register(&[super::asset_object_catalog::AssetObjectRegistration{object_hash:object.content_hash.clone(),byte_size:object.byte_size}],now_ms)?;object.content_hash
     };
     let archived = ArchivedObject {
@@ -1072,14 +1108,7 @@ pub(super) fn archive_character_with_limit(
         },
         |transaction, generation, ()| {
             ensure_not_cancelled(is_cancelled)?;
-            transaction.execute(
-                "DELETE FROM messages WHERE generation = ?1 AND character_id = ?2",
-                params![generation, character_id],
-            )?;
-            transaction.execute(
-                "DELETE FROM conversations WHERE generation = ?1 AND character_id = ?2",
-                params![generation, character_id],
-            )?;
+            super::commit::delete_character_contents(transaction, generation, character_id)?;
             let updated = transaction.execute(
                 "UPDATE characters
                  SET detail = ?3, archived_object = ?4, conversation_count = 0
@@ -1234,4 +1263,60 @@ pub(super) fn restore_character_with_cancellation_lww(
         Ok(value) => { cleanup?; Ok(value) }
         Err(error) => { let _ = cleanup; Err(error) }
     }
+}
+
+// Reuse the restore decoder and its disk-backed staging, without changing the library.
+pub(super) fn visit_gallery_payload(
+    cas: &PayloadCas,
+    archived: &ArchivedObject,
+    character_id: &str,
+    is_cancelled: &dyn Fn() -> bool,
+    visit: &mut dyn FnMut(Option<&str>, Option<&str>, Option<&str>, Option<i64>, &Value) -> StoreResult<()>,
+    conversation_done: &mut dyn FnMut() -> StoreResult<()>,
+) -> StoreResult<()> {
+    let Some(file) = cas.open_object(&archived.object_hash)? else { return validation(ARCHIVE_DATA_MISSING_MESSAGE); };
+    let connection = Connection::open_in_memory()?;
+    let _staging = create_restore_staging(&connection, cas.repository_root())?;
+    let outcome = (|| {
+        let mut payload = stage_payload(&connection, file, is_cancelled)?;
+        let mut owners = Vec::new();
+        for remap in &archived.identity_remap {
+            owners.push(payload.character_id.clone());
+            remap.character(&mut payload.detail);
+            payload.character_id = payload.detail.get("chaId").and_then(Value::as_str)
+                .ok_or_else(|| StoreError::Validation { message: "archived character identity is missing".into() })?.to_owned();
+        }
+        if payload.version != ARCHIVE_PAYLOAD_VERSION || payload.character_id != character_id
+            || payload.conversation_count != archived.conversation_count || payload.message_count != archived.message_count {
+            return validation("archived character payload does not match its catalog");
+        }
+        visit(None, None, None, None, &payload.detail)?;
+        let mut conversations = connection.prepare("SELECT ordinal,conversation_id,name,detail FROM archive_restore.archive_restore_conversations ORDER BY ordinal")?;
+        let mut rows = conversations.query([])?;
+        while let Some(row) = rows.next()? {
+            ensure_not_cancelled(is_cancelled)?;
+            let ordinal: i64 = row.get(0)?;
+            let mut id: String = row.get(1)?;
+            let name: String = row.get(2)?;
+            let mut detail: Value = serde_json::from_str(&row.get::<_, String>(3)?)?;
+            for (remap, owner) in archived.identity_remap.iter().zip(&owners) {
+                id = remap.conversation(owner, &id);
+                remap.chat(owner, &mut detail);
+            }
+            visit(Some(&id), Some(&name), None, None, &detail)?;
+            let mut messages = connection.prepare("SELECT message_index,message_id,value FROM archive_restore.archive_restore_messages WHERE conversation_ordinal=?1 ORDER BY message_index")?;
+            let mut values = messages.query([ordinal])?;
+            while let Some(message) = values.next()? {
+                ensure_not_cancelled(is_cancelled)?;
+                let message_index: i64 = message.get(0)?;
+                let message_id: Option<String> = message.get(1)?;
+                let value: Value = serde_json::from_str(&message.get::<_, String>(2)?)?;
+                visit(Some(&id), Some(&name), message_id.as_deref(), Some(message_index), &value)?;
+            }
+            conversation_done()?;
+        }
+        Ok(())
+    })();
+    let cleanup = clear_restore_staging(&connection);
+    outcome.and(cleanup)
 }

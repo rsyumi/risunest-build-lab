@@ -241,8 +241,10 @@ pub(crate) fn published_string_asset_roots(input: &mut (impl std::io::Read + std
 }
 
 /// Content controls keep their format validation independently of metadata request bounds.
+/// A body up to one part may be raw bytes, as the parts of structured plugin values are.
 pub(crate) fn verified_oversized_control(bytes:&[u8])->StoreResult<()> {
     if bytes.starts_with(risunest_external_storage_format::message_pages::PAGE_PREFIX) && verified_large_message_page(bytes).is_ok() {return Ok(());}
+    if bytes.len() as u64 <= super::device_store::plugin_values::structure::PART_BYTES {return Ok(());}
     verified_large_unit_body(bytes)
 }
 
@@ -262,6 +264,15 @@ pub(crate) fn large_unit_body_hash(key:&risunest_sync_wire::unit::UnitKey,value:
     match value {
         risunest_sync_wire::unit::UnitValue::Object{descriptor,..} if is_large_unit(key) => Some(descriptor.object_hash.clone()),
         _ => None,
+    }
+}
+
+/// The parts a structured plugin value names: raw bytes that travel as
+/// control objects, never as assets.
+pub(crate) fn plugin_value_parts<'a>(key:&risunest_sync_wire::unit::UnitKey,value:&'a risunest_sync_wire::unit::UnitValue)->&'a [String] {
+    match value {
+        risunest_sync_wire::unit::UnitValue::Object{descriptor,..} if key.components()[0]=="plugin-local" => &descriptor.dependencies,
+        _ => &[],
     }
 }
 
@@ -547,7 +558,8 @@ struct Dependency {
 const CODEC: &str = "logical-v1";
 const PAGE: i64 = 128;
 const GC_SCAN_LIMIT: i64 = 128;
-const GC_DELETE_LIMIT: usize = 16;
+/// Registrations one cache cleanup removes at most.
+pub(super) const GC_DELETE_LIMIT: usize = 16;
 const GC_REFERENCE_LIMIT: i64 = 32;
 
 fn invalid(message: &str) -> StoreError {
@@ -599,7 +611,7 @@ impl PersistentStore {
                 identity: identity.clone(),
                 scope_id: scope.into(),
                 manifest_hash,
-                path: path.map(PathBuf::from),
+                path: path.map(|path| self.stored_capture_path(&path)),
                 file_hash,
             }),
         )
@@ -621,7 +633,7 @@ impl PersistentStore {
                     identity: serde_json::from_str(&identity)?,
                     scope_id,
                     manifest_hash,
-                    path: path.map(PathBuf::from),
+                    path: path.map(|path| self.stored_capture_path(&path)),
                     file_hash,
                 })
             })
@@ -718,6 +730,11 @@ impl PersistentStore {
         }
     }
 
+    /// Capture rows hold the absolute path of the run that wrote them.
+    fn stored_capture_path(&self, stored: &str) -> PathBuf {
+        crate::app_paths::relocated_external_storage_path(Path::new(stored), &self.repository_root)
+    }
+
     fn remove_capture_file(&self, path: &Path) {
         let captures = self
             .repository_root
@@ -764,11 +781,11 @@ impl PersistentStore {
         Ok(())
     }
 
-    /// Whether a registration was removed, which is when bodies may have
-    /// become unreferenced.
-    fn cleanup_capture_cache(&mut self, keep: &str) -> StoreResult<bool> {
+    /// How many registrations were removed, which is when bodies may have
+    /// become unreferenced. At `GC_DELETE_LIMIT` more may be left.
+    pub(super) fn cleanup_capture_cache(&mut self, keep: &str) -> StoreResult<usize> {
         self.cleanup_terminal_capture_references()?;
-        let mut removed = false;
+        let mut removed = 0;
         let mut paths = Vec::new();
         {
             let tx = self.connection.transaction()?;
@@ -805,15 +822,15 @@ impl PersistentStore {
                     [&id],
                 )?;
                 tx.execute("DELETE FROM external_storage_captures WHERE id=?1", [&id])?;
-                removed = true;
+                removed += 1;
                 if let Some(path) = path {
-                    paths.push(PathBuf::from(path));
+                    paths.push(path);
                 }
             }
             tx.commit()?;
         }
         for path in paths {
-            self.remove_capture_file(&path);
+            self.remove_capture_file(&self.stored_capture_path(&path));
         }
         Ok(removed)
     }
@@ -1193,7 +1210,7 @@ impl PersistentStore {
             )?;
             content_change_index::prune(&tx)?;
             tx.commit()?;
-            if !probe.is_cancelled() && self.cleanup_capture_cache(&candidate.id)? {
+            if !probe.is_cancelled() && self.cleanup_capture_cache(&candidate.id)? > 0 {
                 self.collect_released_external_content();
             }
             return Ok(CapturedSnapshot {
@@ -1266,7 +1283,7 @@ impl PersistentStore {
         let projected_records = prepared.project(&mut catalog, probe)?;
         check(probe)?;
         let capture_id = prepared.register(self, &catalog, &scope_id, CODEC)?;
-        if !probe.is_cancelled() && self.cleanup_capture_cache(&capture_id)? {
+        if !probe.is_cancelled() && self.cleanup_capture_cache(&capture_id)? > 0 {
             self.collect_released_external_content();
         }
         Ok(CapturedSnapshot {
@@ -1448,9 +1465,11 @@ mod hydration_tests {
         reset_hash_work();
         verified_oversized_control(&large).unwrap();
         assert_eq!(take_hash_work(),Default::default());
-        let mut damaged=page.clone();damaged[1]=b' ';
+        // A body up to one part may be raw bytes; a larger one is a page or canonical JSON.
+        let part=crate::persistent_store::device_store::plugin_values::structure::PART_BYTES as usize;
         reset_hash_work();
-        assert!(verified_oversized_control(&damaged).is_err());
+        verified_oversized_control(&vec![0xff;part]).unwrap();
+        assert!(verified_oversized_control(&vec![0xff;part+1]).is_err());
         assert_eq!(take_hash_work(),Default::default());
     }
 
@@ -1721,17 +1740,52 @@ mod hydration_tests {
         assert_eq!(captured.catalog.content_fingerprint(&scope).unwrap(), fingerprint);
         assert_eq!(store.revision().unwrap(), 2);
         assert_eq!(captured.catalog.original_backup_units().unwrap().units().unwrap().collect::<StoreResult<BTreeMap<_,_>>>().unwrap(), original_units);
-        assert_eq!(captured.catalog.backup_sections().unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
+        assert_eq!(captured.catalog.backup_sections(directory.path()).unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
         store.retain_external_capture(&captured.id,"synthetic-backup-job").unwrap();
         let reopened = store.reopen_external_capture(&captured.id).unwrap();
         assert_eq!(reopened.catalog.original_backup_units().unwrap().units().unwrap().collect::<StoreResult<BTreeMap<_,_>>>().unwrap(),original_units);
-        assert_eq!(reopened.catalog.backup_sections().unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
+        assert_eq!(reopened.catalog.backup_sections(directory.path()).unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
         assert!(!store.revision_leases.contains_key(&lease.lease));
         assert!(store.capture_external_library_from_lease("backup", &hydration, &lease.lease, &probe).is_err());
         let later = store.acquire_revision(2).unwrap();
         assert!(store.capture_external_library_from_lease("backup", &hydration, &later.lease, &probe).is_err());
         assert!(store.revision_leases.contains_key(&later.lease));
         store.release_revision(&later.lease).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_backup_finds_its_section_bodies_after_the_data_root_moved() {
+        let directory = tempfile::tempdir().unwrap();
+        let earlier = directory.path().join("earlier");
+        let probe = crate::local_backup::NeverCancelled;
+        let id = {
+            let mut store = PersistentStore::open(&earlier).unwrap();
+            let commit = serde_json::from_value(serde_json::json!({
+                "expectedRevision":0,"root":{"username":"synthetic original"}
+            })).unwrap();
+            store.commit(&commit).unwrap();
+            store.device_store_mut().unwrap().write_setting("accountst", &serde_json::json!("synthetic-setting")).unwrap();
+            let hydration = store.hydrate_external_capture_dependencies("backup", &probe).unwrap();
+            let (lease, prepared_sections) = store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
+            // Where a backup job spools them.
+            let spool = earlier.join("external-storage").join("synthetic-job").join("sections");
+            let sections = crate::external_storage::sections::capture_prepared_backup_sections(
+                &prepared_sections,&spool,&crate::external_storage::contract::Cancellation::default(),
+            ).unwrap();
+            assert!(sections.iter().any(|section| !section.sources.is_empty()));
+            let captured = store.capture_external_library_from_lease_with_sections("backup", &hydration, &lease.lease, sections, &probe).unwrap();
+            store.retain_external_capture(&captured.id,"synthetic-backup-job").unwrap();
+            captured.id.clone()
+        };
+        let moved = directory.path().join("moved");
+        fs::rename(&earlier, &moved).unwrap();
+        let store = PersistentStore::open(&moved).unwrap();
+        let reopened = store.reopen_external_capture(&id).unwrap();
+        for section in reopened.catalog.backup_sections(&moved).unwrap() {
+            for source in section.sources {
+                assert!(source.path.is_file(), "{}", source.path.display());
+            }
+        }
     }
 
 

@@ -1,6 +1,7 @@
 import { runContractScenarios, verifyContractReadback } from './contractScenarios'
 import { endsByNativeExit, runNativeExitPhase, verifySessionEndReadback } from './lifecycleScenarios'
 import { invoke } from '@tauri-apps/api/core'
+import { failureRecord } from '../../benchmarks/failureRecord'
 import { Buffer } from 'buffer'
 import { SqlitePersistentDataStore } from '../../src/ts/storage/sqlitePersistentDataStore'
 import { RevisionConflictError } from '../../src/ts/storage/persistentDataStore'
@@ -8,6 +9,8 @@ import { stableSelectionRoot } from '../../src/ts/storage/persistentSelectionBou
 import type { Database } from '../../src/ts/storage/database.svelte'
 
 globalThis.Buffer = Buffer
+// The window error handlers the native side injects record the cause chain through this.
+Object.assign(window, { __boundaryFailureRecord: failureRecord })
 
 const fixture = {
     username: '', botPresets: [], botPresetsId: 0, pluginCustomStorage: {},
@@ -28,10 +31,29 @@ const equal = (actual: unknown, expected: unknown, name: string) => {
 }
 const blockedRequests: string[] = []
 window.addEventListener('securitypolicyviolation', event => blockedRequests.push(event.violatedDirective))
-const phase = await invoke<{ runId: string; phase: string }>('boundary_phase')
+const phase = await invoke<{ runId: string; phase: string; accountOrigin?: string; appLockUnavailable: boolean }>('boundary_phase')
 const cases: string[] = []
 let measurements: unknown
 try {
+    await invoke('native_startup_status')
+    if (phase.appLockUnavailable) {
+        const unavailable = async (command: string, args?: Record<string, unknown>) => {
+            let error: unknown
+            try { await invoke(command, args) } catch (failure) { error = failure }
+            if (typeof error !== 'string' || !error.startsWith('app-lock cover creation failed')) throw new Error(`${command} did not report cover setup failure`)
+        }
+        await unavailable('app_lock_check')
+        await unavailable('app_lock_set_policy', { policy: { enabled: false, timing: 'launch', gateRequired: false, hideRecentsPreview: false, backgroundColor: '#21252b' } })
+        await unavailable('app_lock_ready', { epoch: 0, locked: false })
+        await unavailable('app_lock_authenticate', { reason: 'Synthetic unavailable-cover verification' })
+        equal(await invoke('boundary_cover_present'), false, 'failed setup removed its native cover')
+        const record = JSON.stringify({ schema: 'risunest.app-lock/v1', enabled: false, nativeUnlock: false, hideRecentsPreview: false, timing: 'launch', pin: null })
+        await invoke('app_lock_write_record', { record })
+        equal(await invoke('app_lock_read_record'), record, 'recovery record remains available after cover setup failure')
+    } else {
+        await invoke('app_lock_check')
+        equal(await invoke('boundary_cover_present'), true, 'native cover initialized without showing the boundary window')
+    }
     const store = new SqlitePersistentDataStore()
     await store.open()
     if (endsByNativeExit(phase.phase)) {
@@ -39,7 +61,11 @@ try {
         await runNativeExitPhase(phase, store, fixture)
         await new Promise<never>(() => {})
     }
-    if (phase.phase === 'asset-benchmark' || phase.phase === 'asset-benchmark-small') {
+    if (phase.phase === 'official-account-benchmark') {
+        const { runOfficialAccountMeasurements } = await import('../../benchmarks/official-account/suite')
+        measurements = await runOfficialAccountMeasurements(store, phase.accountOrigin ?? '')
+        cases.push('official-account-assets-and-ledger')
+    } else if (phase.phase === 'asset-benchmark' || phase.phase === 'asset-benchmark-small') {
         const { runNativeAssetMeasurements } = await import('../../benchmarks/native-assets/suite')
         measurements = await runNativeAssetMeasurements(store, phase.phase === 'asset-benchmark-small')
         cases.push(phase.phase === 'asset-benchmark-small' ? 'small-asset-bytes-aliases' : 'asset-bytes-aliases-and-inlays')
@@ -98,5 +124,5 @@ try {
     if (blockedRequests.length) throw new Error(`Unexpected blocked resources: ${blockedRequests.join(', ')}`)
     await invoke('boundary_finish', { report: { ...phase, cases, success: true, ...(measurements ? { measurements } : {}) } })
 } catch (error) {
-    await invoke('boundary_finish', { report: { ...phase, cases, success: false, error: String(error) } })
+    await invoke('boundary_finish', { report: { ...phase, cases, success: false, error: String(error), failure: failureRecord(error) } })
 }

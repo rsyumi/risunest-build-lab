@@ -6,12 +6,22 @@ import {
     listCharacterResources,
     listDatabaseRootResources,
 } from '../../process/coldstorageData'
-import { expandColdPayloads } from '../../process/coldPayloadExpansion'
+import {
+    expandColdPayloads,
+    importColdPluginStorage,
+    type ColdItemRead,
+} from '../../process/coldPayloadExpansion'
 import type {
     AccountStorage,
     AccountWriteResult,
 } from '../accountStorage'
 import type { NativeFileJobOptions } from '../nativeFileJobs'
+import {
+    measuredTaskPercent,
+    runWithDeferredMobileBackgroundTask,
+    runWithMobileBackgroundTask,
+    type MobileBackgroundTask,
+} from '../../mobileBackgroundTask'
 import type { BlobStore } from '../blobStore'
 import type { Database } from '../database.svelte'
 import type {
@@ -56,7 +66,13 @@ export interface OfficialPublicationOptions {
 const databaseKey = 'database/database.bin'
 
 export interface OfficialColdStorageTransport {
-    readRemote(key: string, signal?: AbortSignal): Promise<unknown | null>
+    readRemote(key: string, signal?: AbortSignal): Promise<ColdItemRead>
+}
+
+/** Counts of data the restore leaves out, for the replacement confirmation. */
+export interface OfficialRestoreOmissions {
+    pluginStorage: number
+    oversizedPluginStorage: number
 }
 
 export interface OfficialAssociationRecord {
@@ -98,8 +114,15 @@ export interface OfficialAccountSnapshotDependencies {
     account: Pick<AccountStorage, 'readItem' | 'writeItem'>
     cold: OfficialColdStorageTransport
     prepareCandidate(database: Database): Promise<Database>
+    /** Asks before a web restore leaves data out; a decline leaves the library unchanged. */
+    confirmOmissions?(omissions: OfficialRestoreOmissions): Promise<boolean>
     /** Explicit native restores use the runtime's confirmed and fenced replacement path. */
-    restoreCandidate?(database: Database, expectedRevision: DataRevision, signal?: AbortSignal): Promise<{ revision: DataRevision }>
+    restoreCandidate?(
+        database: Database,
+        expectedRevision: DataRevision,
+        signal?: AbortSignal,
+        omissions?: OfficialRestoreOmissions,
+    ): Promise<{ revision: DataRevision }>
     markPublished(revision: DataRevision): Promise<void> | void
     ledger: OfficialAssetLedger
     /** Persists the published association so a restart can tell local from remote progress. */
@@ -108,6 +131,7 @@ export interface OfficialAccountSnapshotDependencies {
     conflict?: OfficialSyncConflictHandler
     now?(): number
     nativeDatabasePublisher?: OfficialNativeDatabasePublisher
+    nativeAssetPublisher?: OfficialNativeAssetPublisher
     /** Native identity comes from the authenticated vault session, never a restored root. */
     getAccountId?(): string | null
     flushPublicationMetadata?(): Promise<void>
@@ -118,8 +142,8 @@ export interface OfficialNativeDatabasePublicationInput {
     accountId: string
     lease: PersistentRevisionLease
     resourceReplacements: Readonly<Record<string, string>>
-    signal?: AbortSignal
-    userInitiated?: boolean
+    /** The publication's background task, whose signal also ends when the platform ends the task. */
+    background: MobileBackgroundTask
     onStatus?: NativeFileJobOptions['onStatus']
 }
 
@@ -133,11 +157,30 @@ export type OfficialNativeDatabasePublisher = (
     input: OfficialNativeDatabasePublicationInput,
 ) => Promise<OfficialNativeDatabasePublicationReceipt | null>
 
+export interface OfficialNativeAssetPublicationInput {
+    accountId: string
+    lease: PersistentRevisionLease
+    assets: readonly { key: string; localKey: string }[]
+    /** The publication's background task, whose signal also ends when the platform ends the task. */
+    background: MobileBackgroundTask
+    /** Throws once the publication no longer belongs to the signed-in account. */
+    guard(): Promise<void>
+    /** The account now holds `key` under `replacementKey`. */
+    written(key: string, replacementKey: string): void
+}
+
+/** Resolves true once every asset is written, or false to leave them all to the web path. */
+export type OfficialNativeAssetPublisher = (
+    input: OfficialNativeAssetPublicationInput,
+) => Promise<boolean>
+
 export type OfficialPullResult =
     | { kind: 'missing' }
     | { kind: 'unchanged' }
     | { kind: 'kept-local'; conflict: boolean }
     | { kind: 'activated'; revision: DataRevision }
+    /** The user declined a restore that leaves data out. Nothing changed. */
+    | { kind: 'declined' }
 
 interface PinnedAsset {
     key: string
@@ -169,6 +212,23 @@ async function fingerprintDatabase(bytes: Uint8Array): Promise<string> {
 function throwIfAborted(signal?: AbortSignal): void {
     if (!signal?.aborted) return
     throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
+/** Which keys hold a local payload, in one batch where the store offers it. */
+async function statKeys(blobs: BlobStore, keys: readonly string[], signal?: AbortSignal): Promise<boolean[]> {
+    throwIfAborted(signal)
+    if (keys.length === 0) return []
+    if (blobs.statMany) {
+        const found = await blobs.statMany(keys)
+        throwIfAborted(signal)
+        return found.map(Boolean)
+    }
+    const found: boolean[] = []
+    for (const key of keys) {
+        found.push(!!await blobs.stat(key))
+        throwIfAborted(signal)
+    }
+    return found
 }
 
 function linkAbortSignals(signals: readonly (AbortSignal | undefined)[]): {
@@ -369,12 +429,46 @@ class OfficialPinnedPublication implements PinnedPublication {
             throw new Error('Official account session changed before publication')
         }
     }
-    private async publishOnce(signal: AbortSignal): Promise<void> {
+    /**
+     * One background task covers the assets and the database. A save starts an automatic publication,
+     * so it is protected only if the app leaves the screen while it runs.
+     */
+    private publishOnce(signal: AbortSignal): Promise<void> {
+        const held = (background: MobileBackgroundTask) => this.publishHeld(background, background.signal ?? signal)
+        return this.options.userInitiated
+            ? runWithMobileBackgroundTask('sync', held, signal, true)
+            : runWithDeferredMobileBackgroundTask('sync', held, signal)
+    }
+
+    private async publishHeld(background: MobileBackgroundTask, signal: AbortSignal): Promise<void> {
         if (this.publicationCommitted) return this.finalizePublication()
         this.assertAccountCurrent()
         const uploads = this.assets.filter(asset => !this.replacements.has(asset.key))
         let completed = 0
+        const record = (key: string, replacementKey: string) => {
+            this.replacements.set(key, replacementKey)
+            this.dependencies.ledger.record(key, replacementKey)
+            completed += 1
+            this.options.onProgress?.(completed, uploads.length)
+            background.progress(measuredTaskPercent(completed, uploads.length))
+        }
         this.options.onProgress?.(completed, uploads.length)
+        if (uploads.length > 0 && this.dependencies.nativeAssetPublisher && this.accountId) {
+            await this.refreshNativeLeaseIfNeeded()
+            this.assertAccountCurrent()
+            await this.dependencies.nativeAssetPublisher({
+                accountId: this.accountId,
+                lease: this.lease,
+                assets: uploads.map(({ key, localKey }) => ({ key, localKey })),
+                background,
+                guard: async () => this.assertAccountCurrent(),
+                // The ledger follows the signed-in account, so a write settled after a switch is not recorded.
+                written: (key, replacementKey) => {
+                    this.assertAccountCurrent()
+                    record(key, replacementKey)
+                },
+            })
+        }
         for (const asset of uploads) {
             if (this.replacements.has(asset.key)) continue
             throwIfAborted(signal)
@@ -384,10 +478,7 @@ class OfficialPinnedPublication implements PinnedPublication {
             this.assertAccountCurrent()
             const result = await this.dependencies.account.writeItem(asset.key, bytes, { signal })
             this.assertAccountCurrent()
-            const replacementKey = requireWriteSuccess(result, asset.key)
-            this.replacements.set(asset.key, replacementKey)
-            this.dependencies.ledger.record(asset.key, replacementKey)
-            this.options.onProgress?.(++completed, uploads.length)
+            record(asset.key, requireWriteSuccess(result, asset.key))
             throwIfAborted(signal)
         }
 
@@ -408,8 +499,7 @@ class OfficialPinnedPublication implements PinnedPublication {
                     accountId: this.accountId,
                     lease: this.lease,
                     resourceReplacements: replacementRecord,
-                    signal,
-                    userInitiated: this.options.userInitiated,
+                    background,
                     onStatus: this.options.onStatus,
                 })
             } catch (error) {
@@ -584,26 +674,21 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
             if (this.dependencies.getAccountId && !accountId) {
                 throw new Error('Native official account login is required')
             }
-            const assetKeys = new Set(references.assets)
+            const keys = [...new Set(references.assets)].sort()
+            const published = keys.map(key => this.dependencies.ledger.publishedAs(key))
+            const unpublished = keys.filter((_key, index) => published[index] === null)
+            const present = await statKeys(blobs, unpublished, options.signal)
+            const legacy = unpublished.filter((key, index) => !present[index] && normalizeLegacyAssetKey(key) !== key)
+            const normalizedPresent = await statKeys(blobs, legacy.map(normalizeLegacyAssetKey), options.signal)
+            const localKeys = new Map<string, string>()
+            unpublished.forEach((key, index) => { if (present[index]) localKeys.set(key, key) })
+            legacy.forEach((key, index) => { if (normalizedPresent[index]) localKeys.set(key, normalizeLegacyAssetKey(key)) })
             const assets: PinnedAsset[] = []
-            for (const key of [...assetKeys].sort()) {
-                throwIfAborted(options.signal)
-                const publishedAs = this.dependencies.ledger.publishedAs(key)
-                if (publishedAs !== null) {
-                    assets.push({ key, localKey: key, publishedAs })
-                    continue
-                }
-                if (await blobs.stat(key)) {
-                    assets.push({ key, localKey: key, publishedAs: null })
-                    continue
-                }
-                const normalized = normalizeLegacyAssetKey(key)
-                if (normalized !== key && await blobs.stat(normalized)) {
-                    assets.push({ key, localKey: normalized, publishedAs: null })
-                    continue
-                }
-
-            }
+            keys.forEach((key, index) => {
+                const publishedAs = published[index]
+                if (publishedAs !== null) assets.push({ key, localKey: key, publishedAs })
+                else if (localKeys.has(key)) assets.push({ key, localKey: localKeys.get(key)!, publishedAs: null })
+            })
 
             return new OfficialPinnedPublication(
                 revision,
@@ -682,16 +767,27 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         // Upstream account data can reference cold payloads. They become record bodies here,
         // because nothing downstream resolves a reference. Unresolved payloads prevent activation.
         throwIfAborted(signal)
-        const expansion = await expandColdPayloads(candidate, (key) => this.dependencies.cold.readRemote(key, signal))
+        const readCold = (key: string) => this.dependencies.cold.readRemote(key, signal)
+        const expansion = await expandColdPayloads(candidate, readCold)
         if (expansion.unavailableKeys.length > 0) {
             throw new ColdPayloadUnavailableError(expansion.unavailableKeys.length)
+        }
+        // Plugin values that cannot be resolved are left out instead of blocking activation.
+        const plugins = await importColdPluginStorage(candidate, readCold)
+        const omissions: OfficialRestoreOmissions = { pluginStorage: plugins.omitted, oversizedPluginStorage: plugins.tooLarge }
+        if (plugins.omitted + plugins.tooLarge > 0 && !this.dependencies.restoreCandidate) {
+            if (this.dependencies.confirmOmissions) {
+                if (!await this.dependencies.confirmOmissions(omissions)) return { kind: 'declined' }
+            } else {
+                console.warn(`Official snapshot restore left out ${plugins.omitted + plugins.tooLarge} plugin storage values`)
+            }
         }
 
         // Referenced assets load lazily on use, matching the upstream client;
         // a missing one degrades that item instead of failing the whole pull.
         throwIfAborted(signal)
         const activated = this.dependencies.restoreCandidate
-            ? await this.dependencies.restoreCandidate(candidate, expectedRevision, signal)
+            ? await this.dependencies.restoreCandidate(candidate, expectedRevision, signal, omissions)
             : await this.dependencies.store.replaceFromDatabase(candidate, expectedRevision)
         this.rememberAssociation(this.dependencies.getAccountId ? accountId : candidate.account?.id ?? accountId, {
             revision: activated.revision,

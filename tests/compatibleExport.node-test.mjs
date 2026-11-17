@@ -26,6 +26,18 @@ const compressedWire = (value) =>
     Buffer.from([0, 82, 73, 83, 85, 83, 65, 86, 69, 0, 8]),
     gzipSync(packr.encode(value)),
   ]);
+// Uncompressed RisuSave block file: [type][compression][name length][name][u32 LE length][data].
+const risuSaveBlocks = (blocks) =>
+  Buffer.concat([
+    Buffer.from("RISUSAVE\0"),
+    ...blocks.map(([type, name, value]) => {
+      const nameBytes = Buffer.from(name);
+      const data = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
+      const length = Buffer.alloc(4);
+      length.writeUInt32LE(data.length);
+      return Buffer.concat([Buffer.from([type, 0, nameBytes.length]), nameBytes, length, data]);
+    }),
+  ]);
 const archiveEntry = (name, bytes) => {
   const filename = Buffer.from(name);
   const head = Buffer.alloc(4);
@@ -148,10 +160,25 @@ for (const target of ["risuai", "pocket"]) {
             plain(await harness.decode(compressedWire(value))),
             value,
           );
+          // RisuAI writes a database as RisuSave blocks, one per database part,
+          // so the re-save check needs every part present.
+          const database = {
+            ...value,
+            botPresets: [{ name: "Synthetic preset" }],
+            modules: [],
+            loadouts: [],
+            plugins: [],
+            pluginCustomStorage: { synthetic: value },
+          };
           assert.deepEqual(
-            plain(await harness.decode(harness.encode(value))),
-            value,
+            plain(await harness.decode(await harness.encode(database))),
+            database,
           );
+          if (target === "pocket")
+            assert.deepEqual(
+              plain(await harness.decode(await harness.encode(value))),
+              value,
+            );
         },
       );
 
@@ -260,6 +287,107 @@ for (const target of ["risuai", "pocket"]) {
           assert.deepEqual(
             plain(result.resaved.characters[0].chats[0].message[0].__plugin),
             record,
+          );
+        },
+      );
+
+      await t.test(
+        "nulls the references store survive the actual reference loader",
+        async () => {
+          const fixture = {
+            characters: [
+              {
+                chaId: "synthetic-null-fields",
+                type: "character",
+                name: "Synthetic",
+                postHistoryInstructions: null,
+                globalLore: [{ key: "합성", content: "합성 설명", activationPercent: null, insertorder: null }],
+                bias: [["합성", null]],
+                depth_prompt: { depth: null, prompt: "합성" },
+                loreSettings: { scanDepth: null, tokenBudget: null },
+                fishSpeechConfig: { chunk_length: null, normalize: false },
+                triggerscript: [{
+                  comment: "", type: "manual", effect: [],
+                  conditions: [{ type: "exists", type2: "loose", value: "", depth: null }],
+                }],
+                chats: [
+                  {
+                    id: "synthetic-null-chat",
+                    name: "",
+                    folderId: null,
+                    scriptstate: { "$합성": null },
+                    message: [{ role: "user", data: "합성 입력", chatId: "m1", name: null }],
+                  },
+                ],
+              },
+            ],
+            characterOrder: [
+              { id: "synthetic-folder", name: "Folder", color: "", data: ["synthetic-null-fields"], imgFile: null },
+            ],
+            botPresets: [{
+              name: "Synthetic preset", koboldURL: null, thinkingTokens: null, promptTemplate: null,
+              maxContext: null, maxResponse: null,
+            }, {
+              name: "Synthetic prompt preset",
+              promptTemplate: [
+                { type: "chat", rangeStart: null, rangeEnd: null },
+                { type: "cache", name: "합성", depth: null, role: "all" },
+              ],
+            }],
+            textScreenColor: null,
+            textScreenBorder: null,
+            localStopStrings: null,
+            promptTemplate: null,
+            thinkingTokens: null,
+            bias: [["합성", null]],
+            sdConfig: { width: null, height: null, denoising_strength: null, hr_scale: null },
+            NAIImgConfig: { width: null, height: null, steps: null, scale: null, cfg_rescale: null },
+            comfyConfig: { timeout: null },
+            plugins: [{ name: "synthetic", script: "", realArg: { "합성": null } }],
+            hypaV3Presets: [{ name: "합성", settings: {} }],
+            formatversion: 5,
+          };
+          // Cleared number settings, which the loader replaces with its defaults.
+          const numbers = [
+            "loreBookDepth", "loreBookToken", "autoContinueMinTokens", "requestRetrys", "genTime",
+            "assetMaxDifference", "localNetworkTimeoutSec", "maxContext", "maxResponse", "generationSeed",
+            "sdSteps", "sdCFG",
+            ...(target === "risuai"
+              ? ["hanuraiTokens", "hypaChunkSize", "hypaAllocatedTokens", "maxSupaChunkSize"]
+              : []),
+          ];
+          for (const key of numbers) fixture[key] = null;
+          const memory = [
+            "maxChatsPerSummary", "queryChatCount", "summarizationRequestsPerMinute",
+            "summarizationMaxConcurrent", "embeddingRequestsPerMinute", "embeddingMaxConcurrent",
+          ];
+          for (const key of memory) fixture.hypaV3Presets[0].settings[key] = null;
+          const nulls = (db) => {
+            const [character] = db.characters;
+            const [preset, prompts] = db.botPresets;
+            return [
+              db.textScreenColor, db.textScreenBorder, db.localStopStrings, db.promptTemplate, db.thinkingTokens,
+              db.characterOrder[0].imgFile, preset.koboldURL, preset.thinkingTokens, preset.promptTemplate,
+              preset.maxContext, preset.maxResponse, prompts.promptTemplate, db.bias, db.sdConfig,
+              db.NAIImgConfig.width, db.NAIImgConfig.height, db.NAIImgConfig.steps, db.NAIImgConfig.scale,
+              db.NAIImgConfig.cfg_rescale, db.comfyConfig.timeout, db.plugins[0].realArg,
+              character.postHistoryInstructions, character.globalLore[0].activationPercent,
+              character.globalLore[0].insertorder, character.bias, character.depth_prompt,
+              character.loreSettings, character.fishSpeechConfig.chunk_length,
+              character.triggerscript[0].conditions[0].depth,
+              character.chats[0].folderId, character.chats[0].scriptstate, character.chats[0].message[0].name,
+            ];
+          };
+          assert.equal(accepts(contract, contract.root, fixture), true);
+          const { resaved } = await harness.roundTrip(compressedWire(fixture));
+          assert.deepEqual(plain(nulls(resaved)), nulls(fixture));
+          assert.deepEqual(
+            numbers.filter((key) => !Number.isFinite(resaved[key])),
+            [],
+          );
+          assert.deepEqual(
+            memory.filter((key) => !Number.isFinite(resaved.hypaV3Presets[0].settings[key])),
+            [],
           );
         },
       );
@@ -439,6 +567,55 @@ for (const target of ["risuai", "pocket"]) {
           }
         },
       );
+
+      if (target === "risuai")
+        await t.test(
+          "actual block save reader, importer and re-save carry SaveKV namespaces",
+          async () => {
+            const kv = {
+              synthetic: {
+                version: 1,
+                entries: [
+                  { k: "empty", v: "" },
+                  { k: "zero", v: 0 },
+                  { k: "false", v: false },
+                  { k: "null", v: null },
+                  { k: "nested", v: { text: "합성", list: [1, null] } },
+                ],
+              },
+              other: { version: 1, entries: [{ k: "1", v: "one" }, { k: "0", v: "zero" }] },
+            };
+            const character = {
+              chaId: "synthetic-kv-char",
+              type: "character",
+              name: "Synthetic KV",
+              chats: [{ id: "synthetic-kv-chat", name: "", message: [] }],
+            };
+            const database = risuSaveBlocks([
+              [1, "root", { formatversion: 5, characterOrder: [character.chaId] }],
+              [2, character.chaId, character],
+              ...Object.entries(kv).map(([ns, content]) => [12, `kv:${ns}`, content]),
+              [0, "config", { version: 1 }],
+            ]);
+            const imported = await harness.importArchive(
+              archiveEntry("database.risudat", database),
+            );
+            assert.deepEqual(harness.liveKV(), kv);
+            const result = await harness.roundTrip(imported);
+            assert.equal(result.resaved.characters[0].name, "Synthetic KV");
+            assert.deepEqual(plain(result.kv), kv);
+            assert.deepEqual(plain(result.resavedKV), kv);
+            // The same empty part in a save the harness did not write fails closed.
+            await assert.rejects(
+              harness.decode(risuSaveBlocks([
+                [1, "root", { formatversion: 5 }],
+                [11, "pluginStorage", Buffer.alloc(0)],
+                [0, "config", { version: 1 }],
+              ])),
+              /unsupported side effect/,
+            );
+          },
+        );
 
       if (target === "pocket")
         await t.test(
@@ -652,7 +829,8 @@ for (const target of ["risuai", "pocket"]) {
                     JSON.stringify({
                       charId: "synthetic-a",
                       chatId: "synthetic-chat",
-                      createdAt: 42,
+                      createdAt: f.type === "signature" ? 0 : 42,
+                      ...(f.type === "image" ? {} : { updatedAt: 43 }),
                     }),
                   ),
                 ),
@@ -685,11 +863,19 @@ for (const target of ["risuai", "pocket"]) {
                   f.bytes,
                 );
               }
-              assert.equal(
-                JSON.parse(
-                  harness.storage.get(`inlay_meta/${f.id}`).toString("utf8"),
-                ).createdAt,
-                42,
+              assert.deepEqual(plain(await harness.readInlayMeta(f.id)), {
+                charId: "synthetic-a",
+                chatId: "synthetic-chat",
+                createdAt: f.type === "signature" ? 0 : 42,
+                updatedAt: f.type === "image" ? 42 : 43,
+              });
+              assert.deepEqual(
+                JSON.parse(harness.transaction.db.kvGet(`inlay_meta/${f.id}`).toString("utf8")),
+                {
+                  charId: "synthetic-a", chatId: "synthetic-chat",
+                  createdAt: f.type === "signature" ? 0 : 42,
+                  ...(f.type === "image" ? {} : { updatedAt: 43 }),
+                },
               );
             }
             // These are container/loader fixtures, not playable audio/video samples.
@@ -785,7 +971,7 @@ for (const target of ["risuai", "pocket"]) {
             message.data = "edited synthetic response";
             message.swipes[message.swipeId] = message.data;
             const edited = await harness.roundTrip(
-              harness.encode(result.resaved),
+              await harness.encode(result.resaved),
             );
             assert.equal(
               edited.resaved.characters[0].chats[0].message[1].data,

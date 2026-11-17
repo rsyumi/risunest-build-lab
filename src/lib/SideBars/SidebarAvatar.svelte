@@ -160,6 +160,7 @@
           class:rounded-md={!rounded} class:rounded-full={rounded} 
 ></div>
       {:then img}
+        {#if img}
         <img
           src={img}
           class="bg-skin-border sidebar-avatar rounded-md object-cover object-top"
@@ -169,6 +170,15 @@
           class:rounded-md={!rounded} class:rounded-full={rounded} 
           alt="avatar"
         />
+        {:else}
+        <div
+          class="bg-skin-border sidebar-avatar rounded-md bg-top"
+          style:width={size + "px"}
+          style:height={size + "px"}
+          style:minWidth={size + "px"}
+          class:rounded-md={!rounded} class:rounded-full={rounded}
+        ></div>
+        {/if}
       {:catch}
         <div
           class="bg-skin-border sidebar-avatar rounded-md bg-top"

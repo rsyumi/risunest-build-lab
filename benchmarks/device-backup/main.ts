@@ -1,4 +1,5 @@
 import "../../src/ts/polyfill";
+import { showNativeHarness } from "../nativeAppLock";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
 import { nativeDataPath } from "../../src/ts/storage/nativePaths";
@@ -627,6 +628,7 @@ async function verifySyntheticRoot() {
 }
 
 const entryCompletion = verifySyntheticRoot()
+  .then(showNativeHarness)
   .then(() => deviceMaintenanceBeforeBootstrap())
   .then(resume)
   .catch(fail);
@@ -648,18 +650,18 @@ const entryCompletion = verifySyntheticRoot()
 let legacyMeasurement: Record<string, unknown> = { phase: 'idle' };
 (globalThis as typeof globalThis & { __legacyRestoreMeasurement?: {
   state(): Record<string, unknown>;
-  start(megabytes: 100 | 300 | 600, encoding: 'raw' | 'gzip'): Promise<void>;
+  start(megabytes: 100 | 300 | 600, encoding: 'raw' | 'gzip', binaryBytes?: number): Promise<void>;
 } }).__legacyRestoreMeasurement = {
   state: () => legacyMeasurement,
-  async start(megabytes, encoding) {
+  async start(megabytes, encoding, binaryBytes = 0) {
     if (legacyMeasurement.phase !== 'idle') throw new Error('Restart the synthetic harness for each memory case');
-    legacyMeasurement = { phase: 'preparing', megabytes, encoding };
+    legacyMeasurement = { phase: 'preparing', megabytes, encoding, binaryBytes };
     try {
       await entryCompletion;
       if (control.failure || control.stage !== 'ready') throw new Error('Fresh synthetic harness required');
       const { runLegacyRestoreMeasurement } = await import('../legacy-restore/run');
       await runLegacyRestoreMeasurement({
-        megabytes, encoding,
+        megabytes, encoding, binaryBytes,
         assertIsolatedHarness: async () => {
           const { getIdentifier } = await import('@tauri-apps/api/app');
           if (await getIdentifier() !== 'io.github.rsyumi.risunest' || document.title !== 'RisuNest synthetic device backup smoke')
@@ -672,3 +674,10 @@ let legacyMeasurement: Record<string, unknown> = { phase: 'idle' };
     }
   },
 };
+
+
+import { androidPublicationProbe } from './android-publication-probe';
+(globalThis as typeof globalThis & { __androidPublicationProbe?: ReturnType<typeof androidPublicationProbe> }).__androidPublicationProbe = androidPublicationProbe({
+  ready: () => entryCompletion,
+  runtime: syntheticRuntime,
+});

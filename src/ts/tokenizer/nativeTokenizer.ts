@@ -62,7 +62,11 @@ export function resolveNativeTokenizerRoute(
     }
 }
 
+// A high surrogate without its low half, or a low surrogate without its high half.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:[^\ud800-\udbff]|^)[\udc00-\udfff]/
+
 function normalizeUtf16(text: string): string {
+    if (!LONE_SURROGATE.test(text)) return text
     let normalized = ''
     for (let index = 0; index < text.length; index++) {
         const codeUnit = text.charCodeAt(index)

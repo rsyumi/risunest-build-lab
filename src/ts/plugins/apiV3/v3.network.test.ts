@@ -102,6 +102,7 @@ describe('Plugin v3 runtime information', () => {
                         apiVersion: '3.0',
                         platform: 'web',
                         saveMethod: 'local',
+                        structuredLocalPluginStorage: false,
                     },
                 })
                 response.result.app.id = 'modified'

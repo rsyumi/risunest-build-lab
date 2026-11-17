@@ -1,20 +1,23 @@
+import { imageAliases, imageFormatFromBytes, stripImageExtension } from './media/imageFormats'
 import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
+import { materializeAuthorNote } from './authorNotePresets'
 import DOMPurify from 'dompurify'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
 import { alertAddCharacter, alertCheckboxConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
 import { language } from "../lang";
 import { isArchivedCharacter } from "./storage/workingSetCatalog";
+import { fillLorebookText } from "./storage/lorebookText";
 import { restoreArchivedCharacterWithConfirmation } from "./storage/characterArchive";
-import { checkNullish, findCharacterbyId, getUserName, selectMultipleFile, selectSingleFile } from "./util";
+import { checkNullish, findCharacterbyId, getUserName, selectMultipleFile, selectSingleFile, mapSelectedFiles, fileAccept } from "./util";
 import { v4 as uuidv4, v4 } from 'uuid';
-import { getImageType } from "./media";
 import { DBState, MobileGUIStack, OpenRealmStore, selectedCharID } from "./stores.svelte";
 import { AppendableBuffer, changeChatTo, checkCharOrder, createChatCopyName, downloadFile, getFileSrc } from "./globalApi.svelte";
 import { updateInlayScreen } from "./process/inlayScreen";
 import { parseMarkdownSafe } from "./parser/parser.svelte";
 import { translateHTML } from "./translator/translator";
+import { beginMobileBackgroundTask, type MobileBackgroundTask } from "./mobileBackgroundTask";
 import { doingChat } from "./process/index.svelte";
 import { importCharacter } from "./characterCards";
 import { PngChunk } from "./pngChunk";
@@ -40,8 +43,10 @@ import { safeStructuredClone } from './polyfill'
 import { isConversationSummaryStub } from './storage/conversationResidency'
 import { isMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
 import { open } from './storage/fileSelection'
-import { readFile } from '@tauri-apps/plugin-fs'
+import { readFile, open as openFile } from '@tauri-apps/plugin-fs'
 import { isTauriDesktop } from './platform'
+import { getPersistentDataStore } from './storage/persistentDataStoreFactory'
+import type { CharacterDetail } from './storage/persistentDataStore'
 import {
     archiveCurrentCharacterImage,
     selectCharacterImageFile,
@@ -53,6 +58,7 @@ import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { beginNavigationActivity } from './ui/navigationActivity'
 import { yieldToUi } from './ui/yieldToUi'
 import { estimateCharacterBytes } from './storage/conversationInsertPages'
+import { forgetDisplayRecovery } from './displayRecovery.svelte'
 
 export async function commitDetachedCharacter(
     character: character,
@@ -110,7 +116,7 @@ export async function getCharImage(loc:string, type:'plain'|'css'|'contain'|'lgc
     }
 }
 
-export async function selectCharImg(charIndex:number) {
+export async function selectCharImg(charIndex:number, check?: (character: CharacterDetail) => void) {
     const characterId = DBState.db.characters[charIndex]?.chaId
     if (!characterId) return
     await selectCharacterImageFile(characterId, {
@@ -119,21 +125,42 @@ export async function selectCharImg(charIndex:number) {
             const selected = await open({
                 multiple: false,
                 directory: false,
-                filters: [{
-                    name: 'png, webp, gif, jpg, jpeg',
-                    extensions: ['png', 'webp', 'gif', 'jpg', 'jpeg'],
+                filters: fileAccept(imageAliases) === '*' ? undefined : [{
+                    name: imageAliases.join(', '),
+                    extensions: imageAliases,
                 }],
             })
             return typeof selected === 'string' ? selected : null
         },
         readDesktopPath: readFile,
-        chooseLegacyFile: async () => selectSingleFile(['png', 'webp', 'gif', 'jpg', 'jpeg']),
-        nativeImport: input => runContentImport(input.displayName, {}, options => importNativeJpegAsset(input, options)),
+        onImageError: message => { void alertError(message) },
+        readDesktopHeader: async path => {
+            const file = await openFile(path, { read: true })
+            try {
+                const header = new Uint8Array(3)
+                let offset = 0
+                while (offset < header.length) {
+                    const read = await file.read(header.subarray(offset))
+                    if (!read) break
+                    offset += read
+                }
+                return header.subarray(0, offset)
+            } finally { await file.close() }
+        },
+        chooseLegacyFile: async () => selectSingleFile(imageAliases, { image: true }),
+        nativeImport: input => runContentImport(input.displayName, {}, options => importNativeJpegAsset(input, {
+            ...options,
+            beforeStart: check ? async () => {
+                const current = await getPersistentDataStore().readCharacter(characterId)
+                if (!current) throw new Error('Character is unavailable')
+                check(current.value)
+            } : undefined,
+        })),
         legacyImport: async (img) => {
-            const type = getImageType(img)
+            const type = imageFormatFromBytes(img)?.ext
             const pngExif: Record<string, string> = {}
             try {
-                if(type === 'PNG'){
+                if(type === 'png'){
                     const gen = PngChunk.readGenerator(img)
                     const allowedChunk = [
                         'parameters', 'Comment', 'Title', 'Description', 'Author', 'Software', 'Source', 'Disclaimer', 'Warning', 'Copyright',
@@ -158,6 +185,7 @@ export async function selectCharImg(charIndex:number) {
             }
             const imgp = await saveImage(img)
             await mutatePersistentCharacterDetail(characterId, 'select-character-image', ({ character }) => {
+                check?.(character)
                 archiveCurrentCharacterImage(character)
                 character.image = imgp
                 if (Object.keys(pngExif).length > 0) {
@@ -196,13 +224,15 @@ export async function addCharEmotion(charId:number) {
     if (!characterId || get(addingEmotion)) return
     addingEmotion.set(true)
     try {
-        const selected = await selectMultipleFile(['png', 'webp', 'gif'])
+        const failures: string[] = []
+        const selected = await selectMultipleFile(imageAliases, { image: true, failures })
         if (!selected?.length) return
         const images: [string, string][] = []
-        for (const f of selected) {
+        await mapSelectedFiles(selected, async f => {
             const imgp = await saveImage(f.data)
-            images.push([f.name.replace('.png', '').replace('.webp', ''), imgp])
-        }
+            images.push([stripImageExtension(f.name), imgp])
+        }, failures)
+        if (!images.length) return
         await mutatePersistentCharacterDetail(characterId, 'add-character-emotions', ({ character }) => {
             character.emotionImages.push(...images)
         })
@@ -247,6 +277,13 @@ function hideNameInExportedHtml(html: string, name: string) {
 }
 
 export async function exportChat(page:number){
+    // Translating every message can take long, so it holds the background task until the save step.
+    let translation: MobileBackgroundTask | Promise<MobileBackgroundTask> | undefined
+    const endTranslation = async () => {
+        const task = await translation
+        translation = undefined
+        await task?.dispose()
+    }
     try {
 
         const mode = await alertSelect(['Export as JSON', "Export as TXT", "Export as HTML File", "Export as HTML Embed"])
@@ -264,6 +301,7 @@ export async function exportChat(page:number){
             v = parseMarkdownSafe(v)
 
             if(doTranslate){
+                translation ??= beginMobileBackgroundTask('export', undefined, true)
                 // Translation can return new markup, so it gets the same filter as parseMarkdownSafe.
                 v = DOMPurify.sanitize(await translateHTML(v, false, '', -1), exportedChatSanitizeConfig)
             }
@@ -283,7 +321,7 @@ export async function exportChat(page:number){
             const stringl = Buffer.from(JSON.stringify({
                 type: 'risuChat',
                 ver: 2,
-                data: chat,
+                data: materializeAuthorNote(db.authorNotePresets, chat),
                 folders: folders
             }), 'utf-8')
     
@@ -359,6 +397,7 @@ export async function exportChat(page:number){
             `
 
 
+            await endTranslation()
             await downloadFile(`${char.name}_${date}_chat`.replace(/[<>:"/\\|?*\.\,]/g, "") + '.html', Buffer.from(doc, 'utf-8'))
         }
         else if(mode === '3'){
@@ -390,6 +429,7 @@ export async function exportChat(page:number){
                 <p>Chat from RisuNest</p>
             `
 
+            await endTranslation()
             offerHtmlClipboardExport(template, `${char.name}_${date}_chat`.replace(/[<>:"/\\|?*\.\,]/g, "") + '.html', {
                 present: value => alertStore.set(value),
                 download: downloadFile,
@@ -419,6 +459,8 @@ export async function exportChat(page:number){
         alertNormal(language.successExport)
     } catch (error) {
         alertError(error)
+    } finally {
+        await endTranslation()
     }
 }
 
@@ -596,7 +638,7 @@ export async function exportAllChats() {
             : null
         if (!char) throw new Error('Character was not found')
         const date = new Date().toISOString().replace(/[:.]/g, "-")
-        const allChats = char.chats
+        const allChats = char.chats.map((chat) => materializeAuthorNote(db.authorNotePresets, chat))
         const allFolders = char.chatFolders
         const stringl = Buffer.from(JSON.stringify({
             type: 'risuAllChats',
@@ -721,6 +763,7 @@ export function characterFormatUpdate(indexOrCharacter:number|character, arg:{
 }
 
 export function updateLorebooks(book:loreBook[]){
+    fillLorebookText(book)
     return book.map((v) => {
         v.bookVersion ??= 1
         if(v.bookVersion >= 2){
@@ -923,6 +966,7 @@ export async function removeChar(identifier:string|number,name:string, type:'nor
         return
     }
     if (type !== 'normal') {
+        void forgetDisplayRecovery((target) => target.characterId === targetId)
         await clearSelectionAfterCommittedReplacement()
     } else {
         clearSelectionAfterCommittedDetail()
@@ -1197,11 +1241,15 @@ export async function removeChat(character: character, chatId: string): Promise<
         if (!survivingId) return false
         if (!(await changeChatTo(survivingId)) && !(await changeChatTo(survivingId))) return false
     }
-    return editSelectedChatList(character.chaId, 'remove-chat', (current) => {
+    const removed = await editSelectedChatList(character.chaId, 'remove-chat', (current) => {
         const removeIndex = current.chats.findIndex((chat) => chat.id === chatId)
         if (removeIndex === -1 || removeIndex === current.chatPage) return false
         current.chats.splice(removeIndex, 1)
         current.chats = current.chats
         return null
     })
+    if (removed) {
+        void forgetDisplayRecovery((target) => target.characterId === character.chaId && target.conversationId === chatId)
+    }
+    return removed
 }

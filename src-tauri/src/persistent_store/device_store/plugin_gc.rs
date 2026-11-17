@@ -3,7 +3,8 @@ use risunest_sync_wire::unit::{UnitKey, UnitValue};
 use rusqlite::{Connection, OpenFlags};
 use std::{path::PathBuf, time::Duration};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct PluginGcFence {
     instance_id: String,
     revision: i64,

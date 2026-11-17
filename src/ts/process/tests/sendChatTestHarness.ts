@@ -325,6 +325,9 @@ export function persistentRuntimeModule(overrides: Overrides<PersistentRuntimeMo
         captureWindowedConversationMutationController: () => null,
         acquireCompleteConversation: vi.fn(),
         flushPendingData: vi.fn(async () => undefined),
+        flushPendingDataLocallyForCheckpoint: vi.fn(async () => true),
+        capturesImmutableCharacters: () => true,
+        pendingConversationMutationDiagnostics: () => ({ pendingEvents: 0 }),
         getActiveConversationSession: () => null,
         peekActiveConversationSession: () => null,
         invalidateActiveConversationSession: vi.fn(),
@@ -358,4 +361,13 @@ export async function copyingDatabasePreparationModule(importOriginal: () => Pro
         prepareDatabaseForPersistence: async (input: Parameters<DatabasePreparationModule['prepareDatabaseForPersistence']>[0]) =>
             structuredClone(input),
     } satisfies DatabasePreparationModule
+}
+
+export function generationDiagnosticsModule(
+    actual: typeof import('../../generationDiagnostics'),
+    invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>,
+) {
+    const diagnostics = actual.createGenerationDiagnostics({ enabled: true, invoke })
+    diagnostics.startDocument()
+    return { ...actual, generationDiagnostics: diagnostics } satisfies typeof import('../../generationDiagnostics')
 }

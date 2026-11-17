@@ -277,8 +277,12 @@ pub(crate) fn external_storage_get_job<R: Runtime>(app: AppHandle<R>, job_id: St
     })())
 }
 fn apply_job_connection_status(connection: &mut Value, jobs: &[Value]) {
-    // State rows are newest first. A later successful retry clears an older error.
-    let Some(job) = jobs.iter().find(|job| job["connectionId"] == connection["id"]) else { return; };
+    // State rows are newest first, and each connection's newest job stands, so a later successful retry clears an
+    // older error. An error a job hit reading through another connection marks that connection instead of its own.
+    let mut newest = std::collections::BTreeSet::new();
+    let Some(job) = jobs.iter()
+        .filter(|job| newest.insert(job["connectionId"].to_string()))
+        .find(|job| job_fixed_on(job) == &connection["id"]) else { return; };
     if matches!(job["state"].as_str(), Some("succeeded" | "cancelled")) { return; }
     let verified = connection["lastVerifiedAtMs"].as_str().and_then(|value| value.parse::<u64>().ok());
     let failed = job["updatedAtMs"].as_str().and_then(|value| value.parse::<u64>().ok());
@@ -293,6 +297,11 @@ fn apply_job_connection_status(connection: &mut Value, jobs: &[Value]) {
     };
     connection["status"] = json!(status);
     connection["lastError"] = error.clone();
+}
+/// The connection whose sign-in, key or address clears a job's error.
+fn job_fixed_on(job: &Value) -> &Value {
+    let named = &job["error"]["connectionId"];
+    if named.is_string() { named } else { &job["connectionId"] }
 }
 
 fn job_summary(root: &std::path::Path, mut job: DurableJob) -> Value {
@@ -525,9 +534,11 @@ pub(crate) async fn external_storage_start_job(
             return Ok(job_summary(&root, store.read(&pending.id)?));
         }
         wait_for_settled_claim(&app, &request.connection_id).await?;
-        let identity = native_store(&app)?
-            .external_identity()
-            .map_err(local_error)?;
+        let pds = native_store(&app)?;
+        let identity = pds.external_identity().map_err(local_error)?;
+        if let Some(covered) = covering_backup(&store, &pds, &request, &identity)? {
+            return Ok(job_summary(&root, covered));
+        }
         let mut job = DurableJob::new(request, now_ms(), identity);
         if let Some(id) = job_id {
             job = job.with_restore_id(id)?;
@@ -644,6 +655,35 @@ fn completed_job_result(pds: &mut PersistentStore, job: &DurableJob) -> Result<O
         ));
     }
     Ok(None)
+}
+
+/// The connection's last successful backup, for an automatic backup of a revision that backup
+/// already holds. Capturing the same library again would only hold up the file operations
+/// that wait for it.
+fn covering_backup(
+    store: &JobStore,
+    pds: &PersistentStore,
+    request: &StartJobRequest,
+    current: &persistent_store::sync_selection::CaptureIdentity,
+) -> Result<Option<DurableJob>> {
+    if request.kind != JobKind::Backup || request.reason.as_deref() != Some("automatic") {
+        return Ok(None);
+    }
+    let Some(target) = request.target_revision.as_deref().and_then(|value| value.parse::<i64>().ok()) else {
+        return Ok(None);
+    };
+    let Some(last) = store.list()?.into_iter().find(|job| job.request.connection_id == request.connection_id
+        && job.request.kind == JobKind::Backup && job.summary["state"] == "succeeded") else {
+        return Ok(None);
+    };
+    let Some((_, captured)) = pds.external_backup_result(&last.id).map_err(local_error)? else {
+        return Ok(None);
+    };
+    let covered = captured.store_id == current.store_id
+        && captured.library_epoch == current.library_epoch
+        && captured.generation == current.generation
+        && captured.revision >= target;
+    Ok(covered.then_some(last))
 }
 
 pub(crate) fn require_admitted_library(
@@ -1002,6 +1042,8 @@ pub(crate) fn error_dto(error: &ProviderError) -> Value {
         ErrorKind::LocationOccupied => ("Choose an empty repository folder.", "check-endpoint", false),
         ErrorKind::RepositoryMismatch => ("This location holds a different repository.", "check-endpoint", false),
         ErrorKind::RecoveryKeyMismatch => ("The recovery key does not match this repository.", "unlock-key", false),
+        ErrorKind::LibraryFormatSwitchRequired => ("Switch the library data format to continue syncing.", "none", false),
+        ErrorKind::AppUpdateRequired => ("Update the app to continue syncing.", "none", false),
         ErrorKind::LocalStorageFull => ("This device has insufficient space.", "free-space", false),
         ErrorKind::LocalPermissionDenied => ("Allow access to the local files and retry.", "retry", false),
         ErrorKind::LocalFailure => ("This device could not complete the operation.", "retry", true),
@@ -1029,6 +1071,7 @@ pub(crate) fn error_dto(error: &ProviderError) -> Value {
     if let Some(detail) = &error.cause.0 { value["detail"] = json!(detail); }
     if let Some(code) = &error.oauth_error { value["oauthError"] = json!(code); }
     if let Some(description) = &error.oauth_error_description { value["oauthErrorDescription"] = json!(description); }
+    if let Some(connection) = &error.connection_id { value["connectionId"] = json!(connection); }
     if let Some(at) = error.retry_at_ms {
         value["retryAtMs"] = json!(at.to_string());
     }
@@ -1293,6 +1336,7 @@ pub(crate) async fn run_connected_cleanup(
         now_ms: started,
         unfinished,
         cache_root: &cache_root,
+        reads: Default::default(),
     };
     let documents = super::cleanup::ConnectedDocuments { connected, cancel, scratch: &scratch };
     let connection_time = |not_before| {
@@ -1315,8 +1359,8 @@ pub(crate) async fn run_connected_cleanup(
         }
         let fresh_after=std::time::Instant::now();
         connected.provider.list_objects(&connected.handle,super::contract::Collection::Segments,None,1,cancel).await?;
-        let sample=connected.dependencies.requests.clock_sample_after(&connected.handle.account,fresh_after)?
-            .ok_or_else(||ProviderError::new(ErrorKind::ClockSkew))?;
+        let sample=connected.dependencies.requests.require_clock_sample_after(&connected.handle.account,fresh_after)
+            .map_err(super::clock::after_refresh)?;
         let mut selected=super::lww_engine::ExternalLwwEngine {
             provider:selected_connection.provider,repository:selected_connection.handle,
             library:connected.stored.descriptor.repository_id.clone(),root_key:connected.root_key.clone(),
@@ -1601,7 +1645,7 @@ async fn run_backup(
             .catalog
             .content_fingerprint(&risunest_external_storage_format::format::library_fingerprint_domain())
             .map_err(local_error)?;
-        let sections = capture.catalog.backup_sections().map_err(local_error)?;
+        let sections = capture.catalog.backup_sections(&self::root(&worker_app)?).map_err(local_error)?;
         Ok((capture, fingerprint, sections))
     })
     .await
@@ -1868,6 +1912,18 @@ mod tests {
         apply_job_connection_status(&mut repaired,&jobs);
         assert_eq!(repaired["status"],"ready");
         assert!(repaired["lastError"].is_null());
+
+        // A job that failed reading through another connection marks that connection, not its own, until its own
+        // newer job succeeds.
+        let refused=error_dto(&ProviderError{connection_id:Some("x".into()),..ProviderError::new(ErrorKind::ReauthRequired)});
+        let failed=json!({"connectionId":"c","state":"waiting","updatedAtMs":"20","error":refused});
+        let marked=|jobs:&[Value]| ["x","c"].map(|id| {
+            let mut connection=json!({"id":id,"status":"ready","lastVerifiedAtMs":"10"});
+            apply_job_connection_status(&mut connection,jobs);
+            connection["status"].as_str().unwrap().to_owned()
+        });
+        assert_eq!(marked(std::slice::from_ref(&failed)),["reauth-required","ready"]);
+        assert_eq!(marked(&[json!({"connectionId":"c","state":"succeeded","updatedAtMs":"30"}),failed]),["ready","ready"]);
     }
 
     #[test]
@@ -1961,6 +2017,46 @@ mod tests {
             store_id: "store".into(), library_epoch: "library".into(), generation: "generation".into(),
             selection_epoch: "selection".into(), revision: 1,
         })
+    }
+
+    /// An automatic backup of a revision the connection's last backup already holds reports that
+    /// backup instead of capturing the library again.
+    #[test]
+    fn an_automatic_backup_of_a_backed_up_revision_reports_the_last_backup() {
+        use crate::persistent_store::{RootMutation, WorkingSetCommit};
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut pds = PersistentStore::open(root.path()).unwrap();
+        let captured = pds.external_identity().unwrap();
+        let request = |reason: &str, revision: i64| -> StartJobRequest { serde_json::from_value(json!({
+            "connectionId":"connection", "kind":"backup", "reason":reason, "targetRevision":revision.to_string()
+        })).unwrap() };
+        let mut finished = DurableJob::new(request("automatic", captured.revision), 1, captured.clone());
+        finished.summary["state"] = json!("succeeded");
+        store.put(&finished).unwrap();
+        // A finished job that left no backup point holds nothing.
+        assert!(covering_backup(&store, &pds, &request("automatic", captured.revision), &captured).unwrap().is_none());
+        let mut db = rusqlite::Connection::open(root.path().join("persistent/persistent.sqlite")).unwrap();
+        let tx = db.transaction().unwrap();
+        persistent_store::external_storage_state::register_capture(
+            &tx, "capture", &captured, "scope", "logical-v1", "", &"a".repeat(64), "connection",
+        ).unwrap();
+        tx.commit().unwrap();
+        drop(db);
+        pds.external_prepare_backup(&finished.id, "connection", "format-repository", "capture", "point").unwrap();
+        pds.external_finish_backup(&finished.id, "point", "snapshot", "observation").unwrap();
+        let current = pds.external_identity().unwrap();
+        let covered = covering_backup(&store, &pds, &request("automatic", current.revision), &current).unwrap();
+        assert_eq!(covered.map(|job| job.id), Some(finished.id.clone()));
+        assert!(covering_backup(&store, &pds, &request("manual", current.revision), &current).unwrap().is_none());
+        pds.commit(&WorkingSetCommit {
+            expected_revision: pds.revision().unwrap(),
+            root_mutations: Some(vec![RootMutation::Set { key: "synthetic".into(), value: json!(1) }]),
+            ..Default::default()
+        }).unwrap();
+        let changed = pds.external_identity().unwrap();
+        assert!(changed.revision > current.revision);
+        assert!(covering_backup(&store, &pds, &request("automatic", changed.revision), &changed).unwrap().is_none());
     }
 
     /// Invariant 23. An empty journal must not overwrite what preparation

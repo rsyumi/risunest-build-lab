@@ -1,6 +1,7 @@
 use super::{
     cache::Cache,
-    client::{response_error, ServerClient, ServerConfig},
+    client::{response_code, response_error, RequestAttempt, ServerClient, ServerConfig},
+    library_format::{LibraryFormat, LEVEL},
     progress::Step,
     transfer::Transfer,
     Result, SyncError,
@@ -15,6 +16,7 @@ use crate::persistent_store::{
 };
 use risunest_sync_wire::{
     canonical,
+    library_format::{self, EMPTY_LIBRARY, PRECONDITION_HEADER},
     lww::{
         AckRequest, CancelOperationRequest, ChangesPage, OperationReceipt, PushReceipt,
         PushRequest, StatePage, StatePin, TimeSample, UnitChange,
@@ -53,11 +55,18 @@ fn receive_page_more() -> bool { true }
 
 pub(crate) struct OperationLog(pub(crate) Connection);
 impl OperationLog {
+    pub(crate) fn path(root: &Path) -> std::path::PathBuf {
+        root.join("server-sync/lww-operations.sqlite")
+    }
     pub(crate) fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root.join("server-sync"))?;
-        let db = crate::sqlite_open::open(root.join("server-sync/lww-operations.sqlite"))?;
+        let db = crate::sqlite_open::open(Self::path(root))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS publications(id TEXT PRIMARY KEY, digest TEXT NOT NULL, body BLOB NOT NULL, intent TEXT NOT NULL, receipt TEXT,acknowledged INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS pending_publications ON publications(id) WHERE receipt IS NULL; CREATE INDEX IF NOT EXISTS unacknowledged_publications ON publications(id) WHERE acknowledged=0;")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS bootstrap(authority TEXT PRIMARY KEY,pin TEXT NOT NULL,after_key TEXT,cursor TEXT NOT NULL); CREATE TABLE IF NOT EXISTS receive_pages(authority TEXT PRIMARY KEY,body TEXT NOT NULL,next_key TEXT,bootstrap INTEGER NOT NULL,done INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS configurations(slot TEXT PRIMARY KEY,config TEXT NOT NULL); CREATE TABLE IF NOT EXISTS bindings(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS claims(id TEXT PRIMARY KEY,body TEXT NOT NULL);")?;
+        // Units of a state pin that finished pages received up to after_key, so a bootstrap resumed
+        // in a later session still reports how much of the pin is left. The count is kept from the
+        // pin's first page; a bootstrap an earlier version began has none.
+        db.execute_batch("CREATE TABLE IF NOT EXISTS bootstrap_received(pin TEXT PRIMARY KEY,after_key TEXT NOT NULL,units INTEGER NOT NULL);")?;
         Ok(Self(db))
     }
     pub(crate) fn prepare(&self, publication: &Publication) -> Result<Vec<u8>> {
@@ -202,6 +211,14 @@ impl OperationLog {
         Ok(())
     }
 }
+/// Drops the received counts of pins no bootstrap reads any more.
+fn forget_received_counts(log: &Connection) -> Result<()> {
+    log.execute(
+        "DELETE FROM bootstrap_received WHERE pin NOT IN (SELECT json_extract(pin,'$.pinId') FROM bootstrap WHERE json_valid(pin))",
+        [],
+    )?;
+    Ok(())
+}
 fn now_ms() -> Result<u64> {
     u64::try_from(
         SystemTime::now()
@@ -215,7 +232,7 @@ fn now_ms() -> Result<u64> {
 fn observe_dependency_purposes(key: &risunest_sync_wire::unit::UnitKey, hashes: &[String]) {
     use crate::asset_repository::body_io::{register_object_purpose, BodyPurpose};
     let purpose = match key.components()[0].as_str() {
-        "messages" => BodyPurpose::Control,
+        "messages" | "plugin-local" => BodyPurpose::Control,
         "archive" => BodyPurpose::Asset,
         _ => return,
     };
@@ -249,6 +266,22 @@ fn observe_descriptor_purposes(
 type ClockKey = (std::path::PathBuf, String, String);
 static CLOCKS: std::sync::Mutex<std::collections::BTreeMap<ClockKey, (Instant, AdmittedClock)>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Libraries seen at this client's format level, by address and library,
+/// until a reply reports another level or comes from a server without levels.
+static CURRENT_FORMAT: std::sync::Mutex<BTreeSet<(String, String)>> = std::sync::Mutex::new(BTreeSet::new());
+/// Forgets a library seen at this client's level when a reply reports another
+/// level, or succeeds without the level headers, so the next check reads it again.
+pub(crate) fn observe_library_format(endpoint: &str, library_id: &str, status: u16, format: Option<LibraryFormat>) {
+    let changed = match format {
+        Some(format) => format.level != LEVEL,
+        None => (200..300).contains(&status),
+    };
+    if changed {
+        if let Ok(mut current) = CURRENT_FORMAT.lock() {
+            current.remove(&(endpoint.to_owned(), library_id.to_owned()));
+        }
+    }
+}
 pub(crate) struct LwwClient {
     pub client: ServerClient,
     pub log: OperationLog,
@@ -361,6 +394,76 @@ impl LwwClient {
             clocks.insert(self.clock_key(), (sent, admitted));
         }
         Ok(upper.into())
+    }
+    fn format_key(&self) -> (String, String) {
+        let config = self.client.config();
+        (config.endpoint, config.library_id)
+    }
+    /// Fails unless the library is at this client's format level. An empty
+    /// library is switched to it, and with `switch` any library below it is.
+    pub(crate) fn require_library_format(&self, store: &mut PersistentStore, switch: bool) -> Result<()> {
+        if !switch && CURRENT_FORMAT.lock().is_ok_and(|current| current.contains(&self.format_key())) {
+            return Ok(());
+        }
+        let (head, format) = self.client.head_with_format()?;
+        if let Some(format) = format {
+            if format.level < LEVEL && format.max >= LEVEL && (switch || head.seq.as_str() == "0") {
+                return self.push_library_format(store, !switch);
+            }
+        }
+        self.accept_library_format(format)
+    }
+    /// The format check of a bound device, outside a send or receive.
+    pub(crate) fn check_library_format(&self, store: &mut PersistentStore, header: &Header, switch: bool) -> Result<()> {
+        self.check()?;
+        if store.lww_binding_authority()? != header.binding_authority {
+            return Err(SyncError::new("binding-authority-changed", 409));
+        }
+        self.require_library_format(store, switch)
+    }
+    fn accept_library_format(&self, format: Option<LibraryFormat>) -> Result<()> {
+        let code = match format {
+            None => "sync-server-update-required",
+            Some(format) if format.level == LEVEL => {
+                if let Ok(mut current) = CURRENT_FORMAT.lock() {
+                    current.insert(self.format_key());
+                }
+                return Ok(());
+            }
+            Some(format) if format.level > LEVEL => "app-update-required",
+            Some(format) if format.max < LEVEL => "sync-server-update-required",
+            Some(_) => "library-format-switch-required",
+        };
+        Err(SyncError::new(code, 409))
+    }
+    /// Pushes this client's level alone, with `empty_only` only into a library
+    /// that holds nothing else. A push whose changes all lose still succeeds,
+    /// so only the level its reply reports confirms the switch.
+    fn push_library_format(&self, store: &mut PersistentStore, empty_only: bool) -> Result<()> {
+        let stamp = store.lww_reserve_stamp()?;
+        let request = PushRequest {
+            library_id: self.client.config().library_id,
+            writer_id: stamp.writer_id.clone(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            changes: vec![UnitChange { key: library_format::key(), stamp, value: library_format::value(LEVEL)? }],
+        };
+        let headers = if empty_only { vec![(PRECONDITION_HEADER, EMPTY_LIBRARY.to_owned())] } else { Vec::new() };
+        match self.client.request_ambiguous_mutation(
+            reqwest::Method::POST,
+            "push",
+            Some(canonical::encode(&request)?),
+            &headers,
+            MAX_METADATA_BYTES,
+        )? {
+            RequestAttempt::Response(reply)
+                if (200..300).contains(&reply.status)
+                    || (empty_only && response_code(&reply).as_deref() == Some("library-not-empty")) =>
+            {
+                self.accept_library_format(reply.library_format)
+            }
+            RequestAttempt::Response(reply) => Err(response_error(reply)),
+            RequestAttempt::Failure { error, .. } => Err(error),
+        }
     }
     /// The client for the registration that sent a publication. The current
     /// address asks for it when that registration is the one in use.
@@ -555,6 +658,7 @@ impl LwwClient {
         if entries.is_empty() {
             return Ok(None);
         }
+        self.require_library_format(store, false)?;
         let mut admitted = self.admission()?;
         if entries
             .iter()
@@ -714,19 +818,25 @@ impl LwwClient {
             &[],
             MAX_METADATA_BYTES,
         );
+        // A cancelled publication fails as its request did, so a busy or
+        // unreachable server stays retryable and a refusal does not.
         let failure = match &reply {
             Ok(super::client::RequestAttempt::Response(reply))
                 if reply.status == 413 && publication.request.changes.len() == 1 =>
             {
-                Some("unit-too-large".into())
+                Some(SyncError::new("unit-too-large", 413))
             }
             Ok(super::client::RequestAttempt::Response(reply))
                 if !(200..300).contains(&reply.status) =>
             {
-                Some(
+                Some(SyncError::new(
                     super::client::response_code(reply)
-                        .unwrap_or_else(|| "server-unreachable".into()),
-                )
+                        .unwrap_or_else(|| "server-response-error".into()),
+                    reply.status,
+                ))
+            }
+            Ok(super::client::RequestAttempt::Failure { error, .. }) | Err(error) => {
+                Some(SyncError::new(error.code.clone(), error.status))
             }
             _ => None,
         };
@@ -748,12 +858,13 @@ impl LwwClient {
                 lane.items_done(publication.entries.len());
                 Ok(Some(receipt))
             }
+            OperationReceipt::Rejected { error, .. } if error == "operation-cancelled" => {
+                Err(failure.unwrap_or_else(|| SyncError::new("server-unreachable", 503)))
+            }
             OperationReceipt::Rejected { error, .. } => Err(SyncError::new(
                 if error == "clock-skew" {
                     self.forget_clock();
                     error
-                } else if error == "operation-cancelled" {
-                    failure.unwrap_or_else(|| "server-unreachable".into())
                 } else {
                     error
                 },
@@ -980,6 +1091,7 @@ impl LwwClient {
             self.prepare_archive_bodies(store, &page.page.changes)?;
             return Ok(page);
         }
+        self.require_library_format(store, false)?;
         self.client.lane().step(Step::Listing);
         let upper = self.admission()?;
         let cursor = store
@@ -1045,8 +1157,8 @@ impl LwwClient {
             let pin: StatePin = serde_json::from_str(&pin)
                 .map_err(|_| SyncError::new("state-pin-integrity", 409))?;
             let mut query = vec![("pin", pin.pin_id.clone()), ("limit", "256".into())];
-            if let Some(after) = after {
-                query.push(("afterKey", after));
+            if let Some(after) = &after {
+                query.push(("afterKey", after.clone()));
             }
             let reply = self.client.request(
                 reqwest::Method::GET,
@@ -1062,6 +1174,7 @@ impl LwwClient {
                 self.log
                     .0
                     .execute("DELETE FROM bootstrap WHERE authority=?1", [&authority])?;
+                forget_received_counts(&self.log.0)?;
                 // A pin kept from an earlier page is replaced once; one made by this
                 // call that already expired is reported instead of pinning again.
                 if existing_pin.is_none() {
@@ -1076,10 +1189,37 @@ impl LwwClient {
             if page.pin_id != pin.pin_id || page.start_seq != pin.start_seq {
                 return Err(SyncError::new("invalid-state-page", 502));
             }
-            // Reading the whole state has no known size, so its pages count as they arrive.
-            self.client.lane().backlog(page.items.len() as u64, 0);
             next_key = page.next_key.map(|key| key.as_str().to_owned());
             done = next_key.is_none();
+            // The pin holds a known number of units; finished pages, including those of an
+            // earlier session, have received some of them.
+            let received: Option<i64> = match &after {
+                None => Some(0),
+                Some(after) => self
+                    .log
+                    .0
+                    .query_row(
+                        "SELECT units FROM bootstrap_received WHERE pin=?1 AND after_key=?2",
+                        params![pin.pin_id, after],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+            };
+            let items = page.items.len() as u64;
+            match received {
+                Some(received) => {
+                    let left = if done {
+                        0
+                    } else {
+                        pin.unit_count.0.saturating_sub(u64::try_from(received).unwrap_or(0).saturating_add(items))
+                    };
+                    self.client.lane().backlog(items, left);
+                }
+                // A bootstrap without a kept count, as one an earlier version began, received an
+                // unknown part of the pin; its pages report no known work rather than a total
+                // they never reach.
+                None => self.client.lane().backlog(0, 0),
+            }
             more = !done;
             receive_frontier = done.then_some(pin.start_seq);
             (
@@ -1274,7 +1414,21 @@ impl LwwClient {
         let tx = self.log.0.unchecked_transaction()?;
         if boot && done {
             tx.execute("DELETE FROM bootstrap WHERE authority=?1", [&authority])?;
+            forget_received_counts(&tx)?;
         } else if boot {
+            // A count kept since the pin's first page moves on with after_key; a pin without one
+            // stays without one.
+            let units = page.changes.len() as i64;
+            tx.execute(
+                "UPDATE bootstrap_received SET after_key=?2,units=units+?3
+                 WHERE (pin,after_key)=(SELECT json_extract(pin,'$.pinId'),after_key FROM bootstrap WHERE authority=?1 AND json_valid(pin))",
+                params![authority, next, units],
+            )?;
+            tx.execute(
+                "INSERT INTO bootstrap_received SELECT json_extract(pin,'$.pinId'),?2,?3 FROM bootstrap WHERE authority=?1 AND json_valid(pin) AND after_key IS NULL
+                 ON CONFLICT(pin) DO UPDATE SET after_key=excluded.after_key,units=excluded.units",
+                params![authority, next, units],
+            )?;
             tx.execute(
                 "UPDATE bootstrap SET after_key=?1 WHERE authority=?2",
                 params![next, authority],
@@ -1348,6 +1502,10 @@ impl LwwClient {
                 }
                 cache.put(&body)?;
                 store.lww_put_object(descriptor_hash, &body)?;
+                // Message pages and plugin value parts are applied from the
+                // object store, never fetched later as remote assets.
+                let stored_dependencies =
+                    matches!(change.key.components()[0].as_str(), "messages" | "plugin-local");
                 if matches!(change.key.components()[0].as_str(), "messages" | "archive") {
                     controls.insert(descriptor.object_hash.clone());
                 } else if large_unit(&change.key) {
@@ -1355,7 +1513,7 @@ impl LwwClient {
                 } else {
                     remote.insert(descriptor.object_hash.clone());
                 }
-                if change.key.components()[0] == "messages" {
+                if stored_dependencies {
                     controls.extend(descriptor.dependencies.iter().cloned());
                 } else {
                     remote.extend(descriptor.dependencies.iter().cloned());
@@ -1368,7 +1526,7 @@ impl LwwClient {
                         transfer.download_reference_tree(vec![(root.clone(), vec![])])?;
                     #[cfg(test)]
                     observe_dependency_purposes(&change.key, &dependencies);
-                    if change.key.components()[0] == "messages" {
+                    if stored_dependencies {
                         controls.extend(dependencies);
                     } else {
                         remote.extend(dependencies);
@@ -1459,9 +1617,8 @@ impl LwwClient {
                     .or(store.server_stored_config()?)
                     .filter(|config| config.library_id == self.client.config().library_id)
                     .ok_or_else(|| SyncError::new("server-unconfigured", 409))?;
-                let head = self.client.resolve_identity()?;
                 let mut residency = super::residency::Residency::open(store.repository_root())?;
-                residency.retain(&self.client, &config, &head, &missing)?;
+                residency.retain_current(&self.client, &config, &missing)?;
                 let hashes = missing.into_iter().map(|(hash, _)| hash).collect::<Vec<_>>();
                 let sizes = residency.active_sizes(&hashes)?;
                 let objects = hashes.into_iter().zip(sizes).map(|(object_hash, size)| {

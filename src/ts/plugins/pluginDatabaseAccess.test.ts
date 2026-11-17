@@ -446,18 +446,27 @@ describe('plugin unit writes with read provenance', () => {
         expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setChatToIndex', [{ key: '["conversation","active","active-chat-a","name"]', type: 'set', value: 'Edited chat' }], [], [])
     })
 
-    it('commits only approved plugin additions and preserves installed records on API list omission and replacement', async () => {
+    it('confirms only changed plugin records and commits approved additions and in-place replacements', async () => {
         const harness = createHarness()
         const original = { name: 'installed', script: 'original', version: '3.0', enabled: true }
         harness.compatibilityDatabase.plugins = [original] as any
         harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [] }))
         await harness.access.setDatabase({ plugins: [] }, ['plugins'])
+        expect(harness.prepareAuthoritativeDatabaseUpdate.mock.calls.at(-1)?.[0]).not.toHaveProperty('plugins')
         expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([])
-        await harness.access.setDatabase({ plugins: [{ ...original, script: 'replacement' }] }, ['plugins'])
+        const replacement = { ...original, script: 'replacement' }
+        await harness.access.setDatabase({ plugins: [replacement] }, ['plugins'])
+        expect(harness.prepareAuthoritativeDatabaseUpdate.mock.calls.at(-1)?.[0]).toEqual({ plugins: [replacement] })
         expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([])
         const proposed = { name: 'new', script: 'proposed', version: '3.0', enabled: true }
-        await harness.access.setDatabase({ plugins: [proposed] }, ['plugins'])
+        await harness.access.setDatabase({ plugins: [original, proposed] }, ['plugins'])
+        expect(harness.prepareAuthoritativeDatabaseUpdate.mock.calls.at(-1)?.[0]).toEqual({ plugins: [proposed] })
         expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([])
+        harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [replacement] }))
+        await harness.access.setDatabase({ plugins: [replacement] }, ['plugins'])
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
+            { key: '["record","plugins","installed"]', type: 'set', value: replacement },
+        ])
         harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [proposed] }))
         await harness.access.setDatabase({ plugins: [proposed, proposed] }, ['plugins'])
         expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
@@ -687,12 +696,14 @@ describe('plugin database access', () => {
         vi.mocked(getPersistentDataStore).mockReturnValue(harness.store)
         const projector = createProductionPluginChatOutputProjector(structuredClone)
 
-        const projected = await projector({
+        const input = {
             characterId: 'active',
             conversationId: 'active-chat-c',
             liveCharacter,
             liveConversation: liveSelected,
-        })
+            windowStart: 0,
+        }
+        const projected = await projector({ ...input, history: 'full' })
 
         expect(harness.fullConversationReads).toEqual(['active-chat-a'])
         expect(projected.char.name).toBe('Live owner detail')
@@ -706,6 +717,13 @@ describe('plugin database access', () => {
         expect(harness.flushPendingData).not.toHaveBeenCalled()
         expect(harness.store.materializeDatabase).not.toHaveBeenCalled()
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
+
+        const current = await projector({ ...input, history: 'current' })
+        const withoutMessages = ({ message: _message, ...metadata }: PluginCompleteCharacter['chats'][number]) => metadata
+        expect(harness.fullConversationReads).toEqual(['active-chat-a'])
+        expect(current.char.chats).toEqual([durable.chats[0], dirtyResident, liveSelected].map(withoutMessages))
+        expect(current.chat).toEqual(liveSelected)
+        expect(current.char.name).toBe('Live owner detail')
     })
 
     it('retries opening the projector store after a transient failure', async () => {
@@ -723,6 +741,8 @@ describe('plugin database access', () => {
             conversationId: 'active-chat-a',
             liveCharacter: durable,
             liveConversation: durable.chats[0],
+            windowStart: 0,
+            history: 'full' as const,
         }
 
         await expect(projector(input)).rejects.toBe(transient)
@@ -2187,6 +2207,23 @@ describe('plugin database access', () => {
         ])
         expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
+    })
+
+    it('ignores a plugin list sent through setDatabaseLite and still rejects a malformed one', async () => {
+        const harness = createHarness()
+        const installed = { name: 'installed', script: 'installed', version: '3.0', enabled: true }
+        harness.compatibilityDatabase.plugins = [installed] as any
+        const proposed = { name: 'new', script: 'proposed', version: '3.0', enabled: true }
+        harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [proposed] }))
+
+        await harness.access.setDatabaseLite({ username: 'Lite', plugins: [installed, proposed] }, ['plugins', 'username'])
+
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
+            { key: '["root","username"]', type: 'set', value: 'Lite' },
+        ])
+        expect(harness.compatibilityDatabase.plugins).toEqual([installed])
+        expect(() => harness.access.setDatabaseLite({ plugins: [{ name: 'broken' }] }, ['plugins']))
+            .toThrow(/plugins must be an array of plugin records/i)
     })
 
     it(

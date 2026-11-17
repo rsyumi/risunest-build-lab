@@ -40,6 +40,13 @@ export const risuNestUiSettingsItems: SettingItem[] = [
         bindKey: 'risunestChatEditPopup',
     },
     {
+        id: 'risunest.ui.scrollNavigation',
+        type: 'check',
+        labelKey: 'risuNest.ui.scrollNavigation',
+        helpKey: 'risuNest.ui.scrollNavigationHelp',
+        bindKey: 'risunestScrollNavigation',
+    },
+    {
         id: 'risunest.ui.syncStatusUi',
         type: 'check',
         labelKey: 'risuNest.ui.syncStatusUi',

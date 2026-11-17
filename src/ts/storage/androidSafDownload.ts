@@ -8,6 +8,7 @@ import {
     type AndroidSafDestinationReservation,
     type AndroidSafDestinationResult,
 } from './androidSafBridge'
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 
 /** Raw bytes per append; the base64 text and its request stay within the 4 MiB plain request budget. */
 export const ANDROID_DOWNLOAD_PIECE_BYTES = 3 * 1024 * 1024 - 3 * 1024
@@ -40,7 +41,7 @@ export async function downloadThroughAndroidSaf(
 }
 
 /** Opens the Android picker for a download written later. Resolves null when the picker is cancelled. */
-export async function reserveAndroidSafDownload(
+async function reserveAndroidSafDownload(
     name: string,
     dependencies: AndroidSafDownloadDependencies = productionDependencies,
 ): Promise<AndroidSafDestinationReservation | null> {
@@ -52,11 +53,21 @@ export async function reserveAndroidSafDownload(
 }
 
 /** Writes a download to a reserved destination and releases the reservation. */
-export async function publishAndroidSafDownload(
+function publishAndroidSafDownload(
     reservation: AndroidSafDestinationReservation,
     name: string,
     data: Uint8Array,
     dependencies: AndroidSafDownloadDependencies = productionDependencies,
+): Promise<boolean> {
+    // The destination is already chosen, so the picker never holds the background task.
+    return runWithMobileBackgroundTask('export', () => writeAndroidSafDownload(reservation, name, data, dependencies), undefined, true)
+}
+
+async function writeAndroidSafDownload(
+    reservation: AndroidSafDestinationReservation,
+    name: string,
+    data: Uint8Array,
+    dependencies: AndroidSafDownloadDependencies,
 ): Promise<boolean> {
     let path: string | undefined
     try {

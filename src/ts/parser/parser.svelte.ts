@@ -1,4 +1,7 @@
+import { parseArray, makeArray } from '../cbsPure';
 import DOMPurify from 'dompurify';
+import { prepareYouTubeIframe } from './youtubeEmbed';
+import { hasCbsSyntax } from './cbsSyntax';
 import { CbsHistoryAccessError, type CbsHistoryAccess } from '../cbsHistoryAccess';
 import markdownit from 'markdown-it'
 import { appVer, getCurrentCharacter, getDatabase, type Database, type character, type customscript, type loreBook, type triggerscript } from '../storage/database.svelte';
@@ -8,6 +11,9 @@ import { isTauri } from "src/ts/platform"
 import { getChatVar, setChatVar, getGlobalChatVar } from './chatVar.svelte';
 import { noteChatVariableRead, noteUntrackedVariableRead, recordChatVariableReads, type DisplayReadRecord } from '../process/scriptVariableReads';
 import { processScriptFull, type ProcessScriptCaptureContext } from '../process/scripts';
+import { nextDisplayListenerOrder } from '../process/luaDisplayTimeouts';
+import { beginDisplayWork, displayRecoveryTarget } from '../displayRecovery.svelte';
+import { untrack } from 'svelte';
 import { get } from 'svelte/store';
 import css, { type CssAtRuleAST, type CssDeclarationAST } from '@adobe/css-tools'
 import { selectedCharID } from '../stores.svelte';
@@ -32,6 +38,8 @@ import {
     resolveEmotionAsset,
     type AssetLookupIndex,
 } from './assetLookup';
+import { ByteBudgetLru } from '../util/byteBudgetLru';
+import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from '../runtimePerformanceProfile';
 
 export { getAssetDistance as getDistance } from './assetLookup';
 
@@ -61,8 +69,7 @@ let activeSanitizeHideAllImages: boolean | undefined
 
 DOMPurify.addHook("uponSanitizeElement", (node: HTMLElement, data) => {
     if (data.tagName === "iframe") {
-       const src = node.getAttribute("src") || "";
-       if (!src.startsWith("https://www.youtube.com/embed/")) {
+       if (!prepareYouTubeIframe(node)) {
           return node.parentNode.removeChild(node);
        }
     }
@@ -120,7 +127,8 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
                 node.setAttribute('target', '_blank')
                 break
             }
-            data.attrValue = ''
+            // An empty href would navigate to the app document and reload it.
+            data.keepAttr = false
             break
         }
     }
@@ -128,7 +136,7 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
 
 DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
     if (['IMG', 'SOURCE', 'VIDEO', 'AUDIO', 'STYLE'].includes(node.nodeName) && data.attrName === 'src') {
-        if (data.attrValue.startsWith('blob:')) {
+        if (data.attrValue.startsWith('blob:') || data.attrValue.startsWith('asset:')) {
             data.forceKeepAttr = true;
         }
     }
@@ -406,18 +414,19 @@ async function renderHighlightableMarkdown(data:string, settings?: MarkdownRende
             if(languageModule){
                 hljs.registerLanguage(lang, languageModule.default)
             }
+            // A replacer function keeps `$$`, `$&` and `$'` in the code literal.
             if(lang === 'none'){
-                rendered = rendered.replace(placeholder, `<pre><code>${md.utils.escapeHtml(code)}</code></pre>`)
+                rendered = rendered.replace(placeholder, () => `<pre><code>${md.utils.escapeHtml(code)}</code></pre>`)
             }
             else if(lang === 'error'){
-                rendered = rendered.replace(placeholder, `<div class="risu-error"><h1>${language.error}</h1>${md.utils.escapeHtml(code)}</div>`)
+                rendered = rendered.replace(placeholder, () => `<div class="risu-error"><h1>${language.error}</h1>${md.utils.escapeHtml(code)}</div>`)
             }
             else{
                 const highlighted = hljs.highlight(code, {
                     language: lang,
                     ignoreIllegals: true
                 }).value
-                rendered = rendered.replace(placeholder, `<pre class="hljs" x-hl-lang="${fileExt}"><code>${highlighted}</code></pre>`)   
+                rendered = rendered.replace(placeholder, () => `<pre class="hljs" x-hl-lang="${fileExt}"><code>${highlighted}</code></pre>`)
             }
         } catch (error) {
             
@@ -500,13 +509,15 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
             && selectedAssetLookupCache.characterAssets === characterAssets
             && selectedAssetLookupCache.emotionAssets === emotionAssets
     }
-    const assetLookup = canUseSelectedCache
-        ? selectedAssetLookupCache.index
-        : createAssetLookupIndex({
-            characterAssets,
-            emotionAssets,
-            moduleAssets: renderContext.moduleAssets ?? getModuleAssets(),
-        })
+    let assetLookup: AssetLookupIndex | undefined = canUseSelectedCache ? selectedAssetLookupCache.index : undefined
+    const getAssetLookup = () => assetLookup ??= createAssetLookupIndex({
+        characterAssets,
+        emotionAssets,
+        moduleAssets: renderContext.moduleAssets ?? getModuleAssets(),
+    })
+    // Most text has no asset tags, so build the index on the first tag. A reactive
+    // caller still reads every asset here, so an asset edit re-runs it as before.
+    if ($effect.tracking()) getAssetLookup()
 
     let needsSourceAccess = false
     let cx: number|null = null
@@ -527,7 +538,7 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
         }
 
         if(type === 'emotion'){
-            const srcPath = resolveEmotionAsset(assetLookup, name)?.srcPaths[0]
+            const srcPath = resolveEmotionAsset(getAssetLookup(), name)?.srcPaths[0]
             const image = srcPath ? await resolveImage(srcPath) : null
             const path = image?.url ?? (srcPath ? await getFileSrcCached(srcPath) : null)
             if(!path){
@@ -550,7 +561,7 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
 
         const exactOnly = (renderContext.legacyMediaFindings ?? DBState.db.legacyMediaFindings) === true
         const match = resolveAdditionalAsset(
-            assetLookup,
+            getAssetLookup(),
             name,
             exactOnly ? -1 : (renderContext.assetMaxDifference ?? DBState.db.assetMaxDifference),
             getAssetDistance,
@@ -709,6 +720,8 @@ export interface ParseMarkdownRenderContext {
     projectedChatID?: number
     /** Collects the chat variables this render reads. */
     variableReads?: DisplayReadRecord
+    /** When the view asked for this render, from `nextDisplayListenerOrder`. */
+    displayRequestOrder?: number
 }
 
 function parseThoughtsAndTools(
@@ -722,20 +735,31 @@ function parseThoughtsAndTools(
     let result = '',
         i = 0
     while (i < data.length) {
-        if (data.slice(i, i + 10) === '<Thoughts>') {
-            let j = i + 10,
-                depth = 1
-            while (j < data.length && depth > 0) {
-                if (data.slice(j, j + 10) === '<Thoughts>') depth++
-                if (data.slice(j, j + 11) === '</Thoughts>') depth--
-                j++
+        // Jump between tags instead of copying one character at a time.
+        const start = data.indexOf('<Thoughts>', i)
+        if (start === -1) {
+            result += data.substring(i)
+            break
+        }
+        result += data.substring(i, start)
+        i = start
+        let j = i + 10,
+            depth = 1
+        while (depth > 0) {
+            j = data.indexOf('<', j)
+            if (j === -1) {
+                j = data.length
+                break
             }
-            if (depth === 0 || thoughtMode === 'collapsed') {
-                const contentEnd = depth === 0 ? j - 1 : data.length
-                result += `<details data-risu-thought${thoughtMode === 'collapsed' ? ' data-risu-streaming-thought' : ''}><summary>${language.cot}</summary>${data.substring(i + 10, contentEnd)}</details>`
-                i = depth === 0 ? j + 10 : data.length
-                continue
-            }
+            if (data.startsWith('<Thoughts>', j)) depth++
+            else if (data.startsWith('</Thoughts>', j)) depth--
+            j++
+        }
+        if (depth === 0 || thoughtMode === 'collapsed') {
+            const contentEnd = depth === 0 ? j - 1 : data.length
+            result += `<details data-risu-thought${thoughtMode === 'collapsed' ? ' data-risu-streaming-thought' : ''}><summary>${language.cot}</summary>${data.substring(i + 10, contentEnd)}</details>`
+            i = depth === 0 ? j + 10 : data.length
+            continue
         }
         result += data[i++]
     }
@@ -756,19 +780,47 @@ export async function ParseMarkdown(
     renderContext:ParseMarkdownRenderContext = {},
 ) {
     renderContext.signal?.throwIfAborted()
-    renderContext = { ...renderContext, deferredInlays: renderContext.deferredInlays ?? new DeferredInlayMarkerRegistry() }
+    // Rendering the selected chat is display work, which a recovery record covers. A reactive
+    // caller does not depend on the record or the selection it names.
+    const characterId = typeof charArg === 'string' ? charArg : charArg?.chaId
+    const displayWork = untrack(() => beginDisplayWork(characterId
+        ? displayRecoveryTarget(() => getCurrentCharacter(), characterId)
+        : null))
+    try {
+        return await parseMarkdownForDisplay(data, charArg, mode, chatID, cbsConditions, renderContext, displayWork.ready)
+    } finally {
+        displayWork.release()
+    }
+}
+
+async function parseMarkdownForDisplay(
+    data:string,
+    charArg:(character|simpleCharacterArgument | string),
+    mode:'normal'|'back'|'pretranslate'|'notrim',
+    chatID:number,
+    cbsConditions:CbsConditions,
+    renderContext:ParseMarkdownRenderContext,
+    recordStored:Promise<void> | null,
+) {
+    renderContext = {
+        ...renderContext,
+        deferredInlays: renderContext.deferredInlays ?? new DeferredInlayMarkerRegistry(),
+        displayRequestOrder: renderContext.displayRequestOrder ?? nextDisplayListenerOrder(),
+    }
     const prepareStyleHistory = renderContext.scriptContext?.parserContext.prepareHistory
     let firstParsed = ''
     const additionalAssetMode = (mode === 'back') ? 'back' : 'normal'
     let char = (typeof(charArg) === 'string') ? (findCharacterbyId(charArg)) : (charArg)
 
     if(char){
-        data = await parseAdditionalAssets(data, char, additionalAssetMode, {
+        // Started before waiting for the record, so a reactive caller still tracks the assets it reads.
+        [data] = await Promise.all([parseAdditionalAssets(data, char, additionalAssetMode, {
             ch: chatID
-        }, renderContext)
+        }, renderContext), recordStored])
         renderContext.signal?.throwIfAborted()
         firstParsed = data
     }
+    else if (recordStored) await recordStored
 
     if(char){
         data = (await processScriptFull(char, data, 'editdisplay', chatID, cbsConditions, {
@@ -777,6 +829,7 @@ export async function ParseMarkdown(
             projectedChatID: renderContext.projectedChatID,
             signal: renderContext.signal,
             variableReads: renderContext.variableReads,
+            displayRequestOrder: renderContext.displayRequestOrder,
         })).data
     }
 
@@ -821,7 +874,9 @@ export async function ParseMarkdown(
 
 const trimPurifyConfig = {
     ADD_TAGS: ["iframe", "style", "risu-style", "x-em", 'annotation', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt'],
-    ADD_ATTR: ["allow", "allowfullscreen", "frameborder", "scrolling", "risu-ctrl" ,"risu-btn", 'risu-trigger', 'risu-mark', 'risu-id', 'x-hl-lang', 'x-hl-text'],
+    // Permissions Policy can contain origins but is not a navigation URL.
+    ADD_URI_SAFE_ATTR: ['allow'],
+    ADD_ATTR: ["allow", "allowfullscreen", "frameborder", "scrolling", "risu-btn", "risu-ctrl", 'risu-form', 'risu-trigger', 'risu-mark', 'risu-id', 'x-hl-lang', 'x-hl-text'],
 }
 
 export interface TrimMarkdownRenderContext {
@@ -832,6 +887,32 @@ export interface TrimMarkdownRenderContext {
     chatID?: number
     projectedChatID?: number
     cbsConditions?: CbsConditions
+    /** Attributes kept in addition to the message ones, such as onboarding variable bindings. */
+    variableBindingAttributes?: readonly string[]
+}
+
+// Onboarding HTML can bind clicks and inputs to chat variables. Messages never keep these.
+const onboardingVariableBindingAttributes = ['risu-change-var-name', 'risu-change-var-value'] as const
+
+/**
+ * Renders a character's onboarding HTML: assets, CBS and inlays are resolved, then it goes
+ * through the same sanitization and <style> scoping as chat messages. Scoped styles are
+ * prefixed with `.chattext`, so the caller renders the result inside a `.chattext` element
+ * and mounts `deferredInlays` on it.
+ */
+export async function parseOnboardingHTML(
+    data:string,
+    char:character,
+    deferredInlays:DeferredInlayMarkerRegistry,
+){
+    data = await parseAdditionalAssets(data ?? '', char, 'normal', { ch: -1 }, { deferredInlays })
+    data = risuChatParser(data, { chara: char })
+    data = await parseInlayAssets(data, deferredInlays)
+    data = encodeStyle(data)
+    return trimMarkdown(data, {
+        deferredInlays,
+        variableBindingAttributes: onboardingVariableBindingAttributes,
+    })
 }
 
 export function trimMarkdown(
@@ -845,6 +926,9 @@ export function trimMarkdown(
     const renderContext = typeof options === 'boolean'
         ? { hideAllImages: options }
         : options
+    const purifyConfig = renderContext.variableBindingAttributes?.length
+        ? { ...trimPurifyConfig, ADD_ATTR: [...trimPurifyConfig.ADD_ATTR, ...renderContext.variableBindingAttributes] }
+        : trimPurifyConfig
     const previousHideAllImages = activeSanitizeHideAllImages
     activeSanitizeHideAllImages = renderContext.hideAllImages
     try {
@@ -853,7 +937,7 @@ export function trimMarkdown(
         // risu-style is in ADD_TAGS, so cards, model output and user scripts can
         // author one directly. Only its position in the parsed tree is relied on.
         if(!data.includes('<risu-style') && !renderContext.deferredInlays?.hasAssetImages){
-            return DOMPurify.sanitize(data, trimPurifyConfig)
+            return DOMPurify.sanitize(data, purifyConfig)
         }
 
         // Decoded CSS must never be handed back to the HTML sanitizer as <style>
@@ -864,7 +948,7 @@ export function trimMarkdown(
         // RETURN_DOM hands back the sanitized <body>, typed as Node. It is null only
         // for empty input, which the guard above already excludes.
         const root = DOMPurify.sanitize(data, {
-            ...trimPurifyConfig,
+            ...purifyConfig,
             RETURN_DOM: true,
         }) as HTMLElement | null
         if(!root){
@@ -1038,6 +1122,19 @@ function decodeStyleRule<T extends CssAtRuleAST | CssDeclarationAST>(rule:T):T{
     return rule
 }
 
+// Scoping depends only on the CSS after CBS, and parsing grows faster than the CSS.
+// A style that every row or streaming update repeats is parsed once.
+function createScopedStyleCache() {
+    return new ByteBudgetLru<string, string>(
+        getRuntimePerformanceBudgets().scopedStyleCacheBytes,
+        (text, scoped) => (text.length + scoped.length) * 2 + 32,
+    )
+}
+let scopedStyleCache = createScopedStyleCache()
+subscribeRuntimePerformanceProfile(() => {
+    scopedStyleCache = createScopedStyleCache()
+})
+
 /**
  * Decodes one <risu-style> body into scoped CSS. Returns the CSS on its own so
  * the caller can put it into a real <style> element instead of a markup string.
@@ -1069,6 +1166,10 @@ function decodeStyleContent(
             currentTime: parser.currentTime,
             triggerId: parser.triggerId,
         } : undefined)
+        const cached = scopedStyleCache.get(text)
+        if (cached !== undefined) {
+            return { css: cached }
+        }
         const ast = css.parse(text)
         const rules = ast?.stylesheet?.rules
         if(rules){
@@ -1077,12 +1178,12 @@ function decodeStyleContent(
             }
             ast.stylesheet.rules = rules
         }
-        return {
-            css: css.stringify(ast, {
-                indent: '',
-                compress: true,
-            })
-        }
+        const scoped = css.stringify(ast, {
+            indent: '',
+            compress: true,
+        })
+        scopedStyleCache.set(text, scoped)
+        return { css: scoped }
     } catch (error) {
         if (error instanceof CbsHistoryAccessError) throw error
         if(renderContext.returnCSSError ?? DBState.db.returnCSSError){
@@ -1105,6 +1206,7 @@ let matcherInitialized = false
 let activeMatcherContext: matcherArg | null = null
 
 const matcherMap = new Map<string, RegisterCallback>()
+const directMatcherMap = new Map<string, RegisterCallback>()
 
 function readMatcherChatVar(context: matcherArg | null, key: string): string {
     noteChatVariableRead(key)
@@ -1138,6 +1240,7 @@ function initMatcher(){
             const names = [arg.name, ...arg.alias]
             for (const name of names) {
                 matcherMap.set(name, callback)
+                if (/^[a-z0-9]+$/.test(name)) directMatcherMap.set(name, callback)
             }
         },
         getDatabase: () => activeMatcherContext?.db ?? getDatabase(),
@@ -1193,17 +1296,11 @@ function matcher (p1:string,matcherArg:matcherArg,vars:{[key:string]:string}|nul
             return calcString(substring).toString()
         }
         const colonIndex = p1.indexOf(':')
-        let splited: string[]
-        if(colonIndex !== -1 && p1[colonIndex + 1] === ':'){
-            splited = p1.split('::')
-        }
-        else{
-            splited = p1.split(':')
-        }
-        const name = splited[0].toLocaleLowerCase().replace(/[\s_-]/g, '')
-        const args = splited.slice(1)
-        const callback = matcherMap.get(name)
+        const name = colonIndex === -1 ? p1 : p1.substring(0, colonIndex)
+        const callback = directMatcherMap.get(name) ?? matcherMap.get(name.toLocaleLowerCase().replace(/[\s_-]/g, ''))
         if(callback){
+            const separator = p1[colonIndex + 1] === ':' ? '::' : ':'
+            const args = colonIndex === -1 ? [] : p1.substring(colonIndex + separator.length).split(separator)
             const previousContext = activeMatcherContext
             activeMatcherContext = matcherArg
             try {
@@ -1277,33 +1374,12 @@ const legacyBlockMatcher = (p1:string,matcherArg:matcherArg) => {
 
 type blockMatch = 'ignore'|'parse'|'nothing'|'ifpure'|'pure'|'each'|'function'|'pure-display'|'normalize'|'escape'|'newif'|'newif-falsy'
 
-function parseArray(p1:string): unknown[]{
-    try {
-        const arr = JSON.parse(p1)
-        if(Array.isArray(arr)){
-            return arr
-        }
-        return p1.split('§')
-    } catch (error) {
-        return p1.split('§')
-    }
-}
-
 function parseDict(p1 :string): {[key:string]: unknown}{
     try {
         return JSON.parse(p1)
     } catch (error) {
         return {}
     }
-}
-
-function makeArray(p1: unknown[]): string{
-    return JSON.stringify(p1.map((f) => {
-        if(typeof(f) === 'string'){
-            return f.replace(/::/g, '\\u003A\\u003A')
-        }
-        return f
-    }))
 }
 
 function blockStartMatcher(p1:string,matcherArg:matcherArg):{type:blockMatch,type2?:string,funcArg?:string[],mode?:string}{
@@ -1692,6 +1768,8 @@ function blockEndMatcher(p1:string,type:{type:blockMatch,type2?:string,mode?:str
     }
 }
 
+const blockBoundary = /\{[{#]|#\}|\}\}/g
+
 export function risuChatParser(da:string, arg:{
     chatID?:number
     projectedChatID?:number
@@ -1738,6 +1816,12 @@ export function risuChatParser(da:string, arg:{
         }
     }
 
+    arg.callStack = (arg.callStack ?? 0) + 1
+    if(arg.callStack > 20){
+        return 'ERROR: Call stack limit reached'
+    }
+    if (typeof da === 'string' && !hasCbsSyntax(da)) return da
+
     let pointer = 0;
     let nested:string[] = [""]
     let stackType = new Uint8Array(512)
@@ -1758,12 +1842,6 @@ export function risuChatParser(da:string, arg:{
         data:string,
         arg:string[]
     }> = arg.functions ?? (new Map())
-
-    arg.callStack = (arg.callStack ?? 0) + 1
-
-    if(arg.callStack > 20){
-        return 'ERROR: Call stack limit reached'
-    }
 
     const matcherObj = {
         chatID: chatID,
@@ -1959,7 +2037,12 @@ export function risuChatParser(da:string, arg:{
                 break
             }
             default:{
-                nested[0] += da[pointer]
+                // Copy plain text up to the next {{, {#, #} or }} in one step; the cases above
+                // would only append any other brace or hash.
+                blockBoundary.lastIndex = pointer
+                const end = blockBoundary.exec(da)?.index ?? da.length
+                nested[0] += da.substring(pointer, end)
+                pointer = end - 1
                 break
             }
         }

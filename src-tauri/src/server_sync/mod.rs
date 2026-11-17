@@ -16,6 +16,7 @@ pub(crate) mod progress;
 mod tests;
 pub(crate) mod transfer;
 pub(crate) mod lww_client;
+pub(crate) mod library_format;
 #[cfg(test)]
 pub(crate) mod hash_metrics;
 mod binding;
@@ -46,6 +47,13 @@ pub(crate) struct SyncError {
     /// False for a rejection the same request would receive again. The scheduler
     /// stops automatic retries on it instead of backing off forever.
     pub retryable: bool,
+    /// An activation failed before changing an already usable local library.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_local_ready: Option<bool>,
+    /// The external storage connection that refused a sign-in or has no key
+    /// on this device, for an operation that reads through more than one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     /// Where the error was raised. Kept for the device log, never sent.
     #[serde(skip)]
     pub at: &'static std::panic::Location<'static>,
@@ -62,6 +70,8 @@ impl SyncError {
             code,
             status,
             retryable,
+            startup_local_ready: None,
+            connection_id: None,
             at: std::panic::Location::caller(),
             cause: None,
         }
@@ -150,7 +160,7 @@ impl From<crate::persistent_store::StoreError> for SyncError {
             }
             crate::persistent_store::StoreError::Validation { message } if matches!(message.as_str(), "accepted-clock-correction-required" | "incoming-clock-skew" | "clock-skew" | "equal-stamp-integrity" | "writer-collision" | "binding-authority-changed") => Self::new(message,409),
             crate::persistent_store::StoreError::Store { message } => Self::caused("local-storage", 503, message),
-            crate::persistent_store::StoreError::CommitBusy => Self::new("library-operation-busy", 409),
+            crate::persistent_store::StoreError::CommitBusy | crate::persistent_store::StoreError::AssetInventoryBusy => Self::new("library-operation-busy", 409),
             other => Self::caused("local-validation", 409, other.to_string()),
         }
     }

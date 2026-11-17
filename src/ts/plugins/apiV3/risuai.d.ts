@@ -291,9 +291,13 @@ type ReplacerType = 'beforeRequest' | 'afterRequest';
  * Argument passed to chat lifecycle listeners
  */
 type ChatOutputListenerArg = {
-    /** Current character */
+    /**
+     * Current character. Every conversation in `char.chats` carries its
+     * messages only when the full history is delivered; otherwise the
+     * `message` property is absent from every entry.
+     */
     char: any;
-    /** Current chat */
+    /** Current chat, with every message */
     chat: any;
     /** Index of the character in the database. Use with `setCharacterToIndex`. */
     characterIndex: number;
@@ -301,6 +305,19 @@ type ChatOutputListenerArg = {
     chatIndex: number;
     /** Current index of the generated message in `chat.message`, or -1 if it is no longer present */
     messageIndex: number;
+};
+
+/**
+ * Options for `addRisuChatListener`
+ */
+type ChatOutputListenerOptions = {
+    /**
+     * `'current'` asks for an event whose `char.chats` entries omit `message`.
+     * The event also has that shape when the user turns on sending only the
+     * current chat to plugins; `'full'` and omitting this field follow that
+     * setting.
+     */
+    history?: 'full' | 'current';
 };
 
 /**
@@ -841,7 +858,8 @@ interface SafeElement extends SafeRemoteRef {
      * - Keyboard: keydown, keyup, keypress
      *
      * listener function receives trimmed event object with common properties only.
-     * 
+     * listeners receive events that reach the element via normal DOM propagation; for document-wide listening, use the SafeDocument from getRootDocument().
+     *
      * @example
      * ```typescript
      * const id = await element.addEventListener('click', async (event) => {
@@ -860,9 +878,9 @@ interface SafeElement extends SafeRemoteRef {
 
     /**
      * Removes an event listener using its ID
-     * @param type - Event type
+     * @param type - Event type (for compatibility; removal is resolved by ID)
      * @param id - Listener ID returned by addEventListener
-     * @param options - Event listener options
+     * @param options - Event listener options (for compatibility)
      */
     removeEventListener(
         type: string,
@@ -999,6 +1017,8 @@ interface SafeMutationRecord extends SafeRemoteRef {
     getTarget(): Promise<SafeElement>;
     /** Added nodes in mutation */
     getAddedNodes(): Promise<SafeClassArray<SafeElement>>;
+    /** Removed nodes in mutation */
+    getRemovedNodes(): Promise<SafeClassArray<SafeElement>>;
 }
 
 /**
@@ -1103,13 +1123,24 @@ interface PluginStorage {
  * Uses generic types for flexible value storage.
  * In RisuNest each plugin sees only the values it wrote.
  *
+ * These values are kept: primitives including undefined, NaN, Infinity, -0
+ * and BigInt; plain objects and arrays (holes included); Date, RegExp, Map,
+ * Set, Error and primitive wrapper objects; ArrayBuffer, every TypedArray and
+ * DataView; Blob and File. setItem rejects other values, including ImageData,
+ * CryptoKey, DOMException, DOMMatrix, DOMPoint, DOMRect, DOMQuad and
+ * FileList. Objects reached more than once stay shared, cycles and an
+ * ArrayBuffer under two views included. A top-level undefined is stored as
+ * null. On the web only values that JSON represents exactly are kept;
+ * others are rejected (see `getRuntimeInfo().structuredLocalPluginStorage`).
+ * A value may take up to 512 MiB.
+ *
  * **All methods return Promises** due to iframe message passing.
  *
  * @example
  * ```typescript
  * const storage = await risuai.getLocalPluginStorage();
  *
- * // Store any JSON-serializable data
+ * // Store JSON data, or Map, Date, binary data and the other values above
  * await storage.setItem('config', { theme: 'dark', fontSize: 14 });
  *
  * // Retrieve data with type safety
@@ -1133,7 +1164,7 @@ interface SafeLocalPluginStorage {
     /**
      * Sets an item in storage
      * @param key - Storage key
-     * @param value - Value to store (any JSON-serializable value)
+     * @param value - Value to store (see SafeLocalPluginStorage for the values kept)
      * @returns Promise that resolves when item is stored
      */
     setItem<T>(key: string, value: T): Promise<void>;
@@ -1489,6 +1520,16 @@ interface RisuaiPluginAPI {
      * @param text - Text containing CBS macros
      * @param options - Parser context options
      * @returns Parsed text
+     * @throws {Error} If no character or active chat is selected, or messageIndex is
+     * not an integer in the range -1 through the last existing message index.
+     * @throws {Error} If the captured conversation or history revision is no longer
+     * available (PluginParserTargetChangedError in the host). Navigation does not
+     * retarget a call.
+     * @throws {Error} If the pending call is aborted when the plugin is unloaded,
+     * including while waiting for an earlier call's variable writes (AbortError
+     * in the host).
+     * The iframe bridge forwards host error messages as Error instances; it does
+     * not preserve their original error names or subclasses.
      *
      * @example
      * ```typescript
@@ -1653,12 +1694,15 @@ interface RisuaiPluginAPI {
 
     /**
      * Sets the database (lightweight save)
-     * @param db - DatabaseSubset object to save
+     * The `plugins` property is ignored.
+     * @param db - DatabaseSubset object to save, excluding `plugins`
      */
-    setDatabaseLite(db: DatabaseSubset): Promise<void>;
+    setDatabaseLite(db: Omit<DatabaseSubset, 'plugins'>): Promise<void>;
 
     /**
      * Sets the database (full save with sync)
+     * In `plugins`, only API 3.0 plugins that are new or whose script changed are applied,
+     * each after the user confirms. Removing, reordering, enabling or disabling plugins is ignored.
      * @param db - DatabaseSubset object to save
      */
     setDatabase(db: DatabaseSubset): Promise<void>;
@@ -2078,8 +2122,16 @@ interface RisuaiPluginAPI {
      * still resolves normally but the listener is never registered and will
      * not fire.
      *
+     * By default `char.chats` holds every conversation with its messages. When
+     * the user turns on sending only the current chat to plugins, or the listener passes
+     * `{ history: 'current' }`, every `char.chats` entry omits `message` and only
+     * `chat` carries messages. Such a `char` cannot be saved with
+     * `setCharacterToIndex` or `setDatabase`. Pass `{ history: 'current' }` when
+     * the listener does not read other conversations.
+     *
      * @param mode - Listener mode
      * @param func - Listener function. Receives the current character, chat, and generated message index.
+     * @param options - Listener options
      *
      * @example
      * ```typescript
@@ -2092,7 +2144,8 @@ interface RisuaiPluginAPI {
      */
     addRisuChatListener(
         mode: 'output',
-        func: (arg: ChatOutputListenerArg) => void | Promise<void>
+        func: (arg: ChatOutputListenerArg) => void | Promise<void>,
+        options?: ChatOutputListenerOptions
     ): Promise<void>;
 
     /**
@@ -2227,6 +2280,12 @@ interface RisuaiPluginAPI {
         apiVersion: string;
         platform: string;
         saveMethod: string;
+        /**
+         * True where getLocalPluginStorage() keeps values JSON cannot represent
+         * (see SafeLocalPluginStorage). False on the web, where only JSON
+         * values are kept.
+         */
+        structuredLocalPluginStorage: boolean;
     }>
 
     /**

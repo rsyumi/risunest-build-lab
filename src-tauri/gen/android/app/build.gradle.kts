@@ -1,7 +1,6 @@
 import java.util.Properties
 import java.net.URI
 import java.io.ByteArrayOutputStream
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     id("com.android.application")
@@ -122,6 +121,14 @@ rust {
     rootDirRel = "../../../"
 }
 
+val prepareAppLockLogo = tasks.register<Copy>("prepareAppLockLogo") {
+    from(rootProject.file("../../icons/icon.png"))
+    into(layout.buildDirectory.dir("generated/appLock/res/drawable-nodpi"))
+    rename("icon.png", "app_lock_logo.png")
+}
+android.sourceSets.getByName("main").res.srcDir(layout.buildDirectory.dir("generated/appLock/res"))
+tasks.named("preBuild").configure { dependsOn(prepareAppLockLogo) }
+
 // Native TLS verifies servers through Android with the Kotlin half of
 // rustls-platform-verifier, published to that project's Maven archive. Its
 // version must equal rustls-platform-verifier-android in the Cargo lock.
@@ -149,6 +156,7 @@ dependencies {
     implementation("org.rustls:rustls-platform-verifier:${rustlsPlatformVerifierVersion.get()}")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("androidx.webkit:webkit:1.14.0")
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("com.google.android.material:material:1.12.0")
@@ -157,14 +165,6 @@ dependencies {
 }
 
 apply(from = "tauri.build.gradle.kts")
-
-val prepareWryRendererRecovery = tasks.register<PrepareWryRendererRecovery>("prepareWryRendererRecovery") {
-    generatedDirectory = file("src/main/java/io/github/rsyumi/risunest/generated")
-    mustRunAfter(tasks.withType<BuildTask>())
-}
-tasks.withType<KotlinCompile>().configureEach {
-    dependsOn(prepareWryRendererRecovery)
-}
 
 afterEvaluate {
     if (!releaseSigningReady) {

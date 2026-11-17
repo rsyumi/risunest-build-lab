@@ -8,6 +8,7 @@ const maintenance = vi.hoisted(() => ({
     deepScanNativeDataHealth: vi.fn(),
     getNativeDataHealthResult: vi.fn(),
     cancelNativeDataHealthScan: vi.fn(),
+    holdNativeDataHealthScan: vi.fn(<T,>(operation: (signal?: AbortSignal) => Promise<T>) => operation()),
     planNativeDataHealthRepair: vi.fn(),
     previewNativeDataHealthRepair: vi.fn(),
     applyNativeDataHealthRepair: vi.fn(),
@@ -358,6 +359,19 @@ describe('RisuNestDataHealth', () => {
         expect(
             target.querySelector('[data-data-health-summary]')?.textContent,
         ).toContain(strings.deepStopped)
+        // Continuing runs every page under the one background hold the scan keeps.
+        let holding = false
+        const pagesHeld: boolean[] = []
+        maintenance.holdNativeDataHealthScan.mockImplementationOnce(async operation => {
+            holding = true
+            try { return await operation() } finally { holding = false }
+        })
+        maintenance.deepScanNativeDataHealth.mockImplementationOnce(async () => {
+            pagesHeld.push(holding)
+            return { ...damaged, depth: 'deep', deep: { cursor: null, completedObjects: 4, totalObjects: 4, completedBytes: 4096, totalBytes: 4096, complete: true } }
+        })
+        ;[...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.resume)!.click()
+        await vi.waitFor(() => expect(pagesHeld).toEqual([true]))
     })
 
     it('links the cleanup group to the unused image screen instead of deleting here', async () => {

@@ -22,6 +22,7 @@ afterEach(() => {
     delete window.RisuCompletionNotifications
     delete window.RisuSafBridge
     delete window.RisuNativeFileSelection
+    delete window.RisuBackgroundTasks
 })
 
 describe('scoped Android control transport', () => {
@@ -29,7 +30,7 @@ describe('scoped Android control transport', () => {
         vi.resetModules()
         const ready = vi.fn((text: string) => {
             expect(window.RisuLifecycleBridge?.onFlushComplete).toBeTypeOf('function')
-            expect(window.RisuGenerationKeepAlive?.begin).toBeTypeOf('function')
+            expect(window.RisuGenerationKeepAlive?.notificationsEnabled).toBeTypeOf('function')
             expect(Boolean(window.RisuSafBridge)).toBe(safEnabled)
             expect(JSON.parse(text)).toEqual({ method: 'lifecycle.onFrontendReady', args: [] })
         })
@@ -50,6 +51,29 @@ describe('scoped Android control transport', () => {
         expect(message.args).toEqual(['a'.repeat(4096)])
         port.onmessage?.({ data: JSON.stringify({ id: message.id, result: true }) })
         await expect(delivered).resolves.toBe(true)
+    })
+
+    it('tells native which immediate background holds the user started', async () => {
+        vi.resetModules()
+        const sent: { id?: string; method: string; args: string[] }[] = []
+        const port: AndroidControlMessagePort = { postMessage: text => sent.push(JSON.parse(text)) }
+        window.RisuNestControl = port
+        await import('./androidNativeControl')
+        const tasks = window.RisuBackgroundTasks!
+        const admitted = Promise.all([
+            tasks.begin('first', 'export', false, true),
+            tasks.begin('second', 'generation', false, false),
+            tasks.begin('third', 'sync', true, false),
+        ])
+        const holds = sent.filter(item => item.method.startsWith('background.'))
+        expect(sent[0]).toEqual({ method: 'lifecycle.onFrontendReady', args: [] })
+        expect(holds.map(({ method, args }) => [method, args])).toEqual([
+            ['background.begin', ['first', 'export', 'true']],
+            ['background.begin', ['second', 'generation', 'false']],
+            ['background.defer', ['third', 'sync']],
+        ])
+        for (const hold of holds) port.onmessage?.({ data: JSON.stringify({ id: hold.id, result: 'active' }) })
+        await expect(admitted).resolves.toEqual(['active', 'active', 'active'])
     })
 
     it('matches delayed responses without treating promises as successful booleans', async () => {

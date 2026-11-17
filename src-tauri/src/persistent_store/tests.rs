@@ -137,7 +137,7 @@ mod archive_receive_tests;
 #[path = "tests/asset_alias_tests.rs"]
 mod asset_alias_tests;
 #[path = "tests/asset_catalog_gc_tests.rs"]
-mod asset_catalog_gc_tests;
+pub(crate) mod asset_catalog_gc_tests;
 #[path = "tests/content_change_vocabulary_tests.rs"]
 mod content_change_vocabulary_tests;
 #[path = "tests/data_health_tests.rs"]
@@ -162,6 +162,8 @@ mod schema_tests;
 mod snapshot_lease_tests;
 #[path = "tests/storage_stats_tests.rs"]
 mod storage_stats_tests;
+#[path = "tests/stored_conversation_read_tests.rs"]
+mod stored_conversation_read_tests;
 #[path = "tests/vault_boundary_tests.rs"]
 mod vault_boundary_tests;
 #[path = "tests/working_set_tests.rs"]

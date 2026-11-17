@@ -13,23 +13,22 @@ import {
 // TypeScript. Each side pins itself to the same golden fixture; a drift on
 // any side fails that side's suite.
 
-const HANDOFF_KIND_TO_JOB_KIND: Record<
+const HANDOFF_KIND_TO_JOB_KINDS: Record<
     string,
-    keyof typeof ANDROID_SAF_HANDOFF_ID_PATTERNS
+    (keyof typeof ANDROID_SAF_HANDOFF_ID_PATTERNS)[]
 > = {
-    'raw-recovery': 'export-raw-recovery',
-    'portable-backup': 'export-portable-backup',
-    'legacy-backup': 'export-compatible-local-backup',
-    'character-charx': 'export-character-charx',
-    'character-card': 'export-character-card',
-    'risu-module': 'export-risu-module',
-    'dataset-export': 'export-dataset',
+    'raw-recovery': ['export-raw-recovery'],
+    'portable-backup': ['export-portable-backup'],
+    'legacy-backup': ['export-compatible-local-backup'],
+    'character-charx': ['export-character-charx'],
+    'character-card': ['export-character-card'],
+    'risu-module': ['export-risu-module'],
+    'dataset-export': ['export-dataset'],
+    // The renderer also writes download handoffs; gallery jobs recover theirs.
+    download: ['export-gallery-file', 'export-gallery-zip'],
 }
-// Handoffs the renderer writes itself; no native job recovers them.
-const RENDERER_HANDOFF_KINDS = ['download']
-const jobHandoffs = taxonomy.managedHandoffs.filter(
-    (grammar) => !RENDERER_HANDOFF_KINDS.includes(grammar.kind),
-)
+const jobPatterns = (kind: string) =>
+    HANDOFF_KIND_TO_JOB_KINDS[kind]!.map((job) => ANDROID_SAF_HANDOFF_ID_PATTERNS[job]!)
 
 function spoolSource(displayName: string): AndroidSpoolReady {
     return { token: 'token-1', displayName, bytes: 4, totalBytes: 4 }
@@ -38,30 +37,27 @@ function spoolSource(displayName: string): AndroidSpoolReady {
 describe('native file taxonomy golden fixture', () => {
     it('covers every recovery pattern with a fixture grammar and vice versa', () => {
         expect(
-            Object.values(HANDOFF_KIND_TO_JOB_KIND).sort(),
+            Object.values(HANDOFF_KIND_TO_JOB_KINDS).flat().sort(),
         ).toEqual(Object.keys(ANDROID_SAF_HANDOFF_ID_PATTERNS).sort())
         expect(
             taxonomy.managedHandoffs.map((grammar) => grammar.kind).sort(),
-        ).toEqual([...Object.keys(HANDOFF_KIND_TO_JOB_KIND), ...RENDERER_HANDOFF_KINDS].sort())
+        ).toEqual(Object.keys(HANDOFF_KIND_TO_JOB_KINDS).sort())
     })
 
     it('accepts every managed handoff grammar and captures the export id', () => {
-        for (const grammar of jobHandoffs) {
-            const pattern =
-                ANDROID_SAF_HANDOFF_ID_PATTERNS[
-                    HANDOFF_KIND_TO_JOB_KIND[grammar.kind]
-                ]
-            expect(pattern, grammar.kind).toBeDefined()
-            for (const suffix of grammar.suffixes) {
-                const name = `${grammar.prefix}${taxonomy.uuid}${suffix}`
-                const path = `C:\\app\\${taxonomy.handoffDirectory.replaceAll('/', '\\')}\\${name}`
-                expect(pattern!.exec(path)?.[1], name).toBe(taxonomy.uuid)
-                expect(
-                    pattern!.exec(
-                        `/data/app/${taxonomy.handoffDirectory}/${name}`,
-                    )?.[1],
-                    name,
-                ).toBe(taxonomy.uuid)
+        for (const grammar of taxonomy.managedHandoffs) {
+            for (const pattern of jobPatterns(grammar.kind)) {
+                for (const suffix of grammar.suffixes) {
+                    const name = `${grammar.prefix}${taxonomy.uuid}${suffix}`
+                    const path = `C:\\app\\${taxonomy.handoffDirectory.replaceAll('/', '\\')}\\${name}`
+                    expect(pattern.exec(path)?.[1], name).toBe(taxonomy.uuid)
+                    expect(
+                        pattern.exec(
+                            `/data/app/${taxonomy.handoffDirectory}/${name}`,
+                        )?.[1],
+                        name,
+                    ).toBe(taxonomy.uuid)
+                }
             }
         }
     })
@@ -79,16 +75,14 @@ describe('native file taxonomy golden fixture', () => {
     it('rejects a grammar name against every other grammar', () => {
         for (const grammar of taxonomy.managedHandoffs) {
             const name = `${grammar.prefix}${taxonomy.uuid}${grammar.suffixes[0]}`
-            for (const other of jobHandoffs) {
+            for (const other of taxonomy.managedHandoffs) {
                 if (other.kind === grammar.kind) continue
-                const pattern =
-                    ANDROID_SAF_HANDOFF_ID_PATTERNS[
-                        HANDOFF_KIND_TO_JOB_KIND[other.kind]
-                    ]!
-                expect(
-                    pattern.exec(`/x/${name}`),
-                    `${name} vs ${other.kind}`,
-                ).toBeNull()
+                for (const pattern of jobPatterns(other.kind)) {
+                    expect(
+                        pattern.exec(`/x/${name}`),
+                        `${name} vs ${other.kind}`,
+                    ).toBeNull()
+                }
             }
         }
     })

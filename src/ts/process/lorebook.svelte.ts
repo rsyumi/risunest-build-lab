@@ -214,19 +214,22 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
     }
 
     const regexCache = new Map<string, RegExp | null>()
-    const getRegex = (pattern: string, flags: string) => {
-        const cacheKey = JSON.stringify([pattern, flags])
-        if (regexCache.has(cacheKey)) {
-            return regexCache.get(cacheKey) ?? null
+    /** Compiles a `/pattern/flags` key once per invocation; null when it is not a valid regex. */
+    const getRegex = (regexString: string) => {
+        if (regexCache.has(regexString)) {
+            return regexCache.get(regexString) ?? null
         }
-        try {
-            const regex = new RegExp(pattern, flags)
-            regexCache.set(cacheKey, regex)
-            return regex
-        } catch (error) {
-            regexCache.set(cacheKey, null)
-            return null
+        let regex: RegExp | null = null
+        const parsed = regexString.match(/^\/([\s\S]*)\/([dgimsuvy]*)$/)
+        if (parsed) {
+            try {
+                regex = new RegExp(parsed[1], parsed[2])
+            } catch (error) {
+                regex = null
+            }
         }
+        regexCache.set(regexString, regex)
+        return regex
     }
 
     let recursivePrompt: MessageView[] = []
@@ -249,33 +252,24 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
         )
 
         if(arg.regex){
+            const regexes: { regex: RegExp, source: string }[] = []
+            for(const regexKey of arg.keys){
+                const regex = getRegex(regexKey.raw)
+                if(!regex){
+                    return false
+                }
+                regexes.push({ regex, source: regexKey.raw })
+            }
             for(const mText of mList){
-                for(const regexKey of arg.keys){
-                    const regexString = regexKey.raw
-                    if(!regexString.startsWith('/')){
-                        return false
-                    }
-                    const regexFlag = regexString.split('/').pop()
-                    if(regexFlag){
-                        arg.keys[0] = {
-                            raw: regexString.replace('/' + regexFlag, ''),
-                            lower: '',
-                            noSpace: '',
-                        }
-                        const regex = getRegex(arg.keys[0].raw, regexFlag)
-                        if (!regex) {
-                            return false
-                        }
-                        regex.lastIndex = 0
-                        const d = regex.test(mText.data)
-                        if(d){
-                            matchLog.push({
-                                prompt: mText.prompt,
-                                source: mText.source,
-                                activated: regexString
-                            })
-                            return true
-                        }
+                for(const {regex, source} of regexes){
+                    regex.lastIndex = 0
+                    if(regex.test(mText.data)){
+                        matchLog.push({
+                            prompt: mText.prompt,
+                            source: mText.source,
+                            activated: source
+                        })
+                        return true
                     }
                 }
             }

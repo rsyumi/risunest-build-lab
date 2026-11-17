@@ -31,8 +31,6 @@ vi.mock('@lucide/svelte', async () => (await import('./AlertComp.testSupport')).
 vi.mock('../SideBars/BarIcon.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
 vi.mock('../UI/GUI/TextInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
 vi.mock('../UI/GUI/Button.svelte', async () => (await import('./AlertComp.testSupport')).componentModule('button'))
-vi.mock('../UI/GUI/SelectInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
-vi.mock('../UI/GUI/OptionInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
 vi.mock('../UI/DeferredMarkdown.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
 vi.mock('../UI/GUI/TextAreaInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
 vi.mock('../Setting/Pages/Module/ModuleChatMenu.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
@@ -67,6 +65,27 @@ function branch(preview: string, x = 0) {
 
 describe('AlertComp branch view', () => {
     let mounted: ReturnType<typeof mount> | undefined
+
+    it('returns the PNG format understood by the native card export route', async () => {
+        alertStore.set({ type: 'cardexport', msg: '', submsg: '' })
+        const target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(AlertComp, { target })
+        await tick()
+        ;[...target.querySelectorAll('button')].find(button => button.textContent === 'Character Card V3')!.click()
+        await tick()
+        const select = target.querySelector('select')!
+        // Happy DOM only implements :checked for inputs, while Svelte also queries options.
+        const querySelector = select.querySelector.bind(select)
+        vi.spyOn(select, 'querySelector').mockImplementation(selector => selector === ':checked'
+            ? [...select.options].find(option => option.selected) ?? null
+            : querySelector(selector))
+        select.value = [...select.options].find(option => option.textContent === 'PNG')!.value
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        await tick()
+        ;[...target.querySelectorAll('button')].find(button => button.textContent === language.export)!.click()
+        expect(JSON.parse(get(alertStore).msg)).toEqual({ type: '', type2: 'png' })
+    })
 
     it('shows and copies diagnostics for an error without a stack', async () => {
         const writeText = vi.fn(async () => {})

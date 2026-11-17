@@ -948,6 +948,31 @@ impl Provider for WebdavProvider {
         })
     }
 
+    fn replace_descriptor<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        locator: &'a RemoteLocator,
+        bytes: &'a HeadBytes,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, HeadReceipt> {
+        Box::pin(async move {
+            cancel.check()?;
+            let context = context_of(repository)?;
+            locator.validate_for(repository)?;
+            let object = object_path(locator)?;
+            if locator.collection.as_deref() != Some(DESCRIPTOR_FOLDER) || object.len() != 2 {
+                return Err(paths::corrupt());
+            }
+            let request = self.request(
+                context,
+                reqwest::Method::PUT,
+                paths::object_url(&context.base, &object),
+                ProviderOperation::ReplaceHead,
+            );
+            self.write_head(request, bytes, cancel).await
+        })
+    }
+
     /// 202 is an accepted request, not a finished deletion, so it is reported
     /// as transient rather than as a success.
     fn delete_object<'a>(

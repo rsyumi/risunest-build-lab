@@ -10,7 +10,8 @@
     import { persistentLocalSaveFailure } from 'src/ts/storage/persistentDataRuntime.svelte'
     import { serverSyncErrorMessage } from 'src/ts/storage/sync/serverSyncErrorMessage'
     import { syncStatus } from 'src/ts/storage/sync/syncStatus'
-    import { syncStatusDisplay } from 'src/ts/storage/sync/syncStatusView'
+    import { externalRenewalTarget, syncStatusDisplay } from 'src/ts/storage/sync/syncStatusView'
+    import { openExternalRenewal } from 'src/ts/setting/externalRenewalRequest'
     import { DBState, settingsOpen, SettingsMenuIndex, sideBarStore } from 'src/ts/stores.svelte'
     import { backNavigationLayer } from 'src/ts/ui/modalNavigation'
     import SettingButton from '../Setting/RisuNest/SettingButton.svelte'
@@ -20,6 +21,8 @@
     const strings = $derived(externalStorageStrings(DBState.db.language))
     const saveFailed = $derived($persistentLocalSaveFailure !== null)
     const display = $derived((DBState.db.risunestSyncStatusUi ?? true) && $syncStatus && syncStatusDisplay($syncStatus, strings, saveFailed))
+    // Sync stays stopped until the sign-in is renewed, so that replaces Sync Now.
+    const renewal = $derived(externalRenewalTarget($syncStatus))
     let panel = $state<HTMLElement>()
     let place = $state<{ top?: number; bottom?: number; left: number; right?: number; width?: number; height: number }>({ left: 8, height: 0 })
     let pending = $state<number | undefined>()
@@ -107,6 +110,12 @@
         $SettingsMenuIndex = 17
         $settingsOpen = true
     }
+    function renew() {
+        if (!renewal) return
+        const connectionId = renewal
+        close()
+        openExternalRenewal(connectionId)
+    }
 </script>
 
 <svelte:window onpointerdowncapture={outside} onresize={measure} />
@@ -123,7 +132,7 @@
             <h2 class="min-w-0 text-lg font-bold">{display.title}</h2>
             <StatusBadge label={display.label} tone={display.tone} />
         </div>
-        <dl class="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-5 gap-y-1.5 text-[13px] leading-[1.45] [&>dd]:min-w-0 [&>dd]:tabular-nums [&>dt]:whitespace-nowrap [&>dt]:text-textcolor2">
+        <dl class="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-5 gap-y-1.5 text-[13px] leading-[1.45] [&>dd]:min-w-0 [&>dd]:tabular-nums [&>dt]:whitespace-nowrap [&>dt]:text-subtext">
             {#if display.lastSuccessAt !== undefined}<dt>{copy.lastSuccess}</dt><dd>{new Date(display.lastSuccessAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</dd>{/if}
             {#if pending !== undefined}<dt>{copy.pendingChanges}</dt><dd>{copy.count.replace('{0}', pending.toLocaleString())}</dd>{/if}
             <dt>{strings.thisDevice}</dt>
@@ -137,9 +146,13 @@
             </div>
         {/if}
         <div class="mt-3 flex items-center gap-2 border-t border-darkborderc pt-3">
-            <SettingButton busy={running} onclick={syncNow}>{copy.syncNow}</SettingButton>
+            {#if renewal}
+                <SettingButton onclick={renew}>{strings.renew}</SettingButton>
+            {:else}
+                <SettingButton busy={running} onclick={syncNow}>{copy.syncNow}</SettingButton>
+            {/if}
             {#if !($settingsOpen && $SettingsMenuIndex === 17 && $activeRisuNestSettingsTab === 'sync')}
-                <button type="button" class="ml-auto min-h-11 text-sm text-textcolor2 underline hover:text-textcolor" onclick={openSettings}>{language.risuNest.tabs.sync}</button>
+                <button type="button" class="ml-auto min-h-11 text-sm text-subtext underline hover:text-textcolor" onclick={openSettings}>{language.risuNest.tabs.sync}</button>
             {/if}
         </div>
     </div>

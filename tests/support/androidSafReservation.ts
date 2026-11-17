@@ -35,5 +35,8 @@ export function androidSafReservationFixture(
                 state: 'cancelled', warningCodes: ['partial-destination-may-remain'],
             }))
         },
-        select: (requestId: string) => target.dispatchEvent(new CustomEvent('risunest-android-saf-reserved', {detail: {requestId}}))}
+        select: (requestId: string) => target.dispatchEvent(new CustomEvent('risunest-android-saf-reserved', {detail: {requestId}})),
+        backOut: (requestId: string) => target.dispatchEvent(new CustomEvent('risu-android-saf-destination', {
+            detail: {requestId, state: 'cancelled', warningCodes: []},
+        }))}
 }

@@ -25,6 +25,8 @@ interface ConsumeStreamingDisplayStreamOptions<T> {
         context: StreamingDisplayProcessContext,
     ): Promise<void>
     onValue?(value: T, snapshot: string): void
+    /** Runs once the stream's latest snapshot is applied, before completion-only display work. */
+    beforeCompletion?(): Promise<void>
 }
 
 interface ConsumeStreamingDisplayStreamResult<T> {
@@ -55,6 +57,7 @@ export async function consumeStreamingDisplayStream<T>(
         onError: () => {
             void options.reader.cancel().catch(() => {})
         },
+        beforeCompletion: options.beforeCompletion,
     })
     let abortPromise: Promise<void> | null = null
     const abortDisplay = () => abortPromise ??= controller.abort()

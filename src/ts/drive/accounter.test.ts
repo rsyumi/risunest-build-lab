@@ -4,17 +4,21 @@ import { encodeRisuSaveLegacy } from '../storage/risuSave'
 import { coldStorageHeader } from '../process/coldstorageData'
 import { changeLanguage, language } from 'src/lang'
 const f = vi.hoisted(() => ({
-    fetch: vi.fn(), confirm: vi.fn(), select: vi.fn(), characters: vi.fn(), readCold: vi.fn(), error: vi.fn(),
+    fetch: vi.fn(), confirm: vi.fn(), action: vi.fn(), select: vi.fn(), characters: vi.fn(), readCold: vi.fn(), error: vi.fn(),
     installed: null as Database | null,
+    options: undefined as import('../storage/saveCoordinator').PersistentReplacementOptions | undefined,
+    native: false,
 }))
+const present = (value: unknown) => ({ kind: 'present' as const, value })
 vi.mock('../sionyw', () => ({ fetchProtectedResource: f.fetch }) satisfies Partial<typeof import('../sionyw')>)
-vi.mock('../alert', async () => (await import('./backupRestore.testSupport')).alertModule({ alertCheckboxConfirm: f.confirm, alertSelect: f.select, alertError: f.error }))
-vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('../alert', async () => (await import('./backupRestore.testSupport')).alertModule({ alertCheckboxConfirm: f.confirm, alertActionConfirm: f.action, alertSelect: f.select, alertError: f.error }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: f.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('../storage/database.svelte', async () => (await import('./backupRestore.testSupport')).databaseModule(() => ({ account: { id: 'account' } }) as Database))
 vi.mock('../storage/libraryCharacters', async () => (await import('./backupRestore.testSupport')).libraryCharactersModule(f.characters))
 vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./backupRestore.testSupport')).persistentRuntimeModule({
     replacePersistentDatabase: async (database, _reason, options) => {
         f.installed = database
+        f.options = options
         options?.onPluginsRestarted?.()
         return { kind: 'committed', revision: 2, projection: 'applied' }
     },
@@ -35,6 +39,9 @@ beforeEach(() => {
         : { status: 500, text: async () => 'stopped by the test' })
     f.select.mockReset().mockResolvedValue('0')
     f.confirm.mockReset().mockResolvedValue({ confirmed: false, checked: false })
+    f.action.mockReset().mockResolvedValue(true)
+    f.native = false
+    f.options = undefined
     f.characters.mockReset()
     f.readCold.mockReset()
     f.installed = null
@@ -54,21 +61,25 @@ it('asks before replacing a library that holds a character, and declining keeps 
     expect(f.fetch).not.toHaveBeenCalledWith('/hub/backup/get', expect.anything())
 })
 
-function serveColdBackup() {
-    const bytes = encodeRisuSaveLegacy({
-        characters: [{ type: 'character', chaId: 'cold-character', name: 'Synthetic', coldstorage: 'character-body', chats: [] }],
-        botPresets: [],
-    })
+function serveBackup(database: object) {
+    const bytes = encodeRisuSaveLegacy(database)
     f.fetch.mockImplementation(async (path: string) => path === '/hub/backup/list'
         ? { status: 200, json: async () => ['1700000000000'] }
         : new Response(bytes as BodyInit, { status: 200 }))
     f.characters.mockResolvedValue(false)
-    f.readCold.mockImplementation(async (key: string) => key === 'character-body' ? {
+}
+
+function serveColdBackup() {
+    serveBackup({
+        characters: [{ type: 'character', chaId: 'cold-character', name: 'Synthetic', coldstorage: 'character-body', chats: [] }],
+        botPresets: [],
+    })
+    f.readCold.mockImplementation(async (key: string) => present(key === 'character-body' ? {
         character: {
             type: 'character', chaId: 'cold-character', name: 'Synthetic',
             chats: [{ id: 'chat-1', message: [{ role: 'char', data: coldStorageHeader + 'chat-body' }] }],
         },
-    } : [{ role: 'char', data: 'Synthetic restored message' }])
+    } : [{ role: 'char', data: 'Synthetic restored message' }]))
 }
 
 it('expands account history character and nested chat cold payloads before activation', async () => {
@@ -82,7 +93,10 @@ it('expands account history character and nested chat cold payloads before activ
     expect(f.installed?.characters[0]).not.toHaveProperty('coldstorage')
 })
 
-it.each([null, { unsupported: true }, { message: 'invalid' }, new Error('Synthetic cold fetch failed')])(
+it.each([
+    { kind: 'missing' }, { kind: 'unreadable' }, present(null), present({ unsupported: true }), present({ message: 'invalid' }),
+    new Error('Synthetic cold fetch failed'),
+])(
     'keeps the current library when an account history cold payload is unavailable or malformed',
     async (unavailable) => {
         serveColdBackup()
@@ -99,7 +113,7 @@ it.each([null, { unsupported: true }, { message: 'invalid' }, new Error('Synthet
 it('keeps the current library when a restored cold character has an unavailable nested chat', async () => {
     serveColdBackup()
     const readCold = f.readCold.getMockImplementation()!
-    f.readCold.mockImplementation(async (key: string) => key === 'chat-body' ? null : readCold(key))
+    f.readCold.mockImplementation(async (key: string) => key === 'chat-body' ? { kind: 'missing' } : readCold(key))
 
     await expect(loadRisuAccountBackup()).resolves.toBeUndefined()
 
@@ -113,10 +127,48 @@ it.each([
 ])('shows the unavailable account backup alert in %s without rejecting', async (locale, message) => {
     changeLanguage(locale)
     serveColdBackup()
-    f.readCold.mockResolvedValue(null)
+    f.readCold.mockResolvedValue({ kind: 'missing' })
 
     await expect(loadRisuAccountBackup()).resolves.toBeUndefined()
 
     expect(f.installed).toBeNull()
     expect(f.error).toHaveBeenCalledWith(message)
+})
+
+function servePluginBackup() {
+    serveBackup({
+        characters: [],
+        botPresets: [],
+        pluginCustomStorage: { inline: 'kept', _coldpluginIndex: 'dangling-index', _coldplugin: { zero: 'legacy-zero', huge: 'legacy-huge' } },
+    })
+    f.readCold.mockImplementation(async (key: string) => key === 'legacy-zero' ? present(0)
+        : key === 'legacy-huge' ? { kind: 'too-large' } : { kind: 'missing' })
+}
+
+it.each([false, true])('imports account backup plugin values and reports a dangling index and an oversized value (native %s)', async (native) => {
+    f.native = native
+    servePluginBackup()
+
+    await loadRisuAccountBackup()
+
+    expect(f.installed?.pluginCustomStorage).toStrictEqual({ inline: 'kept', zero: 0 })
+    const warnings = [
+        language.portableBackup.omittedRestoreData.pluginStorage(1),
+        language.portableBackup.omittedRestoreData.oversizedPluginStorage(1),
+    ]
+    if (native) {
+        expect(f.options?.upstreamImportWarnings).toEqual(warnings)
+        expect(f.action).not.toHaveBeenCalled()
+    } else {
+        expect(f.action).toHaveBeenCalledWith(expect.objectContaining({ description: warnings.join('\n\n') }))
+    }
+})
+
+it('keeps the current library when the plugin storage omission is declined on the web', async () => {
+    servePluginBackup()
+    f.action.mockResolvedValue(false)
+
+    await loadRisuAccountBackup()
+
+    expect(f.installed).toBeNull()
 })
