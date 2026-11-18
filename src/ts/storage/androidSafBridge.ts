@@ -1,3 +1,4 @@
+import type { OpenedFile } from '../openedFiles'
 import { withLibraryFileSelection } from './libraryFileOperation'
 import '../androidNativeControl'
 import { BackupSourceCopyError } from './backupSourceCopyFailure'
@@ -29,6 +30,10 @@ export interface AndroidSpoolBatch {
     requestId: string
     ready: AndroidSpoolReady[]
     failures: AndroidSpoolFailure[]
+    /** Files of the same opened intent outside the spool allowlist: their copies, or the ones that could not be copied. */
+    openedFiles?: OpenedFile[]
+    /** The spool tokens, copied paths and failed file names in the order the files were opened. */
+    order?: string[]
 }
 
 export interface AndroidSpoolListenerDependencies {
@@ -71,7 +76,7 @@ export function listenAndroidSpoolBatches(
 }
 
 export interface AndroidSpoolConsumer {
-    restore(input: { source: NativeFileJobSource; displayName: string }): Promise<void>
+    restore(input: { source: NativeFileJobSource; displayName: string; bytes: number }): Promise<void>
     unsupported(source: AndroidSpoolReady): void
     failed?(failure: AndroidSpoolFailure): void
 }
@@ -105,6 +110,7 @@ export async function consumeAndroidSpoolBatch(
         await consumer.restore({
             source: { type: 'androidSpool', token: source.token },
             displayName: source.displayName,
+            bytes: source.bytes,
         })
     }
 }

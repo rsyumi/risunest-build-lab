@@ -31,6 +31,7 @@ import {
     type NativeFileJobResult,
 } from './nativeFileJobs'
 import { describeDesktopSource } from './nativeFileSourceInfo'
+import { backupKindLabel, formatBytes } from '../gui/nativeFileJobDialogModel'
 import { formatPreservationReport } from './preservationReportMessage'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
 import { nativeRestoreDeadline } from './nativeRestoreDeadline'
@@ -49,6 +50,8 @@ export type BackupSourceFactory = (
 export type BackupRestoreResult = NativeFileJobResult
 export interface BackupRestoreOptions extends NativeFileRestoreJobOptions {
     onSource?(source: SourceInfo): void
+    /** The name and size to show for a source that is a copy of the user's file, such as a dropped file's inbox copy. */
+    sourceInfo?: SourceInfo
 }
 
 function combineSignals(...signals: (AbortSignal | undefined)[]) {
@@ -205,6 +208,8 @@ export function restoreBackupFromNativeSource(
     return restoreBackupFromSource(source, options, false)
 }
 
+let givenSourceRestores = 0
+
 async function restoreBackupFromSource(
     source: NativeFileJobSource | BackupSourceFactory,
     options: BackupRestoreOptions,
@@ -217,7 +222,8 @@ async function restoreBackupFromSource(
         )
     return runSharedNativeFileOperation(
         'import',
-        'backup-import',
+        // A second picker press joins the restore it opened; a given source is a restore of its own.
+        sourceFromPicker ? 'backup-import' : `backup-import:${++givenSourceRestores}`,
         async (context) => {
             const joined = combineSignals(context.signal, options.signal)
             let input: NativeFileJobSource | null = null
@@ -241,7 +247,9 @@ async function restoreBackupFromSource(
                 if (status.preservationReport)
                     report = status.preservationReport
             }
+            let sourceInfo: SourceInfo | undefined
             const onSource = (value: SourceInfo) => {
+                sourceInfo = value
                 context.setSource(value)
                 options.onSource?.(value)
             }
@@ -259,8 +267,11 @@ async function restoreBackupFromSource(
                 if (!input) return null
                 // The source is chosen, so the restore holds the background task from here.
                 context.protect()
+                // A saved conflict backup is named by its date, not by a file the user chose.
+                const fromFile = input.type !== 'savedConflict'
                 if (input.type === 'androidSeekable' || input.type === 'iosScoped' || input.type === 'savedConflict') selectedCustody = input
-                if (input.type === 'desktopPath')
+                if (options.sourceInfo) onSource(options.sourceInfo)
+                else if (input.type === 'desktopPath')
                     onSource(await nativeRestoreDeadline(describeDesktopSource(input.path), 'source metadata', undefined, undefined, undefined, joined.signal))
                 checkSignal(joined.signal)
                 const format = await nativeRestoreDeadline(invoke<
@@ -296,8 +307,16 @@ async function restoreBackupFromSource(
                     checkSignal(joined.signal)
                 }
                 const runtime = getPersistentDataRuntime()
+                const restoredFile = fromFile ? sourceInfo : undefined
                 const restoreOptions: NativeFileRestoreJobOptions = {
                     ...options,
+                    ...(restoredFile ? { confirmationDetails: [
+                        {
+                            label: language.risuNest.importIntake.detailFile,
+                            value: restoredFile.bytes === undefined ? restoredFile.name : `${restoredFile.name} · ${formatBytes(restoredFile.bytes)}`,
+                        },
+                        { label: language.risuNest.importIntake.detailKind, value: backupKindLabel(format) },
+                    ] } : {}),
                     signal: joined.signal,
                     onStatus,
                     assignPluginValues: selectPluginValueAssignment,

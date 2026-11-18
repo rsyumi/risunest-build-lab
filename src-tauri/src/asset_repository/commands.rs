@@ -1807,10 +1807,8 @@ mod tests {
     }
 
     /// A mock app over `root` with the store unopened and no CAS sessions.
-    fn app_at(root: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+    fn app_at(root: &std::path::Path) -> crate::test_app::MockApp {
+        let app = crate::test_app::mock_app();
         app.manage(crate::app_paths::AppPaths {
             data: root.to_owned(),
             data_entry: root.to_owned(),

@@ -3,14 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
     ios: false,
     android: false,
-    readFile: vi.fn(async (_path: string) => new Uint8Array([1])),
     invoke: vi.fn<(command: string, args?: unknown) => Promise<unknown>>(async () => []),
     listen: vi.fn(async (_event: string, _handler: (payload: unknown) => void) => () => {}),
     alertError: vi.fn(),
     listeners: [] as Array<(payload: unknown) => void>,
 }))
 
-vi.mock('@tauri-apps/plugin-fs', () => ({ readFile: mocks.readFile }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 vi.mock('@tauri-apps/api/event', () => ({
     listen: (event: string, handler: (payload: unknown) => void) => {
@@ -28,14 +26,15 @@ let consumeOpenedFiles: typeof api.consumeOpenedFiles
 let registerOpenedFileListeners: typeof api.registerOpenedFileListeners
 let OPENED_FILES_EVENT: typeof api.OPENED_FILES_EVENT
 let OPENED_FILES_TAKE_COMMAND: typeof api.OPENED_FILES_TAKE_COMMAND
+type OpenedFile = import('./openedFiles').OpenedFile
 const domListeners: Array<[string, EventListenerOrEventListenerObject]> = []
 
-function importerSpy() {
-    const imported: string[] = []
-    const importFile = vi.fn(async (name: string, _data: Uint8Array) => {
-        imported.push(name)
+function deliverySpy() {
+    const delivered: OpenedFile[][] = []
+    const deliver = vi.fn(async (files: OpenedFile[]) => {
+        delivered.push(files)
     })
-    return { imported, importFile }
+    return { delivered, deliver }
 }
 
 async function flush() {
@@ -57,8 +56,6 @@ describe('opened file delivery', () => {
             if ([OPENED_FILES_EVENT, 'risunest-ios-opened-files'].includes(type)) domListeners.push([type, listener])
             addEventListener(type, listener, options)
         })
-        mocks.readFile.mockClear()
-        mocks.readFile.mockImplementation(async (_path: string) => new Uint8Array([1]))
         mocks.invoke.mockClear()
         mocks.invoke.mockImplementation(async (_command: string) => [])
         mocks.listen.mockClear()
@@ -73,119 +70,77 @@ describe('opened file delivery', () => {
         vi.restoreAllMocks()
     })
 
-    it('drains iOS cold and warm opens in order and discards staged sources after import', async () => {
+    it('delivers each iOS cold and warm open with the files it could not prepare and discards its staged files afterwards', async () => {
         mocks.ios = true
         let take = 0
+        const unprepared = { name: 'unprepared.risunest', code: 'source-copy-failed' }
         mocks.invoke.mockImplementation(async command => {
             if (command.endsWith('take_opened_files')) return { files: ++take === 1
-                ? [{ path: '/staged/first.charx' }, { path: '/staged/broken.risum' }]
-                : [{ path: '/staged/last.charx' }] }
+                ? [{ path: '/staged/first.charx' }, unprepared, { path: '/staged/broken.risum' }]
+                : [unprepared] }
         })
-        const order: string[] = []
-        const importPath = vi.fn(async (path: string) => {
-            order.push(path)
-            if (path.includes('broken')) throw new Error('synthetic failure')
-            return true
+        const delivered: OpenedFile[][] = []
+        registerOpenedFileListeners(async (files) => {
+            delivered.push(files)
+            expect(mocks.invoke.mock.calls.filter(([command]) => command.endsWith('discard_file'))).toEqual([])
+            if (files.includes('/staged/broken.risum')) throw new Error('synthetic failure')
         })
-        registerOpenedFileListeners(vi.fn(), importPath)
         window.dispatchEvent(new Event('risunest-ios-opened-files'))
-        await vi.waitFor(() => expect(order).toHaveLength(3))
+        await vi.waitFor(() => expect(delivered).toHaveLength(2))
         await flush()
-        expect(order).toEqual(['/staged/first.charx', '/staged/broken.risum', '/staged/last.charx'])
-        expect(mocks.readFile).not.toHaveBeenCalled()
+        // A file that could not be prepared stays in its opening, also when it is the only one.
+        expect(delivered).toEqual([['/staged/first.charx', unprepared, '/staged/broken.risum'], [unprepared]])
         expect(mocks.listen).not.toHaveBeenCalled()
         expect(mocks.invoke.mock.calls.filter(([command]) => command.endsWith('discard_file'))
-            .map(([, args]) => args)).toEqual(order.map(path => ({ path })))
+            .map(([, args]) => args)).toEqual([{ path: '/staged/first.charx' }, { path: '/staged/broken.risum' }])
         expect(mocks.alertError).toHaveBeenCalledOnce()
+        expect(String(mocks.alertError.mock.calls[0][0])).toContain('/staged/broken.risum')
     })
 
-    it('acknowledges an Android queued file only after its importer completes', async () => {
-        mocks.android = true
-        const acknowledgeOpenedFile = vi.fn(async () => {})
-        window.RisuLifecycleBridge = { acknowledgeOpenedFile }
-        let complete!: () => void
-        const importFile = vi.fn(() => new Promise<void>(resolve => { complete = resolve }))
-        ;(window as Window & { tauriOpenedFiles?: string[] }).tauriOpenedFiles = ['/cache/opened_files/card.charx']
-        registerOpenedFileListeners(importFile)
-        await flush()
-        expect(importFile).toHaveBeenCalledOnce()
-        expect(acknowledgeOpenedFile).not.toHaveBeenCalled()
-        complete()
-        await flush()
-        expect(acknowledgeOpenedFile).toHaveBeenCalledWith('/cache/opened_files/card.charx')
-    })
-
-    it('acknowledges every Android delivery once its outcome has been reported', async () => {
+    it('hands each Android opening over as it arrives and acknowledges its files only after its own delivery ended', async () => {
         mocks.android = true
         const acknowledgeOpenedFile = vi.fn((_path: string) => {})
         window.RisuLifecycleBridge = { acknowledgeOpenedFile }
-        const importFile = vi.fn(async (path: string): Promise<void | 'failed'> => {
-            if (path === 'reported.charx') return 'failed'
-            throw new Error('synthetic import failure')
+        const started: OpenedFile[][] = []
+        const completions: Array<() => void> = []
+        registerOpenedFileListeners((files) => {
+            started.push(files)
+            return new Promise<void>(resolve => { completions.push(resolve) })
         })
-        const importPath = vi.fn(async (path: string): Promise<boolean | 'failed'> =>
-            path === 'failed.charx' ? 'failed' : path === 'complete.charx')
-        registerOpenedFileListeners(importFile, importPath)
-        await consumeOpenedFiles(['failed.charx', 'legacy.charx', 'reported.charx', 'complete.charx'])
-        expect(mocks.readFile.mock.calls.map(([path]) => path)).toEqual(['legacy.charx', 'reported.charx'])
-        expect(mocks.alertError).toHaveBeenCalledOnce()
+        const uncopied = { name: 'uncopied.risup', code: 'source-copy-failed' }
+        const first = consumeOpenedFiles(['/cache/opened_files/card.charx', uncopied])
+        const second = consumeOpenedFiles(['/cache/opened_files/later.charx'])
+        await flush()
+        // The intake queues openings with dropped files in arrival order, so the second does not wait here.
+        expect(started).toEqual([['/cache/opened_files/card.charx', uncopied], ['/cache/opened_files/later.charx']])
+        expect(acknowledgeOpenedFile).not.toHaveBeenCalled()
+        completions[1]()
+        await second
+        expect(acknowledgeOpenedFile.mock.calls.map(([path]) => path)).toEqual(['/cache/opened_files/later.charx'])
+        completions[0]()
+        await first
         expect(acknowledgeOpenedFile.mock.calls.map(([path]) => path))
-            .toEqual(['failed.charx', 'legacy.charx', 'reported.charx', 'complete.charx'])
+            .toEqual(['/cache/opened_files/later.charx', '/cache/opened_files/card.charx'])
     })
 
-    it('reads and imports every file in order', async () => {
-        const { imported, importFile } = importerSpy()
-        registerOpenedFileListeners(importFile)
-
-        await consumeOpenedFiles(['a.charx', 'b.risup'])
-
-        expect(mocks.readFile.mock.calls.map((call) => call[0])).toEqual(['a.charx', 'b.risup'])
-        expect(imported).toEqual(['a.charx', 'b.risup'])
-        expect(mocks.alertError).not.toHaveBeenCalled()
-    })
-
-    it('reports a failing file and keeps importing the rest', async () => {
-        const { imported, importFile } = importerSpy()
-        mocks.readFile.mockImplementation(async (path: string) => {
-            if (path === 'broken.risup') {
-                throw new Error('unreadable')
-            }
-            return new Uint8Array([1])
-        })
-        registerOpenedFileListeners(importFile)
-
-        await consumeOpenedFiles(['broken.risup', 'good.risum'])
-
-        expect(imported).toEqual(['good.risum'])
-        expect(mocks.alertError).toHaveBeenCalledTimes(1)
-        expect(String(mocks.alertError.mock.calls[0][0])).toContain('broken.risup')
-    })
-
-    it('drains the Android cold start injection once', async () => {
+    it('drains the Android cold start injection once and delivers a warm start with its files', async () => {
         const holder = window as Window & { tauriOpenedFiles?: unknown }
-        holder.tauriOpenedFiles = ['/cache/opened_files/1-0-card.charx']
-        const { imported, importFile } = importerSpy()
+        holder.tauriOpenedFiles = ['/cache/opened_files/1-0-card.charx', '/cache/opened_files/1-1-preset.risup']
+        const { delivered, deliver } = deliverySpy()
 
-        registerOpenedFileListeners(importFile)
+        registerOpenedFileListeners(deliver)
         await flush()
-
-        expect(imported).toEqual(['/cache/opened_files/1-0-card.charx'])
         expect(holder.tauriOpenedFiles).toBeUndefined()
-    })
 
-    it('imports the files an Android warm start dispatches', async () => {
-        const { imported, importFile } = importerSpy()
-        registerOpenedFileListeners(importFile)
+        window.dispatchEvent(new CustomEvent(OPENED_FILES_EVENT, {
+            detail: { files: ['/cache/opened_files/2-0-preset.risup'] },
+        }))
         await flush()
 
-        window.dispatchEvent(
-            new CustomEvent(OPENED_FILES_EVENT, {
-                detail: { files: ['/cache/opened_files/2-0-preset.risup'] },
-            }),
-        )
-        await flush()
-
-        expect(imported).toEqual(['/cache/opened_files/2-0-preset.risup'])
+        expect(delivered).toEqual([
+            ['/cache/opened_files/1-0-card.charx', '/cache/opened_files/1-1-preset.risup'],
+            ['/cache/opened_files/2-0-preset.risup'],
+        ])
     })
 
     it('takes the desktop launch arguments and re-takes them once the notifications settle', async () => {
@@ -197,18 +152,17 @@ describe('opened file delivery', () => {
                 pending = []
                 return files
             })
-            const { imported, importFile } = importerSpy()
-            const importBatch = vi.fn(async (_paths: string[]) => {})
+            const { delivered, deliver } = deliverySpy()
 
-            registerOpenedFileListeners(importFile, undefined, { accepts: path => path.endsWith('.charx'), importBatch })
+            registerOpenedFileListeners(deliver)
             await flush()
 
             expect(mocks.invoke).toHaveBeenCalledWith(OPENED_FILES_TAKE_COMMAND)
             expect(mocks.listen).toHaveBeenCalledWith(OPENED_FILES_EVENT, expect.any(Function))
-            expect(imported).toEqual(['C:\\cards\\first.charx'])
+            expect(delivered).toEqual([['C:\\cards\\first.charx']])
 
             // Explorer starts one process per selected file, so one selection arrives as several notifications.
-            for (const file of ['C:\\cards\\second.charx', 'C:\\cards\\third.charx']) {
+            for (const file of ['C:\\cards\\second.charx', 'C:\\cards\\backup.risunest']) {
                 pending.push(file)
                 mocks.listeners[0]?.({ payload: { files: [file] } })
                 await vi.advanceTimersByTimeAsync(api.DESKTOP_OPENED_FILES_SETTLE_MS - 1)
@@ -218,57 +172,17 @@ describe('opened file delivery', () => {
             await flush()
 
             expect(mocks.invoke).toHaveBeenCalledTimes(2)
-            expect(importBatch).toHaveBeenCalledExactlyOnceWith(['C:\\cards\\second.charx', 'C:\\cards\\third.charx'])
-            expect(imported).toEqual(['C:\\cards\\first.charx'])
+            expect(delivered).toEqual([
+                ['C:\\cards\\first.charx'],
+                ['C:\\cards\\second.charx', 'C:\\cards\\backup.risunest'],
+            ])
+            expect(mocks.alertError).not.toHaveBeenCalled()
         } finally {
             vi.useRealTimers()
         }
     })
 
-    it('imports two or more opened characters or modules in one batch after the other files', async () => {
-        const order: string[] = []
-        const importFile = vi.fn(async (name: string) => { order.push(`file:${name}`) })
-        const importPath = vi.fn(async (path: string) => {
-            order.push(`path:${path}`)
-            return path.endsWith('.risunest')
-        })
-        const importBatch = vi.fn(async (paths: string[]) => { order.push(`batch:${paths.join(',')}`) })
-        registerOpenedFileListeners(importFile, importPath, {
-            accepts: path => /\.(charx|risum)$/.test(path),
-            importBatch,
-        })
-
-        await consumeOpenedFiles(['a.charx', 'backup.risunest', 'preset.risup', 'b.risum'])
-        // A single character keeps its own import.
-        await consumeOpenedFiles(['c.charx', 'other.risup'])
-
-        expect(order).toEqual([
-            'path:backup.risunest',
-            'path:preset.risup', 'file:preset.risup',
-            'batch:a.charx,b.risum',
-            'path:c.charx', 'file:c.charx',
-            'path:other.risup', 'file:other.risup',
-        ])
-        expect(mocks.alertError).not.toHaveBeenCalled()
-    })
-
-    it('discards each staged iOS file of a batch once, also when the batch throws', async () => {
-        mocks.ios = true
-        mocks.invoke.mockImplementation(async command =>
-            command.endsWith('take_opened_files') ? { files: [] } : undefined)
-        const importBatch = vi.fn(async (_paths: string[]) => { throw new Error('synthetic batch failure') })
-        registerOpenedFileListeners(vi.fn(), vi.fn(async () => true), { accepts: path => path.endsWith('.charx'), importBatch })
-        await flush()
-
-        await consumeOpenedFiles(['/staged/first.charx', '/staged/second.charx'])
-
-        expect(importBatch).toHaveBeenCalledExactlyOnceWith(['/staged/first.charx', '/staged/second.charx'])
-        expect(mocks.invoke.mock.calls.filter(([command]) => command.endsWith('discard_file'))
-            .map(([, args]) => args)).toEqual([{ path: '/staged/first.charx' }, { path: '/staged/second.charx' }])
-        expect(mocks.alertError).toHaveBeenCalledOnce()
-    })
-
-    it('imports files queued while the desktop subscription is still being established', async () => {
+    it('delivers files queued while the desktop subscription is still being established', async () => {
         let subscriptionReady!: (unlisten: () => void) => void
         mocks.listen.mockImplementationOnce(
             () =>
@@ -282,16 +196,16 @@ describe('opened file delivery', () => {
             pending = []
             return files
         })
-        const { imported, importFile } = importerSpy()
+        const { delivered, deliver } = deliverySpy()
 
-        registerOpenedFileListeners(importFile)
+        registerOpenedFileListeners(deliver)
         await flush()
         // A second process queues a file before native event delivery is subscribed.
         pending.push('C:\\cards\\during-startup.risup')
         subscriptionReady(() => {})
         await flush()
 
-        expect(imported).toEqual(['C:\\cards\\during-startup.risup'])
+        expect(delivered).toEqual([['C:\\cards\\during-startup.risup']])
         expect(pending).toEqual([])
     })
 })

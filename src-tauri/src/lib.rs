@@ -82,6 +82,8 @@ mod trust_boundary;
 #[cfg(test)]
 mod command_future_size;
 #[cfg(test)]
+mod test_app;
+#[cfg(test)]
 mod test_memory;
 #[cfg(test)]
 mod test_process;
@@ -938,6 +940,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_snapshot_restore_bodies_status,
         native_file_jobs::native_plugin_values_assign,
         native_file_jobs::native_backup_source_format,
+        import_export_jobs::intake_classifier::import_intake_classify,
         native_file_jobs::native_conflict_backup_source,
         native_file_jobs::native_portable_source_discard,
         native_file_jobs::native_portable_source_cleanup_orphans,
