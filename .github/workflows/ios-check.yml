@@ -10,7 +10,7 @@ on:
         description: Simulator verification scope
         type: choice
         default: full
-        options: [full, app-lock]
+        options: [full, app-lock, app-lock-ui]
       ipad:
         description: Also run the iPad simulator checks
         type: boolean
@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
-          case "$IOS_CHECK_SCOPE" in full|app-lock) ;; *) exit 1;; esac
+          case "$IOS_CHECK_SCOPE" in full|app-lock|app-lock-ui) ;; *) exit 1;; esac
           case "$IOS_CHECK_RUNNER" in macos-15|macos-26|xcode-27) ;; *) exit 1;; esac
           case "$IOS_CHECK_XCODE" in 26.3|27.0|27.1|27.2) ;; *) exit 1;; esac
           [[ "$IOS_CHECK_RUNTIME" =~ ^([0-9]+(\.[0-9]+)*)?$ ]]

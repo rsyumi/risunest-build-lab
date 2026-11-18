@@ -73,6 +73,30 @@ def retried_tests(log):
         outcomes.setdefault(name,set()).add(outcome)
     return sorted(name for name,seen in outcomes.items() if seen=={'passed','failed'})
 
+def ui_tests(*selection):
+    uitests=root/'.ios-ui-tests'
+    uitests.mkdir()
+    spec={
+        'name':'RisuNestUITests',
+        'targets':{'RisuNestUITests':{
+            'type':'bundle.ui-testing','platform':'iOS','deploymentTarget':'16.4',
+            'sources':[str(root/'benchmarks/ios/NativeUITests.swift')],
+            'settings':{'base':{'GENERATE_INFOPLIST_FILE':'YES','PRODUCT_BUNDLE_IDENTIFIER':identifier+'.uitests'}}}},
+        'schemes':{'RisuNestUITests':{'build':{'targets':{'RisuNestUITests':['test']}},'test':{'targets':['RisuNestUITests']}}}
+    }
+    (uitests/'project.json').write_text(json.dumps(spec))
+    print(run(['xcodegen','generate','--spec','project.json'],cwd=uitests))
+    ui_log=run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
+               '-destination','platform=iOS Simulator,id='+device,'-derivedDataPath',str(uitests/'DerivedData'),
+               '-resultBundlePath',str(artifacts/'ios-ui.xcresult'),
+               '-retry-tests-on-failure','-test-iterations','2',*selection,
+               'CODE_SIGNING_ALLOWED=NO'],cwd=uitests)
+    print(ui_log)
+    retried=retried_tests(ui_log)
+    (artifacts/'ios-ui-retried.txt').write_text(''.join(name+'\n' for name in retried))
+    for name in retried:
+        print('::warning title=iOS UI test retried::'+name+' failed and then passed on retry',flush=True)
+
 def compatible_type(prefix):
     names={item['name'] for item in available if item['isAvailable'] and item['name'].startswith(prefix)}
     if not names:
@@ -176,6 +200,10 @@ try:
         run_app_lock_frames()
         (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'scope':'app-lock','appLockFrames':True}))
         sys.exit(0)
+    if os.environ.get('IOS_CHECK_SCOPE', 'full') == 'app-lock-ui':
+        ui_tests('-only-testing:RisuNestUITests/NativeUITests/testAppLockInactiveDepartures')
+        (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'scope':'app-lock-ui'}))
+        sys.exit(0)
     launch('contracts');first=collect('contracts')
     launch('reload');second=collect('reload',120)
     before=next(x['result'] for x in first if x['stage']=='persistence')
@@ -191,35 +219,13 @@ try:
     launch('app');collect('app',180)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-chat.png')]))
     launch('app-restart');collect('app-restart',120)
-    uitests=root/'.ios-ui-tests'
-    uitests.mkdir()
-    spec={
-        'name':'RisuNestUITests',
-        'targets':{'RisuNestUITests':{
-            'type':'bundle.ui-testing','platform':'iOS','deploymentTarget':'16.4',
-            'sources':[str(root/'benchmarks/ios/NativeUITests.swift')],
-            'settings':{'base':{'GENERATE_INFOPLIST_FILE':'YES','PRODUCT_BUNDLE_IDENTIFIER':identifier+'.uitests'}}}},
-        'schemes':{'RisuNestUITests':{'build':{'targets':{'RisuNestUITests':['test']}},'test':{'targets':['RisuNestUITests']}}}
-    }
-    (uitests/'project.json').write_text(json.dumps(spec))
-    print(run(['xcodegen','generate','--spec','project.json'],cwd=uitests))
-    ui_log=run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
-               '-destination','platform=iOS Simulator,id='+device,'-derivedDataPath',str(uitests/'DerivedData'),
-               '-resultBundlePath',str(artifacts/'ios-ui.xcresult'),
-               '-retry-tests-on-failure','-test-iterations','2',
-               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Raw',
-               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Gzip',
-               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Raw',
-               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Gzip',
-               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Raw',
-               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Gzip',
-               '-skip-testing:RisuNestUITests/NativeUITests/testDeviceCore',
-               'CODE_SIGNING_ALLOWED=NO'],cwd=uitests)
-    print(ui_log)
-    retried=retried_tests(ui_log)
-    (artifacts/'ios-ui-retried.txt').write_text(''.join(name+'\n' for name in retried))
-    for name in retried:
-        print('::warning title=iOS UI test retried::'+name+' failed and then passed on retry',flush=True)
+    ui_tests('-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Raw',
+             '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Gzip',
+             '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Raw',
+             '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Gzip',
+             '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Raw',
+             '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Gzip',
+             '-skip-testing:RisuNestUITests/NativeUITests/testDeviceCore')
     frame_runner=root/'benchmarks/appLock/frames.py'
     if frame_runner.is_file():
         run_app_lock_frames()
