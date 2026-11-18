@@ -51,8 +51,8 @@
     {
       "path": "benchmarks/appLock/mutationPlugin.ts",
       "mode": "100644",
-      "bytes": 985,
-      "sha256": "760dc66e4ca47d7dfd9f10a828e5c8adc3a9decc702e86050979b3a03a8903c4"
+      "bytes": 1017,
+      "sha256": "da2cf7f8699506387f60e84708f1fbf6953af8e3fa61ee6cc011f80729c155e3"
     },
     {
       "path": "benchmarks/bounded-materialization/browser-memory.mjs",
@@ -249,8 +249,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 57347,
-      "sha256": "82d5731509ec3f50a9ce3e55035d76cb2ec3837193c40a210360f7f54d631cb1"
+      "bytes": 57803,
+      "sha256": "c24cca51b2fb2af1dc34a53056abbf2cccf822c33a227a8d72c61b2827155c54"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -6273,8 +6273,8 @@
     {
       "path": "src-tauri/src/asset_repository/commands.rs",
       "mode": "100644",
-      "bytes": 105102,
-      "sha256": "49e2b66b7ac016b7b1641e40b86f0df10aabc4b07891f2759dfa9ee5dfc6c0d4"
+      "bytes": 105981,
+      "sha256": "ddacbda8a87d3eec99ba22cd5d9405ff41284195f2261fbae3e87eff0827b464"
     },
     {
       "path": "src-tauri/src/asset_repository/coordinator.rs",
@@ -6291,8 +6291,8 @@
     {
       "path": "src-tauri/src/asset_repository/job_pins.rs",
       "mode": "100644",
-      "bytes": 86912,
-      "sha256": "43309aeb53618d1039117ab7134c9df210b74f54e56988d1c8f9eb9d2298c655"
+      "bytes": 87345,
+      "sha256": "55c6a01b1848f85e3b1205ddd1e62a26507d6236aa04c89b2def075ff43573b8"
     },
     {
       "path": "src-tauri/src/asset_repository/journal_frame.rs",
@@ -7791,8 +7791,8 @@
     {
       "path": "src-tauri/src/native_media/ipc.rs",
       "mode": "100644",
-      "bytes": 55544,
-      "sha256": "b5d8ec5e69d989cf1b65acbd758f9f341090bb6935f9818e5c8b5ab10dc6bda9"
+      "bytes": 55918,
+      "sha256": "535027f28f795fda1785951d9dc74eea7f70968e65c2b308f36f45046539df24"
     },
     {
       "path": "src-tauri/src/native_media/mod.rs",
@@ -7941,8 +7941,8 @@
     {
       "path": "src-tauri/src/persistent_store/commands.rs",
       "mode": "100644",
-      "bytes": 211187,
-      "sha256": "1ffc9e2c32a7958e27ae2defc02a35c47af7a5c486487033fa14081f6d2871b0"
+      "bytes": 214441,
+      "sha256": "e1f8634ddf8d2773eb12875d8a75807cea19c0af0fe05d61b22315eb0faa641c"
     },
     {
       "path": "src-tauri/src/persistent_store/commands/archive_names.rs",
@@ -8295,8 +8295,8 @@
     {
       "path": "src-tauri/src/persistent_store/mod.rs",
       "mode": "100644",
-      "bytes": 159889,
-      "sha256": "67dbb81afa025af174dfce0e47022e4ccc79fa54072789267a260ed64d1f6118"
+      "bytes": 160170,
+      "sha256": "332a3d454491ad9bfc21c5430da03e3fe37f51fa6cbcb20043e0948bc2a6f276"
     },
     {
       "path": "src-tauri/src/persistent_store/owner_projection.rs",
@@ -12171,20 +12171,20 @@
     {
       "path": "src/ts/appLock/appLock.test.ts",
       "mode": "100644",
-      "bytes": 5921,
-      "sha256": "563ea49ceceb0c9c1968eb3cd407f56894264f659f7c5f6ae2766c21fe811708"
+      "bytes": 6897,
+      "sha256": "9a8cef8d28ed181dfe3172ec6987b4968fca8036c8c403810f7b872fb7c0f51a"
     },
     {
       "path": "src/ts/appLock/controller.test.ts",
       "mode": "100644",
-      "bytes": 33897,
-      "sha256": "e6066dc5967b30aae3d3c4961b2745c998bcf1a8bacfd4f713d968ef72f08b2a"
+      "bytes": 32618,
+      "sha256": "3e60a1bf61b48eaeebab561b877627e45d0c831ae4cd0cb257e6ebe9da1553c5"
     },
     {
       "path": "src/ts/appLock/controller.ts",
       "mode": "100644",
-      "bytes": 25251,
-      "sha256": "f26e4441d2ec299fa9746c1cd88269f38d907f099129402c59d21c4e846eb819"
+      "bytes": 24784,
+      "sha256": "9f0cd8b8941e469319ff998f470f492fc015746123f9156b72af87be3fbfdca8"
     },
     {
       "path": "src/ts/appLock/input.ts",
@@ -12195,8 +12195,8 @@
     {
       "path": "src/ts/appLock/native.ts",
       "mode": "100644",
-      "bytes": 3839,
-      "sha256": "a9c48102f760dc6d0804474f79a2888b8ab8ac533ad9e253be3edbedb67a7b30"
+      "bytes": 4710,
+      "sha256": "0865c320bc3648122ec2da930069092a2fd61ab293d6c352330f62006fdba5cd"
     },
     {
       "path": "src/ts/appLock/record.ts",
@@ -17919,8 +17919,8 @@
     {
       "path": "src/ts/storage/rendererDocument.ts",
       "mode": "100644",
-      "bytes": 511,
-      "sha256": "9210e0a57104949847f37fb640f8a07c0372dd175bfa8cc9730ab4e0c19882b6"
+      "bytes": 668,
+      "sha256": "44816e5dd7053e5c81dcca935f921ad55a82cb161bf8c4a7595a3ab81e729ab2"
     },
     {
       "path": "src/ts/storage/residualBrowserStorage.test.ts",
