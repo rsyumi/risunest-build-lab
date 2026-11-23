@@ -131,6 +131,10 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
             data.keepAttr = false
             break
         }
+        case 'rel':{
+            data.attrValue = 'noopener noreferrer'
+            break
+        }
     }
 })
 
@@ -1212,7 +1216,7 @@ function readMatcherChatVar(context: matcherArg | null, key: string): string {
     noteChatVariableRead(key)
     if (context?.chatVariables) return context.chatVariables[key] ?? 'null'
     if (context?.getChatVar) return context.getChatVar(key)
-    return getChatVar(key)
+    return getChatVar(key, context?.db)
 }
 
 function readMatcherGlobalChatVar(context: matcherArg | null, key: string): string {
@@ -1266,13 +1270,13 @@ function initMatcher(){
             format,
             timestamp || activeMatcherContext?.currentTime,
         ),
-        getModules: () => activeMatcherContext?.modules ?? getModules(),
-        getModuleLorebooks: () => activeMatcherContext?.moduleLorebooks ?? getModuleLorebooks(),
+        getModules: () => activeMatcherContext?.modules ?? getModules(activeMatcherContext?.db ?? getDatabase()),
+        getModuleLorebooks: () => activeMatcherContext?.moduleLorebooks ?? getModuleLorebooks(activeMatcherContext?.db ?? getDatabase()),
         pickHashRand: pickHashRand,
         getSelectedCharID: () => {
             return activeMatcherContext?.selectedCharID ?? get(selectedCharID)
         },
-        getModelInfo: getModelInfo,
+        getModelInfo: (model) => getModelInfo(model, activeMatcherContext?.db ?? getDatabase()),
         callInternalFunction: function (args: string[]): string {
             return ''
         },
@@ -2074,7 +2078,7 @@ export function applyMarkdownToNode(node: Node) {
         if (text) {
             let markdown = renderMarkdown(md, text);
             if (markdown !== text) {
-                const span = document.createElement('span');
+                const span = node.ownerDocument.createElement('span');
                 span.innerHTML = markdown;
                 
                 // inherit inline style from the parent node

@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
     pick: vi.fn(), discard: vi.fn(), read: vi.fn(),
     character: vi.fn(), module: vi.fn(), jsonCharacter: vi.fn(), jsonModule: vi.fn(),
     run: vi.fn(), source: vi.fn(), status: vi.fn(), beginBatch: vi.fn(), beginBatchItem: vi.fn(), recordBatchItem: vi.fn(),
+    location: vi.fn(),
     controller: undefined as AbortController | undefined,
 }))
 vi.mock('./iosFiles', () => ({
@@ -32,11 +33,12 @@ describe('iOS native content picker', () => {
         mocks.character.mockResolvedValue({ kind: 'imported', value: 'native-character' })
         mocks.module.mockResolvedValue({ kind: 'imported', value: 'native-module' })
         mocks.jsonCharacter.mockResolvedValue(0)
-        mocks.jsonModule.mockResolvedValue(true)
+        mocks.jsonModule.mockResolvedValue({ kind: 'module-from-lorebook' })
         mocks.read.mockResolvedValue(new TextEncoder().encode('{}'))
         mocks.run.mockImplementation(async (_kind, _key, operation) => operation({
             signal: mocks.controller!.signal, onStatus: mocks.status, setSource: mocks.source,
             beginBatch: mocks.beginBatch, beginBatchItem: mocks.beginBatchItem, recordBatchItem: mocks.recordBatchItem,
+            setLocation: mocks.location,
         }))
     })
 
@@ -54,6 +56,7 @@ describe('iOS native content picker', () => {
         })
         expect(mocks.read).not.toHaveBeenCalled()
         expect(mocks.source).toHaveBeenCalledWith({ name, bytes: 1024 ** 3 })
+        expect(mocks.location).toHaveBeenCalledExactlyOnceWith({ kind: 'character', chaId: 'native-character' })
         expect(mocks.discard).toHaveBeenCalledWith(picked.path)
     })
 
@@ -64,6 +67,8 @@ describe('iOS native content picker', () => {
         expect(mocks.module).toHaveBeenCalledOnce()
         expect(mocks.character).not.toHaveBeenCalled()
         expect(mocks.read).not.toHaveBeenCalled()
+        expect(mocks.location).toHaveBeenCalledExactlyOnceWith(
+            name.endsWith('.charx') ? { kind: 'module-from-charx' } : { kind: 'module' })
         expect(mocks.discard).toHaveBeenCalledOnce()
     })
 
@@ -71,7 +76,11 @@ describe('iOS native content picker', () => {
         mocks.pick.mockResolvedValue({ files: [{ ...picked, name: 'source.JSON' }], failures: [] })
         await expect(importIOSContentFromPicker(destination)).resolves.toBe(destination === 'character' ? 'json-character' : 'module')
         expect(mocks.read).toHaveBeenCalledWith(picked.path)
-        expect(destination === 'character' ? mocks.jsonCharacter : mocks.jsonModule).toHaveBeenCalledOnce()
+        // The import ends with the picker's operation, closing an update dialog it opened.
+        expect(destination === 'character' ? mocks.jsonCharacter : mocks.jsonModule).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ signal: expect.any(AbortSignal) }))
+        expect(mocks.location).toHaveBeenCalledExactlyOnceWith(destination === 'character'
+            ? { kind: 'character', chaId: 'json-character' }
+            : { kind: 'module-from-lorebook' })
         expect(mocks.character).not.toHaveBeenCalled()
         expect(mocks.module).not.toHaveBeenCalled()
         expect(mocks.discard).toHaveBeenCalledOnce()
@@ -105,6 +114,7 @@ describe('iOS native content picker', () => {
     it('cleans up a declined native import without reporting success', async () => {
         mocks.character.mockResolvedValue({ kind: 'declined' })
         await expect(importIOSContentFromPicker('character')).resolves.toBeNull()
+        expect(mocks.location).not.toHaveBeenCalled()
         expect(mocks.discard).toHaveBeenCalledOnce()
     })
 

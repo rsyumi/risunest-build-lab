@@ -12,9 +12,14 @@
         nativeFileJobHost,
         nativeFileOperation,
         nativeFileOperationOutcome,
+        type NativeFileOperationImportLocation,
     } from 'src/ts/storage/nativeFileJobManager'
 
     import { retrySnapshotRestoreBodiesFromOutcome } from 'src/ts/storage/nativePersistentMaintenance'
+    import { modalNavigation } from 'src/ts/ui/modalNavigation'
+
+    /** Whether what an import added can be opened over what is on screen now. */
+    let { canOpen = () => true }: { canOpen?: (location: NativeFileOperationImportLocation) => boolean } = $props()
 
     const accountRetryAvailable = $derived(!!$nativeFileOperationOutcome?.status?.officialAssets?.operationId
         && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.officialAssets.state)
@@ -35,7 +40,6 @@
     const embedded = $derived($nativeFileJobHost === 'onboarding' && !model.compact)
     const open = $derived(model.open && !embedded)
     const ticking = $derived(open && model.terminal === null)
-    const copy = $derived(language.risuNest.importDialog)
     const retryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'restore-portable-backup'
         && $nativeFileOperationOutcome.status.restoreAdoptionConfirmed === true
         && $nativeFileOperationOutcome.status.portableBodyRetry?.pending === true
@@ -60,6 +64,18 @@
         }
     })
 
+    function dismiss(): void {
+        void Promise.resolve(dismissNativeFileOperationOutcome()).catch(async error => {
+            const { alertError } = await import('src/ts/alert')
+            alertError(failureReason(error?.code ?? ''))
+        })
+    }
+
+    function openResult(location: NativeFileOperationImportLocation): void {
+        void import('src/ts/importIntake/openResult').then(({ openImportResult }) => openImportResult(location))
+        dismiss()
+    }
+
     async function copyDetails(): Promise<void> {
         const details = model.terminal ? detailsText : ''
         if (!details) return
@@ -82,6 +98,7 @@
             aria-modal="true"
             aria-labelledby="native-file-job-dialog-title"
             data-testid="native-file-job-dialog"
+            use:modalNavigation={{ enabled: model.closeVisible, close: dismiss }}
             class="flex max-h-[90dvh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-lg border border-darkborderc bg-darkbg p-5 text-textcolor outline-hidden">
             <header class="flex flex-col gap-1">
                 <div class="flex items-baseline justify-between gap-3">
@@ -112,7 +129,27 @@
                     {#if model.terminal.location}
                         <p class="text-subtext break-words">{model.terminal.location}</p>
                     {/if}
-                    {#if model.terminal.failedFiles.length > 0}
+                    {#if model.terminal.entries}
+                        <ul class="mt-1 flex max-h-60 flex-col gap-1.5 overflow-y-auto" data-testid="native-file-job-batch-entries">
+                            {#each model.terminal.entries as entry, index (index)}
+                                <li class="flex items-start gap-2" data-entry-state={entry.state}>
+                                    {#if entry.state === 'imported'}
+                                        <CheckIcon size={16} class="mt-0.5 shrink-0 text-success-500" />
+                                    {:else if entry.state === 'failed'}
+                                        <XIcon size={16} class="mt-0.5 shrink-0 text-danger-400" />
+                                    {:else}
+                                        <span class="size-4 shrink-0" aria-hidden="true"></span>
+                                    {/if}
+                                    <span class="flex min-w-0 flex-col">
+                                        <span class="truncate">{entry.name}</span>
+                                        {#if entry.detail}
+                                            <span class="text-subtext break-words">{entry.detail}</span>
+                                        {/if}
+                                    </span>
+                                </li>
+                            {/each}
+                        </ul>
+                    {:else if model.terminal.failedFiles.length > 0}
                         <ul class="mt-1 flex max-h-40 flex-col gap-1 overflow-y-auto" data-testid="native-file-job-failed-files">
                             {#each model.terminal.failedFiles as file, index (index)}
                                 <li class="flex flex-col">
@@ -128,7 +165,7 @@
             {/if}
 
             <SettingProgress
-                label={model.overallPercent === null && !model.terminal ? copy.preparing : model.title}
+                label={model.overallPercent === null && !model.terminal ? language.risuNest.importDialog.preparing : model.title}
                 detail={model.overallText}
                 fraction={model.indeterminate ? null : (model.overallPercent ?? 0) / 100}
                 done={model.terminal?.state === 'succeeded'}
@@ -183,15 +220,15 @@
             {#if model.terminal && (model.terminal.details || model.terminal.state === 'failed')}
                 <div class="flex flex-col items-start gap-2">
                     <SettingButton variant="secondary" onclick={() => { showDetails = !showDetails }}>
-                        {showDetails ? copy.errorDetailsHide : copy.errorDetails}
+                        {showDetails ? language.risuNest.importDialog.errorDetailsHide : language.risuNest.importDialog.errorDetails}
                     </SettingButton>
                     {#if showDetails}
                         <div class="relative w-full">
                             <button
                                 type="button"
                                 class="absolute top-1 right-1 rounded-sm p-1 text-subtext hover:text-textcolor"
-                                title={copied ? copy.copied : copy.copyDetails}
-                                aria-label={copy.copyDetails}
+                                title={copied ? language.risuNest.importDialog.copied : language.risuNest.importDialog.copyDetails}
+                                aria-label={language.risuNest.importDialog.copyDetails}
                                 onclick={copyDetails}>
                                 {#if copied}
                                     <CheckIcon size={14} />
@@ -237,10 +274,11 @@
                         {#if retryAvailable}
                             <SettingButton variant="secondary" onclick={() => {void retryPortableRestoreBodiesFromOutcome().catch(() => {})}}>{language.retry}</SettingButton>
                         {/if}
-                        <SettingButton onclick={() => {void Promise.resolve(dismissNativeFileOperationOutcome()).catch(async error => {
-                            const { alertError } = await import('src/ts/alert')
-                            alertError(failureReason(error?.code ?? ''))
-                        })}}>{copy.close}</SettingButton>
+                        <!-- Onboarding stays over the app, so there is nothing to open yet. -->
+                        {#if model.terminal?.openLocation && $nativeFileJobHost !== 'onboarding' && canOpen(model.terminal.openLocation)}
+                            <SettingButton variant="secondary" onclick={() => openResult(model.terminal!.openLocation!)}>{language.risuNest.importIntake.open}</SettingButton>
+                        {/if}
+                        <SettingButton onclick={dismiss}>{language.risuNest.importDialog.close}</SettingButton>
                     {/if}
                 </footer>
             {/if}

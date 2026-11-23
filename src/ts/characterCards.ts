@@ -22,9 +22,9 @@ import { exportModuleLegacy, readModule, type RisuModule } from "./process/modul
 import { readFile } from "@tauri-apps/plugin-fs"
 import { open } from "./storage/fileSelection"
 import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_SITE_URL } from "./realmEndpoints"
-import { registerOpenedFileListeners } from "./openedFiles"
+import { openedFileSource, registerOpenedFileListeners } from "./openedFiles"
+import { onboardingFinished } from "src/lib/Others/Onboarding/onboardingGate"
 import { type DeviceMarkerStorage } from './storage/deviceMarkers'
-import { importDesktopNativeCharacterPathInOperation } from './storage/nativeCharacterImportOperation'
 import { importDesktopNativeCharacterPath } from './storage/nativeCharacterFileRoute'
 import { importContentBatch } from './storage/contentImportBatch'
 import { runSharedNativeFileOperation, type SharedNativeFileOperationContext } from './storage/nativeFileJobManager'
@@ -40,6 +40,7 @@ import { presentContentExportError } from './storage/fileOperationErrorPresentat
 import { beginMobileBackgroundTask, type MobileBackgroundTask } from './mobileBackgroundTask'
 import { filterBlockedRealmCards, isRealmCreatorBlocked } from './realmBlocking'
 import { normalizeOnboarding } from './onboarding'
+import { UPDATE_BASE_EXTENSION_KEY } from './contentUpdate/merge'
 
 
 const EXTERNAL_HUB_URL = 'https://sv.risuai.xyz';
@@ -136,7 +137,7 @@ export async function importCharacter() {
                     context,
                     paths,
                     (path) => ({ name: path.split(/[\\/]/).at(-1) || path }),
-                    (path) => importDesktopCharacterPath(path, context),
+                    (path) => importCharacterPathInOperation(path, context),
                 ),
                 { presentation: 'dialog', format: 'content' },
             )
@@ -168,66 +169,63 @@ export async function importCharacter() {
     }
 }
 
-async function importDesktopCharacterPath(path: string, context: SharedNativeFileOperationContext): Promise<string | null> {
+/**
+ * Imports the character file at `path` inside the caller's operation and records where it went.
+ * `displayName` names a copy after the user's own file.
+ */
+export async function importCharacterPathInOperation(
+    path: string,
+    context: SharedNativeFileOperationContext,
+    displayName = path.split(/[\\/]/).at(-1) || path,
+): Promise<string | null> {
     const outcome = await importDesktopNativeCharacterPath(path, {
         readDesktopPath: readFile,
         nativeEnabled: () => nativeCharacterContentImportEnabled,
-        nativeImport: (input) => importPreparedNativeCharacterContent(input, { signal: context.signal, onStatus: context.onStatus }),
-        legacyImport: async ({ name, data }) => {
-            const importedIndex = await importCharacterProcess({ name, data })
+        nativeImport: (input) => importPreparedNativeCharacterContent({ ...input, displayName }, { signal: context.signal, onStatus: context.onStatus }),
+        legacyImport: async ({ data }) => {
+            const importedIndex = await importCharacterProcess({ name: displayName, data, quiet: true, signal: context.signal })
             return typeof importedIndex === 'number'
                 ? (getDatabase().characters[importedIndex]?.chaId ?? null)
                 : null
         },
-    })
+    }, displayName)
     if (outcome.kind === 'destination-required') {
         throw new NativeFileJobError('destination-required', language.risuNest.importDialog.reasonPlainJpeg)
     }
     if (outcome.kind !== 'imported') return null
     checkCharOrder()
+    context.setLocation({ kind: 'character', chaId: outcome.value })
     return outcome.value
 }
 
-/** Characters and modules a desktop or iOS file association hands over. */
-function isOpenedContentPath(path: string): boolean {
-    return (isTauriDesktop || isTauriIOS) && /\.(json|png|charx|jpe?g|risum)$/i.test(path)
-}
+type CharacterCardSpecImporter = typeof importCharacterCardSpec
 
-async function importOpenedContentPaths(paths: string[]): Promise<void> {
-    const callStartedAt = Date.now()
+export async function importCharacterProcess<T extends boolean = false>(
+    f: Parameters<typeof importCharacterWithNotices<T>>[0],
+): ReturnType<typeof importCharacterWithNotices<T>> {
+    if (!f.quiet) return importCharacterWithNotices(f)
+    // The success notice also closes the loading and progress notices, so a quiet import closes them itself.
     try {
-        await runSharedNativeFileOperation(
-            'import',
-            'opened-content',
-            (context) => importContentBatch(
-                context,
-                paths,
-                (path) => ({ name: path.split(/[\\/]/).at(-1) || path }),
-                async (path) => {
-                    if (!/\.risum$/i.test(path)) return importDesktopCharacterPath(path, context)
-                    const { importPreparedNativeModuleContent } = await import('./process/modules')
-                    const result = await importPreparedNativeModuleContent(
-                        { source: { type: 'desktopPath', path }, displayName: path.split(/[\\/]/).at(-1) || path },
-                        { signal: context.signal, onStatus: context.onStatus },
-                    )
-                    return result.kind === 'imported' ? result.value : null
-                },
-            ),
-            { presentation: 'dialog', format: 'content' },
-        )
-    } catch (error) {
-        const { presentFileOperationError } = await import('./storage/fileOperationErrorPresentation')
-        presentFileOperationError('import', error, callStartedAt)
+        return await importCharacterWithNotices(f)
+    } finally {
+        alertClear()
     }
 }
 
-export async function importCharacterProcess<T extends boolean = false>(f: {
+async function importCharacterWithNotices<T extends boolean = false>(f: {
     name: string
     data: Uint8Array | File | ReadableStream<Uint8Array>
     parsedJson?: ParsedImportJson
     lightningRealmImport?: boolean
     returnCharacter?: T //note That this option only works with v3 charx
+    /** Leaves the success notice to a caller that shows its own result. */
+    quiet?: boolean
+    /** The operation the import runs in; when it ends, an update dialog the import opened closes and nothing is stored. */
+    signal?: AbortSignal
 }): Promise<T extends true ? character | number | null : number | null> {
+    // Shadows the exported importer so every card branch below honours `quiet`.
+    const importCharacterCardSpec = ((...args: Parameters<CharacterCardSpecImporter>) =>
+        importCharacterCardSpecWithPolicy(args[0], args[1], args[2], args[3], args[4], args[5], undefined, !f.quiet, f.signal)) as CharacterCardSpecImporter
     const fileName = f.name.split(/[\\/]/).at(-1) ?? f.name
     const separator = fileName.lastIndexOf('.')
     const extension =
@@ -266,16 +264,18 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                 (character) => character.chaId === importedId,
             ) as any
         }
+        // A declined card must not fall through to the old-format reader below.
+        if (da?.spec === 'chara_card_v2' || da?.spec === 'chara_card_v3') {
+            return null
+        }
         if (
             (da.char_name || da.name) &&
             (da.char_persona || da.description) &&
             (da.char_greeting || da.first_mes)
         ) {
-            const importedId = await commitDetachedCharacter(
-                convertOffSpecCards(da),
-                'import-character-card',
-            )
-            alertNormal(language.importedCharacter)
+            const importedId = await commitImportedCharacterCard(convertOffSpecCards(da), f.signal)
+            if (!importedId) return null
+            if (!f.quiet) alertNormal(language.importedCharacter)
             return getDatabase().characters.findIndex(
                 (character) => character.chaId === importedId,
             ) as any
@@ -523,10 +523,11 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                             return getDatabase().characters.findIndex(
                                 (character) => character.chaId === importedId,
                             )
-                        } else {
-                            throw new Error('Error while importing')
                         }
+                        // A cancelled import, such as a declined update, installs nothing.
+                        return
                     } catch (error) {
+                        if (f.signal?.aborted) throw error
                         alertError(language.errors.wrongPassword)
                         return
                     }
@@ -549,6 +550,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                         )
                     }
                 } catch (error) {
+                    if (f.signal?.aborted) throw error
                     alertError(language.errors.noData)
                     return
                 }
@@ -571,11 +573,12 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
     if (parsed.spec !== 'chara_card_v2' && parsed.spec !== 'chara_card_v3') {
         const charaData: OldTavernChar = parsed
         const imgp = await saveAsset(img)
-        const importedId = await commitDetachedCharacter(
+        const importedId = await commitImportedCharacterCard(
             convertOffSpecCards(charaData, imgp),
-            'import-character-card',
+            f.signal,
         )
-        alertNormal(language.importedCharacter)
+        if (!importedId) return null
+        if (!f.quiet) alertNormal(language.importedCharacter)
         return getDatabase().characters.findIndex(
             (character) => character.chaId === importedId,
         )
@@ -628,6 +631,18 @@ export const getRealmInfo = async (realmPath:string) => {
 }
 
 export const showRealmInfoStore:Writable<null|hubType> = writable(null)
+
+/**
+ * Files a file association or share hands over arrive together as one intake delivery. Registered
+ * at every startup, so files opened while onboarding is on screen are not imported and are still
+ * let go of once their delivery ends.
+ */
+export function registerOpenedFileImports() {
+    registerOpenedFileListeners(async (files) => {
+        const { submitImportDelivery } = await import('./importIntake/intake')
+        await submitImportDelivery({ origin: 'opened', sources: files.map(openedFileSource) })
+    }, () => onboardingFinished(getDatabase()))
+}
 
 export async function characterURLImport() {
     const realmPath = new URLSearchParams(location.search).get('realm')
@@ -772,38 +787,6 @@ export async function characterURLImport() {
         })
     }
 
-    registerOpenedFileListeners(importFile, async (path) => {
-        if ((isTauriDesktop || isTauriIOS) && /\.(risunest|risudat|bin)$/i.test(path)) {
-            const { restoreBackupFromNativeSource } = await import('./storage/portableBackupFileRouteProduction.svelte')
-            await restoreBackupFromNativeSource({type:'desktopPath',path})
-            return true
-        }
-        if (!isOpenedContentPath(path)) return false
-        if (/\.risum$/i.test(path)) {
-            const { importPreparedNativeModuleContent } = await import(
-                './process/modules'
-            )
-            await importPreparedNativeModuleContent({
-                source: { type: 'desktopPath', path },
-                displayName: path.split(/[\\/]/).at(-1)!,
-            })
-        } else {
-            let legacyFailed = false
-            const outcome = await importDesktopNativeCharacterPathInOperation(path, {
-                readDesktopPath: readFile,
-                nativeEnabled: () => nativeCharacterContentImportEnabled,
-                nativeImport: importPreparedNativeCharacterContent,
-                legacyImport: async ({ name, data }) => {
-                    const index = await importCharacterProcess({ name, data })
-                    if (typeof index !== 'number' || index < 0) { legacyFailed = true; return null }
-                    return getDatabase().characters[index]?.chaId ?? null
-                },
-            })
-            if (legacyFailed || outcome.kind === 'failed') return 'failed'
-        }
-        return true
-    }, { accepts: isOpenedContentPath, importBatch: importOpenedContentPaths })
-
     async function importFile(name: string, data: Uint8Array): Promise<void | 'failed'> {
         if (
             name.endsWith('.charx') ||
@@ -872,7 +855,7 @@ export async function characterURLImport() {
 }
 
 
-function convertOffSpecCards(charaData:OldTavernChar|CharacterCardV2Risu, imgp:string|undefined = undefined):character{
+export function convertOffSpecCards(charaData:OldTavernChar|CharacterCardV2Risu, imgp:string|undefined = undefined):character{
     const data = charaData.spec_version === '2.0' ? charaData.data : charaData
     const charbook = charaData.spec_version === '2.0' ? charaData.data.character_book : null
     let lorebook:loreBook[] = []
@@ -1208,6 +1191,8 @@ async function importCharacterCardSpecWithPolicy<T extends boolean = false>(
     overrideLorebook: loreBook[] = null,
     returnValue: T = false as T,
     assetPolicy?: CardAssetImportPolicy,
+    notify = true,
+    signal?: AbortSignal,
 ): Promise<T extends true ? character | false : string | false> {
     if (
         !card ||
@@ -1585,12 +1570,19 @@ async function importCharacterCardSpecWithPolicy<T extends boolean = false>(
         return char as any
     }
 
-    await commitDetachedCharacter(char, 'import-character-card')
-    alertNormal(language.importedCharacter)
-    return char.chaId as any
+    const importedId = await commitImportedCharacterCard(char, signal)
+    if (!importedId) return false
+    if (notify) alertNormal(language.importedCharacter)
+    return importedId as any
 }
 
-function convertCharbook(arg:{
+/** Commits an imported character, or the installed one it updates when the user chooses that. */
+async function commitImportedCharacterCard(char: character, signal?: AbortSignal): Promise<string | null> {
+    const { commitImportedCharacter } = await import('./contentUpdate/flow.svelte')
+    return commitImportedCharacter(char, (value) => commitDetachedCharacter(value, 'import-character-card'), signal)
+}
+
+export function convertCharbook(arg:{
     lorebook:loreBook[]
     charbook:CharacterBook
     loresettings:loreSettings
@@ -1787,7 +1779,7 @@ function createBaseV2(char:character) {
 
     if(char.extentions){
         for(const key in char.extentions){
-            if(key === 'risuai' || key === 'depth_prompt'){
+            if(key === 'risuai' || key === 'depth_prompt' || key === UPDATE_BASE_EXTENSION_KEY){
                 continue
             }
             card.data.extensions[key] = char.extentions[key]
@@ -2230,7 +2222,7 @@ export function createBaseV3(char:character){
 
     if(char.extentions){
         for(const key in char.extentions){
-            if(key === 'risuai' || key === 'depth_prompt'){
+            if(key === 'risuai' || key === 'depth_prompt' || key === UPDATE_BASE_EXTENSION_KEY){
                 continue
             }
             card.data.extensions[key] = char.extentions[key]

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
         modules: [] as any[],
         statics: { imports: 0 },
         blockedRealmCreators: [] as any[],
+        didFirstSetup: true,
     },
     commitDetachedCharacter: vi.fn(async (character: any, _reason: string) => {
         mocks.database.characters.push(character)
@@ -17,6 +18,8 @@ const mocks = vi.hoisted(() => ({
     alertError: vi.fn(),
     alertNormal: vi.fn(),
     alertRisuServiceTOS: vi.fn(),
+    /** The loading or progress notice on screen, which only a dialog or a clear closes. */
+    status: null as unknown,
     readImage: vi.fn(async (_key: string) => new Uint8Array([1, 2, 3, 4])),
     saveAsset: vi.fn(),
     charxWrites: [] as Array<{ key: string; data: Uint8Array }>,
@@ -35,6 +38,9 @@ const mocks = vi.hoisted(() => ({
     exportNativeCharacterCardFromPicker: vi.fn(),
     nextId: 0,
     destinationChosen: true,
+    /** The chunks a PNG card read yields, the image last. */
+    pngChunks: [] as unknown[],
+    submitDelivery: vi.fn(async (_delivery: unknown) => {}),
 }))
 
 vi.mock('uuid', () => ({ v4: () => `card-id-${++mocks.nextId}` }))
@@ -42,9 +48,11 @@ vi.mock('./characters', () => ({
     changeChar: vi.fn(),
     characterFormatUpdate: (value: unknown) => value,
     commitDetachedCharacter: mocks.commitDetachedCharacter,
+    // The update comparison brings lorebooks to the current format.
+    updateLorebooks: (books: unknown[]) => books,
 }))
 vi.mock('./storage/database.svelte', () => ({
-    defaultSdDataFunc: () => ({}),
+    defaultSdDataFunc: () => [['always', 'synthetic']],
     appVer: '0.0.0',
     getDatabase: () => mocks.database,
 }))
@@ -55,9 +63,10 @@ vi.mock('./alert', () => ({
     alertInput: vi.fn(),
     alertMd: vi.fn(),
     alertNormal: mocks.alertNormal,
-    alertStore: { set: vi.fn() },
+    alertClear: () => { mocks.status = null },
+    alertStore: { set: (value: { type: string }) => { mocks.status = ['wait', 'progress'].includes(value.type) ? value : null } },
     alertTOS: vi.fn(), alertRisuServiceTOS: mocks.alertRisuServiceTOS,
-    alertWait: vi.fn(),
+    alertWait: (msg: string) => { mocks.status = { type: 'wait', msg } },
 }))
 vi.mock('./util', () => ({
     checkNullish: (value: unknown) => value === null || value === undefined,
@@ -105,8 +114,9 @@ vi.mock('./storage/nativeCharacterCardExportRoute', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({
     open: mocks.openDesktopPicker,
 }))
-vi.mock('./stores.svelte', () => ({
+vi.mock('./stores.svelte', async () => ({
     DBState: { db: mocks.database },
+    alertStore: (await import('./alertQueue')).alertStore,
     SettingsMenuIndex: { set: vi.fn() },
     ShowRealmFrameStore: { set: vi.fn() },
     selectedCharID: { set: vi.fn() },
@@ -116,6 +126,7 @@ vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.tes
 vi.mock('./process/files/inlays', () => ({ reencodeImage: vi.fn() }))
 vi.mock('./pngChunk', () => ({
     PngChunk: {
+        readGenerator: async function* () { yield* mocks.pngChunks },
         streamWriter: class {
             constructor(_image: Uint8Array, _writer: unknown) {}
             async init() {}
@@ -155,6 +166,7 @@ vi.mock('./mobileBackgroundTask', async () => (await import('./mobileBackgroundT
 vi.mock('./media', () => ({
     getImageType: vi.fn(() => 'Unknown'),
 }))
+vi.mock('./importIntake/intake', () => ({ submitImportDelivery: mocks.submitDelivery }))
 
 import {
     characterURLImport,
@@ -168,18 +180,30 @@ import {
     importCharacterProcess,
     isNativeCharacterContentImportEnabled,
     mapPreparedNativeCharacterCard,
+    registerOpenedFileImports,
     showRealmInfoStore,
     type CharacterCardV2Risu,
 } from './characterCards'
 import {
+    cancelActiveNativeFileOperation,
     dismissNativeFileOperationOutcome,
     nativeFileOperationOutcome,
     NativeFileOperationBusyError,
     runSharedNativeFileOperation,
     type NativeFileOperationOutcome,
 } from './storage/nativeFileJobManager'
+import { readFileSync } from 'node:fs'
+import { zipSync } from 'fflate'
 import { get } from 'svelte/store'
 import { language } from 'src/lang'
+import { encodeRPack } from './rpack/rpack_js'
+import { alertInput } from './alert'
+import { AppendableBuffer } from './globalApi.svelte'
+import { hasher } from './parser/parser.svelte'
+import { decryptBuffer } from './util'
+import { readUpdateBaseFile } from './contentUpdate/baseFile'
+import { CHARACTER_UPDATE, UPDATE_BASE_EXTENSION_KEY, planUpdate } from './contentUpdate/merge'
+import { onboardingHold } from 'src/lib/Others/Onboarding/onboardingGate'
 
 describe('character card additions', () => {
     beforeEach(() => {
@@ -187,12 +211,16 @@ describe('character card additions', () => {
         mocks.database.characters = []
         mocks.database.statics.imports = 0
         mocks.database.blockedRealmCreators = []
+        mocks.database.didFirstSetup = true
+        onboardingHold.set(false)
         mocks.nextId = 0
         mocks.charxWrites = []
         mocks.pngWrites = []
         mocks.downloads = []
         mocks.nativeDesktopResult = { kind: 'cancelled' }
         mocks.desktopPickerPaths = []
+        mocks.status = null
+        mocks.pngChunks = []
         vi.clearAllMocks()
         mocks.alertConfirm.mockResolvedValue(true)
         mocks.alertCardExport.mockResolvedValue({ type: 'cancelled' })
@@ -277,6 +305,84 @@ describe('character card additions', () => {
         expect(second).toEqual(first)
     })
 
+    it('does not install a declined V2 JSON card through the old-format reader', async () => {
+        const card = {
+            spec: 'chara_card_v2', spec_version: '2.0',
+            name: 'Synthetic', description: 'Description', first_mes: 'Hello',
+            data: {
+                name: 'Synthetic', description: 'Description', first_mes: 'Hello',
+                personality: '', scenario: '', mes_example: '', creator_notes: '',
+                system_prompt: '', post_history_instructions: '', alternate_greetings: [],
+                tags: [], creator: '', character_version: '', extensions: { risuai: { lowLevelAccess: true } },
+            },
+        }
+        mocks.alertConfirm.mockResolvedValue(false)
+        await importCharacterProcess({ name: 'synthetic.json', data: new TextEncoder().encode(JSON.stringify(card)) })
+        expect(mocks.alertConfirm).toHaveBeenCalled()
+        expect(mocks.commitDetachedCharacter).not.toHaveBeenCalled()
+    })
+
+    it('shows no password error when the import of a password card is declined', async () => {
+        const card = {
+            spec: 'chara_card_v2', spec_version: '2.0',
+            data: {
+                name: 'Synthetic', description: 'Description', first_mes: 'Hello',
+                personality: '', scenario: '', mes_example: '', creator_notes: '',
+                system_prompt: '', post_history_instructions: '', alternate_greetings: [],
+                tags: [], creator: '', character_version: '', extensions: { risuai: { lowLevelAccess: true } },
+            },
+        }
+        const base64 = (value: string) => Buffer.from(value).toString('base64')
+        vi.mocked(hasher).mockResolvedValueOnce('synthetic-hash')
+        vi.mocked(alertInput).mockResolvedValueOnce('synthetic-password')
+        vi.mocked(decryptBuffer).mockResolvedValueOnce(new TextEncoder().encode(JSON.stringify(card)).buffer)
+        mocks.alertConfirm.mockResolvedValue(false)
+        mocks.pngChunks = [
+            { key: 'chara', value: ['rcc', 'rccv1', base64('sealed'), 'synthetic-hash', base64(JSON.stringify({ usePassword: true }))].join('||') },
+            Object.assign(new AppendableBuffer(), { buffer: new Uint8Array([1]) }),
+        ]
+
+        await expect(importCharacterProcess({ name: 'locked.png', data: new Uint8Array([1]) })).resolves.toBeUndefined()
+        expect(decryptBuffer).toHaveBeenCalledWith(expect.anything(), 'synthetic-password')
+        expect(mocks.alertConfirm).toHaveBeenCalled()
+        expect(mocks.commitDetachedCharacter).not.toHaveBeenCalled()
+        expect(mocks.alertError).not.toHaveBeenCalled()
+    })
+
+    it.each(['legacy', 'chara_card_v2'])('leaves the success notice of a %s JSON card to a caller that shows its own result', async format => {
+        const card = format === 'legacy'
+            ? { name: 'Synthetic', description: 'Description', first_mes: 'Hello' }
+            : { spec: format, spec_version: '2.0', data: {
+                name: 'Synthetic', description: 'Description', first_mes: 'Hello', personality: '', scenario: '',
+                mes_example: '', creator_notes: '', system_prompt: '', post_history_instructions: '',
+                alternate_greetings: [], tags: [], creator: '', character_version: '', extensions: {},
+            } }
+        const data = new TextEncoder().encode(JSON.stringify(card))
+        await importCharacterProcess({ name: 'synthetic.json', data, quiet: true })
+        expect(mocks.commitDetachedCharacter).toHaveBeenCalledOnce()
+        expect(mocks.alertNormal).not.toHaveBeenCalled()
+        // With the first copy installed, the same card would offer to update it instead.
+        mocks.database.characters = []
+        await importCharacterProcess({ name: 'synthetic.json', data })
+        expect(mocks.alertNormal.mock.calls).toEqual([[language.importedCharacter]])
+    })
+
+    it.each([
+        ['imports', 'AQID'],
+        ['fails', '__asset:missing'],
+    ])('closes the progress notice when a quiet card import %s', async (outcome, emotion) => {
+        const card = { spec: 'chara_card_v2', spec_version: '2.0', data: {
+            name: 'Synthetic', description: 'Description', first_mes: 'Hello', personality: '', scenario: '',
+            mes_example: '', creator_notes: '', system_prompt: '', post_history_instructions: '',
+            alternate_greetings: [], tags: [], creator: '', character_version: '',
+            extensions: { risuai: { emotions: [['happy', emotion]] } },
+        } }
+        const imported = importCharacterProcess({ name: 'synthetic.json', data: new TextEncoder().encode(JSON.stringify(card)), quiet: true })
+        if (outcome === 'imports') await expect(imported).resolves.toBe(0)
+        else await expect(imported).rejects.toThrow('missing')
+        expect(mocks.status).toBeNull()
+    })
+
     it('preserves browser malformed-byte replacement in JSON cards', async () => {
         const prefix = new TextEncoder().encode('{"name":"')
         const suffix = new TextEncoder().encode('","description":"Synthetic","first_mes":"Hello"}')
@@ -299,6 +405,49 @@ describe('character card additions', () => {
 
         expect(imported).toBe('native-character-id')
         expect(mocks.importDesktopNativeCharacterPath).toHaveBeenCalledOnce()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({
+            state: 'succeeded', location: { kind: 'character', chaId: 'native-character-id' },
+        })
+    })
+
+    it.each([
+        ['a JSON card', 'card.json', false],
+        ['a sealed PNG card', 'card.png', false],
+        ['a password PNG card', 'card.png', true],
+    ])('takes the update dialog down and stores nothing when %s the desktop reads in TypeScript is cancelled while it asks', async (_kind, file, usePassword) => {
+        mocks.database.characters = [{ chaId: 'installed', name: 'Synthetic', type: 'character', chats: [] }]
+        mocks.desktopPickerPaths = [`C:/chosen/${file}`]
+        const legacy = { name: 'Synthetic', description: 'Description', first_mes: 'Hello' }
+        if (file === 'card.png') {
+            // A sealed card, which the PNG reader opens and imports itself.
+            if (usePassword) vi.mocked(alertInput).mockResolvedValueOnce('synthetic-password')
+            const base64 = (value: string) => Buffer.from(value).toString('base64')
+            vi.mocked(hasher).mockResolvedValueOnce('synthetic-hash')
+            vi.mocked(decryptBuffer).mockResolvedValueOnce(new TextEncoder().encode(JSON.stringify({ spec: 'chara_card_v2', spec_version: '2.0', data: {
+                ...legacy, first_mes: 'Hello', personality: '', scenario: '', mes_example: '', creator_notes: '', system_prompt: '',
+                post_history_instructions: '', alternate_greetings: [], tags: [], creator: '', character_version: '', extensions: {},
+            } })).buffer)
+            mocks.pngChunks = [
+                { key: 'chara', value: ['rcc', 'rccv1', base64('sealed'), 'synthetic-hash', base64(JSON.stringify({ usePassword }))].join('||') },
+                Object.assign(new AppendableBuffer(), { buffer: new Uint8Array([1]) }),
+            ]
+        }
+        const data = file === 'card.png' ? new Uint8Array([1]) : new TextEncoder().encode(JSON.stringify(legacy))
+        mocks.importDesktopNativeCharacterPath.mockImplementationOnce(async (_path: string, route: any, name: string) => {
+            const value = await route.legacyImport({ name, data })
+            return value ? { kind: 'imported', mode: 'legacy', value } : { kind: 'cancelled' }
+        })
+        // Loaded ahead, as the app has them by the time a card is imported.
+        const [{ contentUpdateDialog }] = await Promise.all([import('./contentUpdate/flow.svelte'), import('./process/inlayScreen'), import('./storage/persistentDataRuntime.svelte')])
+        dismissNativeFileOperationOutcome()
+        const imported = importCharacter()
+        await vi.waitFor(() => expect(contentUpdateDialog.request && !contentUpdateDialog.busy).toBe(true))
+        cancelActiveNativeFileOperation()
+        await expect(imported).resolves.toBeNull()
+        expect(contentUpdateDialog.request).toBeNull()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'import', state: 'cancelled' })
+        expect(mocks.commitDetachedCharacter).not.toHaveBeenCalled()
+        expect(mocks.alertError).not.toHaveBeenCalled()
     })
 
     it('processes every selected desktop path through the native character route', async () => {
@@ -323,11 +472,13 @@ describe('character card additions', () => {
             1,
             'C:\\chosen\\card.png',
             expect.any(Object),
+            'card.png',
         )
         expect(mocks.importDesktopNativeCharacterPath).toHaveBeenNthCalledWith(
             2,
             'C:\\chosen\\card.charx',
             expect.any(Object),
+            'card.charx',
         )
     })
 
@@ -359,6 +510,7 @@ describe('character card additions', () => {
             3,
             'C:\\chosen\\last.charx',
             expect.any(Object),
+            'last.charx',
         )
         const failure = { code: 'import-error', message: error.message, recoveryRequired: false }
         expect(outcomes).toEqual([expect.objectContaining({
@@ -366,39 +518,52 @@ describe('character card additions', () => {
             format: 'content',
             state: 'failed',
             error: failure,
-            batch: { total: 3, imported: 2, failures: [{ name: 'broken.charx', error: failure }], declined: [] },
+            batch: expect.objectContaining({
+                total: 3, imported: 2, failures: [{ name: 'broken.charx', error: failure }], declined: [],
+                entries: [
+                    { name: 'first.charx', state: 'imported', location: { kind: 'character', chaId: 'first-card' } },
+                    { name: 'broken.charx', state: 'failed', error: failure },
+                    { name: 'last.charx', state: 'imported', location: { kind: 'character', chaId: 'last-card' } },
+                ],
+            }),
         })])
         expect(mocks.alertError).not.toHaveBeenCalled()
     })
 
-    it('imports several files a desktop file association opened in one batched outcome', async () => {
+    it('hands the files of one desktop file association opening to the import intake together', async () => {
         const { consumeOpenedFiles } = await import('./openedFiles')
-        await characterURLImport()
-        mocks.importDesktopNativeCharacterPath
-            .mockResolvedValueOnce({ kind: 'imported', mode: 'native', value: 'opened-card' })
-            .mockResolvedValueOnce({ kind: 'imported', mode: 'native', value: 'single-card' })
-        mocks.importModuleContent.mockResolvedValue({ kind: 'imported', value: 'opened-module' })
-        dismissNativeFileOperationOutcome()
-        const outcomes: NativeFileOperationOutcome[] = []
-        const unsubscribe = nativeFileOperationOutcome.subscribe(outcome => {
-            if (outcome) outcomes.push(outcome)
-        })
-        try {
-            await consumeOpenedFiles(['C:\\opened\\card.charx', 'C:\\opened\\book.risum'])
-            await consumeOpenedFiles(['C:\\opened\\single.charx'])
-        } finally {
-            unsubscribe()
-        }
+        registerOpenedFileImports()
 
-        expect(mocks.importModuleContent).toHaveBeenCalledExactlyOnceWith(
-            { source: { type: 'desktopPath', path: 'C:\\opened\\book.risum' }, displayName: 'book.risum' },
-            { signal: expect.any(AbortSignal), onStatus: expect.any(Function) },
-        )
-        expect(outcomes).toEqual([
-            expect.objectContaining({ state: 'succeeded', batch: { total: 2, imported: 2, failures: [], declined: [] } }),
-            expect.objectContaining({ state: 'succeeded', source: { name: 'single.charx' } }),
+        await consumeOpenedFiles(['C:\\opened\\card.charx', 'C:\\opened\\preset.risup'])
+        await consumeOpenedFiles(['C:\\opened\\backup.risunest'])
+
+        expect(mocks.submitDelivery.mock.calls.map(([delivery]) => delivery)).toEqual([
+            { origin: 'opened', sources: [
+                { type: 'path', path: 'C:\\opened\\card.charx' },
+                { type: 'path', path: 'C:\\opened\\preset.risup' },
+            ] },
+            { origin: 'opened', sources: [{ type: 'path', path: 'C:\\opened\\backup.risunest' }] },
         ])
-        expect(outcomes[1]).not.toHaveProperty('batch')
+        expect(mocks.importDesktopNativeCharacterPath).not.toHaveBeenCalled()
+        expect(mocks.alertError).not.toHaveBeenCalled()
+    })
+
+    it.each([
+        ['onboarding', (on: boolean) => { mocks.database.didFirstSetup = !on }],
+        ['the onboarding hold', (on: boolean) => onboardingHold.set(on)],
+    ])('does not import files opened during %s', async (_label, during) => {
+        const { consumeOpenedFiles } = await import('./openedFiles')
+        registerOpenedFileImports()
+        during(true)
+
+        await consumeOpenedFiles(['C:\\opened\\during.charx'])
+        expect(mocks.submitDelivery).not.toHaveBeenCalled()
+
+        during(false)
+        await consumeOpenedFiles(['C:\\opened\\after.charx'])
+        expect(mocks.submitDelivery.mock.calls.map(([delivery]) => delivery)).toEqual([
+            { origin: 'opened', sources: [{ type: 'path', path: 'C:\\opened\\after.charx' }] },
+        ])
         expect(mocks.alertError).not.toHaveBeenCalled()
     })
 
@@ -1054,6 +1219,13 @@ describe('character card additions', () => {
         expect(mocks.downloads).toHaveLength(2)
     })
 
+    it.each(['v2', 'v3'] as const)('leaves the update record of the installed character out of a %s card', async (spec) => {
+        await exportCharacterCard(plainCharacter({ extentions: { color: 'red', [UPDATE_BASE_EXTENSION_KEY]: 'assets/base.json' } }), 'json', { spec })
+        const card = exportedJson(0)
+        expect(card.data.extensions.color).toBe('red')
+        expect(card.data.extensions).not.toHaveProperty(UPDATE_BASE_EXTENSION_KEY)
+    })
+
     it('carries the onboarding through a V3 card export and import', async () => {
         const onboarding = {
             enabled: true, mode: 'form', title: 'Start', description: 'Pick a start', html: '', floatingButton: true,
@@ -1096,6 +1268,34 @@ describe('character card additions', () => {
         }
         const imported = await importCharacterCardSpec(structuredClone(card), undefined, 'normal', {}, null, true)
         expect(imported && imported.globalLore[0]).toMatchObject({ key: 'synthetic', content: '' })
+    })
+
+    it('reads a card file as an earlier version with every field an import of it stores', async () => {
+        // No RisuAI extension, so the import fills each of its defaults.
+        const card = { spec: 'chara_card_v3', spec_version: '3.0', data: { name: 'Luna', description: 'd', first_mes: 'hi', extensions: {} } }
+        const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
+        const imported = await importCharacterCardSpec(structuredClone(card) as any, undefined, 'normal', {}, null, true)
+        const read = await readUpdateBaseFile('character', { name: 'Luna.json', data: encode(card) })
+        expect(imported).toBeTruthy()
+        expect(planUpdate(CHARACTER_UPDATE, read as object, imported as object, null).items.map((item) => item.field)).toEqual([])
+
+        // As a CHARX, its module gives the card a RisuAI block, and takes the place of the scripts of a card that has one.
+        const script = { comment: 'r', in: 'a', out: 'b', type: 'editoutput' }
+        const scripted = { ...card, data: { ...card.data, extensions: { risuai: { customScripts: [script] } } } }
+        const map = readFileSync('src/ts/rpack/rpack_map.bin')
+        await withFetch(() => ({ arrayBuffer: async () => map.buffer.slice(map.byteOffset, map.byteOffset + map.byteLength) }), async () => {
+            for (const [embedding, module] of [[card, { regex: [script] }], [scripted, {}]] as const) {
+                const packed = await encodeRPack(encode({ type: 'risuModule', module: { name: 'Luna', id: 'm', ...module } }))
+                const risum = new Uint8Array(6 + packed.length)
+                risum[0] = 111
+                new DataView(risum.buffer).setUint32(2, packed.length, true)
+                risum.set(packed, 6)
+                const earlier = await readUpdateBaseFile('character', { name: 'Luna.charx', data: zipSync({ 'card.json': encode(embedding), 'module.risum': risum }) })
+                const mapped = await mapPreparedNativeCharacterCard({ card: structuredClone(embedding) as any, assets: [], module: module as any })
+                expect(mapped).toBeTruthy()
+                expect(planUpdate(CHARACTER_UPDATE, earlier as object, mapped as object, null).items.map((item) => item.field)).toEqual([])
+            }
+        })
     })
 
     it('stops a Realm download or preview from a blocked creator before anything is downloaded', async () => {
