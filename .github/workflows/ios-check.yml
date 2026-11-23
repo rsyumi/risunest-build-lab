@@ -109,7 +109,7 @@ jobs:
           node ../control/scripts/verify-snapshot.mjs . ios
       - uses: pnpm/action-setup@v5
         with:
-          version: 10.34.1
+          package_json_file: source/package.json
       - uses: actions/setup-node@v6
         with:
           node-version: 24

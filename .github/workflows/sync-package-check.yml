@@ -88,7 +88,12 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install GUI inputs
         if: matrix.os != 'linux'
-        run: pnpm --dir server/manager/gui --ignore-workspace install --frozen-lockfile
+        run: |
+          if [ -f server/manager/gui/pnpm-workspace.yaml ]; then
+            pnpm --dir server/manager/gui install --frozen-lockfile
+          else
+            pnpm --dir server/manager/gui --ignore-workspace install --frozen-lockfile
+          fi
       - name: Lint and test native inputs
         run: |
           cargo clippy --manifest-path server/sync/Cargo.toml --all-targets --locked --target "$TARGET" -- -D warnings

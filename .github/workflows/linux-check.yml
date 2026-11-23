@@ -59,7 +59,7 @@ jobs:
           node ../control/scripts/verify-snapshot.mjs . linux
       - uses: pnpm/action-setup@v5
         with:
-          version: 10.34.1
+          package_json_file: source/package.json
       - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
         with:
           targets: x86_64-unknown-linux-gnu
