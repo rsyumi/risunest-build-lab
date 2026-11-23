@@ -574,9 +574,7 @@ fn an_opened_store_collects_what_earlier_releases_left() {
     let external = root.join("external-storage").join("captures");
     assert!(captures.iter().all(|capture| external.join(capture).is_dir()));
 
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::mock_app();
     app.manage(crate::app_paths::AppPaths {
         data: root.to_owned(),
         data_entry: root.to_owned(),
@@ -591,7 +589,7 @@ fn an_opened_store_collects_what_earlier_releases_left() {
     app.manage(crate::persistent_store::commands::PersistentStoreState::default());
     app.manage(crate::external_storage::job_store::JobCommandState::default());
     app.manage(crate::native_file_jobs::NativeFileJobState::initialize(root.join("native-file-jobs")));
-    crate::persistent_store::commands::open_for_renderer(app.handle(), &app.state()).unwrap();
+    crate::persistent_store::commands::open_for_renderer(app.handle(), &app.state(), None).unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while captures.iter().any(|capture| external.join(capture).exists()) {

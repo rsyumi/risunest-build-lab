@@ -1,9 +1,9 @@
-import { readFile } from '@tauri-apps/plugin-fs'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { alertError } from './alert'
 import { isTauriAndroid, isTauriDesktop, isTauriIOS } from 'src/ts/platform'
 import { discardIOSFile } from './storage/iosFiles'
+import type { ImportIntakeSource } from './importIntake/types'
 
 /**
  * Name shared by the DOM event Android dispatches on a warm start and by the Tauri event the
@@ -15,64 +15,55 @@ export const OPENED_FILES_EVENT = 'risu-opened-files'
 /** Desktop command that returns the pending opened files and clears them in the same call. */
 export const OPENED_FILES_TAKE_COMMAND = 'opened_files_take'
 
-export type OpenedFileImporter = (name: string, data: Uint8Array) => Promise<void | 'failed'>
+/** A file one opening handed over: the path of its prepared copy, or a file that could not be prepared. */
+export type OpenedFile = string | { name: string; code: string }
 
-/** Imports several opened characters or modules in one operation. */
-export interface OpenedContentBatchImporter {
-    accepts(path: string): boolean
-    /** Reports how the batch ended itself. */
-    importBatch(paths: string[]): Promise<void>
+/** Hands the files of one opening over to the intake, which reports how each of them ended. */
+export type OpenedFilesDelivery = (files: OpenedFile[]) => Promise<void>
+
+let openedFilesDelivery: OpenedFilesDelivery | null = null
+/** Whether files opened now are imported, read as each opening arrives. */
+let openedFilesAccepted: () => boolean = () => true
+let domListener: ((event: Event) => void) | null = null
+
+function isOpenedFile(value: unknown): value is OpenedFile {
+    if (typeof value === 'string') return value.length > 0
+    return value !== null && typeof value === 'object'
+        && typeof (value as { name?: unknown }).name === 'string' && typeof (value as { code?: unknown }).code === 'string'
 }
 
-let openedPathImporter: ((path: string) => Promise<boolean | 'failed'>) | undefined
-let openedFileImporter: OpenedFileImporter | null = null
-let openedContentBatchImporter: OpenedContentBatchImporter | undefined
-let domListener: ((event: Event) => void) | null = null
-let queue: Promise<void> = Promise.resolve()
+/** The intake source of an opened file; one that could not be prepared is refused there. */
+export function openedFileSource(file: OpenedFile): ImportIntakeSource {
+    return typeof file === 'string' ? { type: 'path', path: file } : { type: 'failed', ...file }
+}
 
 /**
- * Reads and imports every opened file in order. A failing file is reported and skipped so the
- * remaining files still arrive. Two or more characters or modules are imported together after the
- * other files, so a backup in the same delivery is restored first.
+ * Delivers the files of one opening together as soon as they arrive, so the intake queues them in
+ * arrival order with dropped files. Each file is settled once the delivery has ended, also when it failed.
+ * `accepted` is read when the opening arrived; files it refuses are settled without being delivered.
  */
-export async function consumeOpenedFiles(files: string[]): Promise<void> {
-    const importer = openedFileImporter
-    if (!importer || !Array.isArray(files)) {
-        return
+export async function consumeOpenedFiles(files: unknown[], accepted = openedFilesAccepted()): Promise<void> {
+    const deliver = openedFilesDelivery
+    if (!deliver || !Array.isArray(files)) return
+    const opened = files.filter(isOpenedFile)
+    if (!opened.length) return
+    await settleOpenedFilesAfter(opened, accepted ? () => deliver(opened) : async () => {})
+}
+
+/**
+ * Runs the delivery that holds these opened files, then settles each prepared copy once it has
+ * ended, also when it failed. An Android share whose other files were spooled delivers its opened
+ * files with that spool batch, and they are settled here as well.
+ */
+export async function settleOpenedFilesAfter(files: OpenedFile[], delivery: () => Promise<void>): Promise<void> {
+    try {
+        await delivery()
+    } catch (error) {
+        const names = files.map(file => typeof file === 'string' ? file : file.name)
+        alertError(`Failed to open the selected files: ${names.join(', ')}\n${error}`)
+    } finally {
+        for (const file of files) if (typeof file === 'string') await settleOpenedFile(file)
     }
-    const batchImporter = openedContentBatchImporter
-    const run = queue.then(async () => {
-        const opened = files.filter((file) => typeof file === 'string' && file.length > 0)
-        const content = batchImporter ? opened.filter((file) => batchImporter.accepts(file)) : []
-        const batched = new Set(content.length > 1 ? content : [])
-        for (const file of opened) {
-            if (batched.has(file)) continue
-            try {
-                const nativeResult = await openedPathImporter?.(file)
-                if (nativeResult === 'failed') continue
-                if (!nativeResult) {
-                    const data = await readFile(file)
-                    if (await importer(file, data) === 'failed') continue
-                }
-            } catch (error) {
-                alertError(
-                    `Failed to open the selected file: ${file}\n${error}`,
-                )
-            } finally {
-                await settleOpenedFile(file)
-            }
-        }
-        if (!batchImporter || !batched.size) return
-        try {
-            await batchImporter.importBatch([...batched])
-        } catch (error) {
-            alertError(`Failed to open the selected files: ${[...batched].join(', ')}\n${error}`)
-        } finally {
-            for (const file of batched) await settleOpenedFile(file)
-        }
-    })
-    queue = run.catch(() => {})
-    await run
 }
 
 async function settleOpenedFile(file: string): Promise<void> {
@@ -91,16 +82,12 @@ async function settleOpenedFile(file: string): Promise<void> {
 
 /**
  * Wires every path a file association can take: the Android cold start injection, the Android warm
- * start DOM event, and the desktop launch arguments plus single instance forwarding.
+ * start DOM event, and the desktop launch arguments plus single instance forwarding. Files that arrive
+ * while `accepting` returns false are not imported, also when it returns true by the time they are read.
  */
-export function registerOpenedFileListeners(
-    importFile: OpenedFileImporter,
-    importPath?: (path: string) => Promise<boolean | 'failed'>,
-    contentBatch?: OpenedContentBatchImporter,
-): void {
-    openedFileImporter = importFile
-    openedPathImporter = importPath
-    openedContentBatchImporter = contentBatch
+export function registerOpenedFileListeners(deliver: OpenedFilesDelivery, accepting: () => boolean = () => true): void {
+    openedFilesDelivery = deliver
+    openedFilesAccepted = accepting
     if (domListener) {
         return
     }
@@ -117,45 +104,42 @@ export function registerOpenedFileListeners(
             // Android watches the cancelation to tell a delivered payload from one that arrived
             // before this listener existed, which it then parks in the startup queue instead.
             event.preventDefault()
-            void consumeOpenedFiles(files as string[])
+            void consumeOpenedFiles(files)
         }
     }
     window.addEventListener(OPENED_FILES_EVENT, domListener)
 
     if (isTauriIOS) {
-        window.addEventListener('risunest-ios-opened-files', () => void drainIOSOpenedFiles())
-        void drainIOSOpenedFiles()
+        window.addEventListener('risunest-ios-opened-files', () => void drainIOSOpenedFiles(openedFilesAccepted()))
+        void drainIOSOpenedFiles(openedFilesAccepted())
     }
 
     if (isTauriDesktop) {
         void listen(OPENED_FILES_EVENT, scheduleDesktopDrain)
             .then(() => {
                 // Subscribe before draining so a launch during setup cannot lose its notification.
-                void drainDesktopOpenedFiles()
+                void drainDesktopOpenedFiles(openedFilesAccepted())
             })
             .catch((error) => {
                 console.warn('Failed to subscribe to opened files:', error)
-                void drainDesktopOpenedFiles()
+                void drainDesktopOpenedFiles(openedFilesAccepted())
             })
     }
 }
 
-async function drainIOSOpenedFiles(): Promise<void> {
+async function drainIOSOpenedFiles(accepted: boolean): Promise<void> {
     try {
-        const { files } = await invoke<{ files: Array<{ path?: string; error?: string }> }>(
+        const { files } = await invoke<{ files: Array<{ path?: string; name?: string; code?: string }> }>(
             'plugin:ios-native|take_opened_files',
         )
-        for (const file of files) {
-            if (file.error) alertError(file.error)
-
-        }
-        await consumeOpenedFiles(files.flatMap(file => file.path ? [file.path] : []))
+        // A file that could not be prepared stays in its opening, so a backup opened with it is refused.
+        await consumeOpenedFiles(files.map(file => file.path ?? { name: file.name ?? '', code: file.code ?? 'source-copy-failed' }), accepted)
     } catch (error) {
         alertError(`Failed to receive the selected file: ${error}`)
     }
 }
 
-function takeInjectedOpenedFiles(): string[] {
+function takeInjectedOpenedFiles(): unknown[] {
     const holder = window as Window & { tauriOpenedFiles?: unknown }
     const injected = holder.tauriOpenedFiles
     if (!Array.isArray(injected)) {
@@ -163,7 +147,7 @@ function takeInjectedOpenedFiles(): string[] {
     }
     // The Android cold start injection runs once per page load, so drop it after draining.
     delete holder.tauriOpenedFiles
-    return injected as string[]
+    return injected
 }
 
 /**
@@ -172,20 +156,27 @@ function takeInjectedOpenedFiles(): string[] {
  */
 export const DESKTOP_OPENED_FILES_SETTLE_MS = 500
 let desktopDrainTimer: ReturnType<typeof setTimeout> | undefined
+/** Whether a notification of the files the next drain takes arrived while openings were refused. */
+let desktopDrainRefused = false
 
 function scheduleDesktopDrain(): void {
+    // The drain takes every file of the selection, so one notification refused refuses them all.
+    if (!openedFilesAccepted()) desktopDrainRefused = true
     clearTimeout(desktopDrainTimer)
     desktopDrainTimer = setTimeout(() => {
         desktopDrainTimer = undefined
-        void drainDesktopOpenedFiles()
+        const accepted = !desktopDrainRefused
+        desktopDrainRefused = false
+        void drainDesktopOpenedFiles(accepted)
     }, DESKTOP_OPENED_FILES_SETTLE_MS)
 }
 
-async function drainDesktopOpenedFiles(): Promise<void> {
+async function drainDesktopOpenedFiles(accepted: boolean): Promise<void> {
     try {
+        // Refused files are still taken, so a later opening does not bring them back.
         const files = await invoke<string[]>(OPENED_FILES_TAKE_COMMAND)
         if (Array.isArray(files) && files.length > 0) {
-            await consumeOpenedFiles(files)
+            await consumeOpenedFiles(files, accepted)
         }
     } catch (error) {
         console.warn('Failed to read the opened files handed over by the launcher:', error)

@@ -1,10 +1,12 @@
 pub(crate) mod classifier;
 mod error;
+pub(crate) mod intake_classifier;
 mod json_card;
 #[allow(dead_code)]
 pub(crate) mod png_card;
 mod risum;
 mod staging;
+pub(crate) mod update_base;
 
 pub use classifier::{classify_content, ContentKind};
 pub use error::{FormatError, FormatErrorKind};

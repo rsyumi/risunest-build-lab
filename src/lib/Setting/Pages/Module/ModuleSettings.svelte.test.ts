@@ -21,6 +21,11 @@ vi.mock('src/lib/SideBars/Scripts/RegexList.svelte', () => ({ default: () => {} 
 vi.mock('src/lib/SideBars/Scripts/TriggerList.svelte', () => ({ default: () => {} }))
 vi.mock('src/lib/UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
 vi.mock('src/lib/Others/Help.svelte', () => ({ default: () => {} }))
+// The editor itself is covered by ToggleDefinitionEditor.svelte.test.ts; here it exposes what it receives.
+const toggleEditor = vi.hoisted(() => ({ props: {} as { value?: unknown, onChange?: (value: string) => void } }))
+vi.mock('src/lib/UI/ToggleDefinitionEditor.svelte', () => ({
+    default: (_anchor: unknown, props: typeof toggleEditor.props) => { toggleEditor.props = props },
+}))
 vi.mock('src/lib/Gallery/AssetGallery.svelte', () => ({ default: () => {} }))
 vi.mock('src/ts/process/lorebook.svelte', () => ({}))
 vi.mock('src/ts/globalApi.svelte', () => ({}))
@@ -65,7 +70,7 @@ async function editSecondModule() {
     instance = mount(ModuleSettings, { target: document.body })
     await tick()
     const row = [...document.querySelectorAll('span')].find(span => span.textContent === 'Second')!.parentElement!
-    row.querySelectorAll<HTMLButtonElement>('button')[2].click()
+    row.querySelectorAll<HTMLButtonElement>('button')[3].click()
     await tick()
 }
 
@@ -73,7 +78,7 @@ it('keeps edits on the current module after the root list is published again', a
     await editSecondModule()
     const name = document.querySelector<HTMLInputElement>('input')!
     name.focus()
-    DBState.db.modules = DBState.db.modules.map(module => ({ ...module, description: 'Published' }))
+    DBState.db.modules = DBState.db.modules.map(module => ({ ...module, description: 'Published', customModuleToggle: `${module.id}=On` }))
     await tick()
     expect(document.querySelector('input')).toBe(name)
     expect(document.activeElement).toBe(name)
@@ -82,6 +87,9 @@ it('keeps edits on the current module after the root list is published again', a
     name.dispatchEvent(new Event('input', { bubbles: true }))
     await tick()
     expect(DBState.db.modules[1].name).toBe('Edited')
+    expect(toggleEditor.props.value).toBe('Second=On')
+    toggleEditor.props.onChange!('edited=Edited')
+    expect(DBState.db.modules.map(module => module.customModuleToggle)).toEqual(['First=On', 'edited=Edited', 'Third=On'])
 })
 
 it('does not overwrite another module when an earlier record is removed during editing', async () => {
@@ -130,7 +138,7 @@ it('does not remove the last module when a pending deletion target has already d
     instance = mount(ModuleSettings, { target: document.body })
     await tick()
     const row = [...document.querySelectorAll('span')].find(span => span.textContent === 'First')!.parentElement!
-    row.querySelectorAll<HTMLButtonElement>('button')[3].click()
+    row.querySelectorAll<HTMLButtonElement>('button')[4].click()
     DBState.db.modules.splice(0, 1)
     await tick()
     confirm(true)
@@ -147,7 +155,7 @@ it('deletes the assets of a removed module once the removal is saved', async () 
     instance = mount(ModuleSettings, { target: document.body })
     await tick()
     const row = [...document.querySelectorAll('span')].find(span => span.textContent === 'First')!.parentElement!
-    row.querySelectorAll<HTMLButtonElement>('button')[3].click()
+    row.querySelectorAll<HTMLButtonElement>('button')[4].click()
     await vi.waitFor(() => expect(core.invoke).toHaveBeenCalledWith('pds_asset_delete_orphaned_aliases', {
         expectedRevision: 1, owner: { keys: ['assets/first-map.png'], startedAtMs: expect.any(Number) },
     }))

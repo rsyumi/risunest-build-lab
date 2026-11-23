@@ -82,6 +82,8 @@ mod trust_boundary;
 #[cfg(test)]
 mod command_future_size;
 #[cfg(test)]
+mod test_app;
+#[cfg(test)]
 mod test_memory;
 #[cfg(test)]
 mod test_process;
@@ -918,6 +920,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         device_backup::native_device_backup_bootstrap,
         device_backup::native_device_backup_recovery_complete,
         native_file_jobs::native_content_source_metadata,
+        native_file_jobs::native_content_update_base_read,
         native_file_jobs::native_file_job_status,
         native_file_jobs::native_file_job_prepared_content,
         native_file_jobs::native_file_job_stage_inline_asset,
@@ -938,6 +941,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_snapshot_restore_bodies_status,
         native_file_jobs::native_plugin_values_assign,
         native_file_jobs::native_backup_source_format,
+        import_export_jobs::intake_classifier::import_intake_classify,
         native_file_jobs::native_conflict_backup_source,
         native_file_jobs::native_portable_source_discard,
         native_file_jobs::native_portable_source_cleanup_orphans,
@@ -1365,17 +1369,17 @@ mod header_map_tests {
         let outgoing = persistent.admit_renderer_operation().unwrap();
         reset_renderer_sessions(app.handle());
         // Admitted before the page started, the outgoing upload registers after it.
-        let filled = std::iter::from_fn(|| media.open_input_upload(directory.path()).ok()).count();
+        let filled = std::iter::from_fn(|| media.open_input_upload(directory.path(), None).ok()).count();
         assert!(filled > 0);
         // Another start leaves the uploads to the pending reset while the operation runs.
         reset_renderer_sessions(app.handle());
-        assert!(media.open_input_upload(directory.path()).is_err(), "a second start freed the running operation's uploads");
+        assert!(media.open_input_upload(directory.path(), None).is_err(), "a second start freed the running operation's uploads");
         drop(outgoing);
 
         // Admission reopens once the reset has finished.
         drop(persistent.admit_renderer_operation().unwrap());
         for _ in 0..filled {
-            media.open_input_upload(directory.path()).expect("the new document gets every upload slot");
+            media.open_input_upload(directory.path(), None).expect("the new document gets every upload slot");
         }
 
         // The next page starts while a capture waits for this document, which
@@ -1387,13 +1391,13 @@ mod header_map_tests {
                 std::thread::yield_now();
             }
             reset_renderer_sessions(app.handle());
-            while media.open_input_upload(directory.path()).is_ok() {}
+            while media.open_input_upload(directory.path(), None).is_ok() {}
             drop(outgoing);
             drop(capture.join().unwrap());
         });
         drop(persistent.admit_renderer_operation().unwrap());
         for _ in 0..filled {
-            media.open_input_upload(directory.path()).expect("the new document gets every upload slot after the capture");
+            media.open_input_upload(directory.path(), None).expect("the new document gets every upload slot after the capture");
         }
     }
 

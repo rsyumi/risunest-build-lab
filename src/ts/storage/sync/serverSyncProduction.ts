@@ -2,7 +2,7 @@ import { notifySyncReceiveCompleted } from './bindingChanges'
 import { invoke } from '@tauri-apps/api/core'
 import type { SyncExitDrainAdapter } from '../syncExitCoordinator'
 import type { RetainableReplacementFence } from '../retainableReplacementFence'
-import { isTauri } from 'src/ts/platform'
+import { isTauri, isTauriAndroid } from 'src/ts/platform'
 import { createSyncBindingRecoveryRegistration, installSyncBindingFlow } from './bindingProduction'
 import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentLwwReceive, flushPendingDataLocally, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
 import type { PersistentMutationToken } from '../saveCoordinator'
@@ -30,6 +30,7 @@ import { bytePhase, laneDeltas, readServerSyncLanes, routineMoved, routinePeak, 
 import { createRemainingTimeEstimator } from './remainingTime'
 import { setAssetResidencyPolicy, type AssetResidencyPolicy } from './serverAssetResidency'
 import { isLibraryFileOperationReserved, registerLibraryFileOperationGate, subscribeLibraryFileOperationReleased } from '../libraryFileOperation'
+import { getDeviceMarkers } from '../deviceMarkers'
 
 import { readRepresentativeImagePriority, subscribeRepresentativeImagePriority } from '../../ui/representativeImagePriority'
 
@@ -90,6 +91,9 @@ let foreground = false
 let continuing = false
 const active = () => foreground || continuing
 const halt = () => { foreground = false; continuing = false }
+// Routine sync's background time ran out while the app was away, so it waits for the return. Android expires a hold
+// only while the app is away, also when it keeps the page running and visible; elsewhere the page is hidden then.
+let outOfTime = false
 type Hold = MobileBackgroundTask | Promise<MobileBackgroundTask>
 const releaseHold = (hold: Hold | undefined) => { if (hold) void Promise.resolve(hold).then(task => task.dispose()) }
 // Routine sync takes service time only if the app leaves the screen while it runs.
@@ -98,6 +102,7 @@ const holdRoutineSync = (): Hold => {
     // When the platform's time runs out, routine sync stops where it stands; returning to the screen resumes it.
     void Promise.resolve(hold).then(task => task.signal?.addEventListener('abort', () => {
         if (!isBackgroundExpiryReason(task.signal?.reason)) return
+        if (isTauriAndroid || document.visibilityState === 'hidden') outOfTime = true
         halt(); if (hydrating) hydrationPending = true
         void scheduler.fence()
     }, { once: true }))
@@ -111,6 +116,13 @@ const noteLocalChange = () => {
     if (foreground && !pendingHold) pendingHold = holdRoutineSync()
 }
 let heldForCommittedRestore = false
+// The hold stays with the binding it stopped, through its resumes and restarts, until Sync now or a new device binding.
+const RESTORE_HOLD = 'risuNestServerSyncRestoreHold'
+async function saveRestoreHold(state?: BindingContext['state']): Promise<void> {
+    const epoch = heldForCommittedRestore && state ? state.selectionEpoch : null
+    const markers = getDeviceMarkers()
+    if (markers.getItem(RESTORE_HOLD) !== epoch) await markers.commitItem!(RESTORE_HOLD, epoch)
+}
 let replacing = false
 let hydrating: Promise<void> | undefined
 let hydrationPending = false
@@ -128,7 +140,8 @@ let offlineNoticeClaimed = false
 const changed = () => {
     for (const listener of listeners) listener(snapshot())
     if (offlineNoticePending || offlineNoticeClaimed || !isTauri || document.visibilityState === 'hidden'
-        || binding || (!context && persistedBinding?.target.kind !== 'server')
+        // A committed restore keeps automatic sync stopped, so nothing retries while it holds.
+        || binding || heldForCommittedRestore || (!context && persistedBinding?.target.kind !== 'server')
         || getDatabase().risunestSyncStatusUi === false
         || !error || !serverUnavailable
         || !outageConfirmed) return
@@ -368,9 +381,10 @@ function continueHydration(continuation = false): void {
     })
 }
 async function updateForeground(visible: boolean): Promise<void> {
-    const usable = !replacing && !!context && !context.signal.aborted
+    // A committed restore keeps routine sync stopped until the user resumes it.
+    const usable = !replacing && !heldForCommittedRestore && !!context && !context.signal.aborted
     continuing = !visible && usable && (foreground || continuing)
-    foreground = visible && usable
+    foreground = visible && usable && !outOfTime
     if (!active() && hydrating) hydrationPending = true
     // Work in flight hands its protection to the hide-time publication without a moment unheld.
     const bridge = !visible && (attemptHold || pendingHold) ? holdRoutineSync() : undefined
@@ -526,8 +540,10 @@ const transport: SyncBindingTransport = {
     },
     async resumeBinding(c) {
         try {
-            heldForCommittedRestore = c.holdAutomaticSync === true; context = c; adoptSchedulerAuthority(c)
+            heldForCommittedRestore = c.holdAutomaticSync === true || getDeviceMarkers().getItem(RESTORE_HOLD) === c.state.selectionEpoch
+            context = c; adoptSchedulerAuthority(c)
             activationPending = c
+            await saveRestoreHold(c.state)
             try { await ensureActivated(c) }
             catch (value) {
                 // A busy or unavailable local store is tried again by automatic sync too, without the offline notice.
@@ -549,7 +565,8 @@ const transport: SyncBindingTransport = {
     async resumeNewDeviceBinding(preparation,result,c) {
         try {
             await during('applying', () => invoke('server_sync_lww_activate_new_device', { authorizationId: preparation.authorizationId, writerId: result.writerId, request: { bindingAuthority: result.bindingAuthority, requestId: crypto.randomUUID() } }))
-            context = c; adoptSchedulerAuthority(c); checkContext(c)
+            heldForCommittedRestore = false; context = c; adoptSchedulerAuthority(c); checkContext(c)
+            await saveRestoreHold()
             if (remoteAssetsRequested(c)) await keepAssetsRemote(c)
             persistedBinding = c.state; error = ''; hydrationError = ''; hydrationPending = true
             await scheduler.retry(); await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint()
@@ -629,8 +646,10 @@ async function syncServerNow(): Promise<void> {
     if (!context || context.signal.aborted || context.state.targetAuthority !== current.targetAuthority || context.state.selectionEpoch !== current.selectionEpoch || context.state.libraryId !== current.libraryId || context.state.target.kind !== 'server' || context.state.target.connectionId !== current.target.connectionId) {
         await resumeCurrentServerBinding(current)
     }
+    heldForCommittedRestore = false
     halt()
     try {
+        await saveRestoreHold()
         await scheduler.fence()
         await hydrating
         if (context) await ensureActivated(context)
@@ -681,20 +700,29 @@ export async function installServerSyncProduction({ resumeBound = true }: { resu
     }))
     disposers.push(() => { clearTimeout(priorityTimer); priorityTimer = undefined })
     disposers.push(await listen<{ connected: boolean }>('risu-server-sync-notification', event => scheduler.socket(event.payload.connected)))
-    const visibility = () => { void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; recordFailure(value); changed() }) }
+    const visibility = () => {
+        if (document.visibilityState !== 'hidden') outOfTime = false
+        void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; recordFailure(value); changed() })
+    }
     document.addEventListener('visibilitychange', visibility)
     disposers.push(() => document.removeEventListener('visibilitychange', visibility))
+    // A page Android keeps running off screen stays visible, so it hears the return only from the app's own start.
+    const lifecycle = (event: Event) => { if (isTauriAndroid && (event as CustomEvent<{ reason?: unknown } | null>).detail?.reason === 'start') visibility() }
+    window.addEventListener('risu-native-lifecycle', lifecycle)
+    disposers.push(() => { window.removeEventListener('risu-native-lifecycle', lifecycle); outOfTime = false })
     disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; halt(); hydrationPending = false; representativesPending = false; clearTimeout(representativesTimer); representativesTimer = undefined; hydrationAgain = false; attempt = undefined; releaseHold(attemptHold); attemptHold = undefined; releaseHold(pendingHold); pendingHold = undefined; clearFinished(); watchSamples() }
     await controller.ensureStatus()
-    if (!resumeBound || heldForCommittedRestore) return
     const current = await invoke<BindingContext['state']>('pds_lww_binding_state')
+    heldForCommittedRestore ||= current.target.kind === 'server' && getDeviceMarkers().getItem(RESTORE_HOLD) === current.selectionEpoch
+    await saveRestoreHold(current)
+    if (!resumeBound) return
     if (current.target.kind === 'server' && status.configured) {
         try { await resumeCurrentServerBinding(current) }
         catch (value) {
             // A fenced binding that cannot reach its server keeps the local library usable until retry.
             if (!failures(value).every(failure => transientTransportFailure(failure) || settingsResolvedFailure(failure))) throw value
         }
-    } else if (current.target.kind === 'server') await completeInterruptedBinding()
+    } else if (current.target.kind === 'server' && !heldForCommittedRestore) await completeInterruptedBinding()
 }
 // The user already chose to connect, so a server still as empty as when it was inspected
 // is bound without asking again. Anything else waits for Connect in settings.
@@ -708,7 +736,7 @@ async function completeInterruptedBinding(): Promise<void> {
     bindingIncomplete = true; changed()
 }
 
-const snapshot = () => ({ status: { ...status, bound: persistedBinding?.target.kind === 'server' || !!context && !context.signal.aborted }, running: scheduler.isRunning() || !!hydrating, paused: !context || context.signal.aborted || scheduler.isBlocked(), blockedCode: scheduler.blockedCode(), replacing, draining: false, error, bindingIncomplete, progress: attempt && { ...attempt, stages: [...attempt.stages], active: [...attempt.active] }, finished: finished && { ...finished, stages: [...finished.stages], active: [...finished.active] }, lastSuccessAt })
+const snapshot = () => ({ status: { ...status, bound: persistedBinding?.target.kind === 'server' || !!context && !context.signal.aborted }, running: scheduler.isRunning() || !!hydrating, paused: !context || context.signal.aborted || heldForCommittedRestore || scheduler.isBlocked(), blockedCode: scheduler.blockedCode(), replacing, draining: false, error, bindingIncomplete, progress: attempt && { ...attempt, stages: [...attempt.stages], active: [...attempt.active] }, finished: finished && { ...finished, stages: [...finished.stages], active: [...finished.active] }, lastSuccessAt })
 const controller = {
     snapshot,
     subscribe: (listener: (value: ReturnType<typeof snapshot>) => void) => { listeners.add(listener); listener(controller.snapshot()); return () => { listeners.delete(listener) } },

@@ -58,7 +58,8 @@ vi.mock('../util', () => ({
 }))
 vi.mock('uuid', () => ({ v4: () => 'roundtrip-module-id' }))
 vi.mock('./lorebook.svelte', () => ({ convertExternalLorebook: vi.fn() }))
-vi.mock('../stores.svelte', () => ({
+vi.mock('../stores.svelte', async () => ({
+    alertStore: (await import('../alertQueue')).alertStore,
     DBState: { db: { modules: [] } },
     HideIconStore: { set: vi.fn() },
     moduleBackgroundEmbedding: { set: vi.fn() },
@@ -72,12 +73,15 @@ vi.mock('../characterCards', () => ({
     exportCharacterCard: vi.fn(),
     importCharacterProcess: vi.fn(),
 }))
+// The lorebook upgrade the update flow applies, without the app state its module loads.
+vi.mock('../characters', () => ({ updateLorebooks: (books: unknown[]) => books }))
 
 import { get } from 'svelte/store'
 import { language } from 'src/lang'
 import { exportModuleLegacy, importModule, importModuleData, readModule, type RisuModule } from './modules'
 import { DBState } from '../stores.svelte'
 import {
+    cancelActiveNativeFileOperation,
     dismissNativeFileOperationOutcome,
     nativeFileOperationOutcome,
     NativeFileOperationBusyError,
@@ -86,6 +90,7 @@ import {
 import { alertConfirm, alertError, alertNormal } from '../alert'
 import { StdioModuleImportError } from './mcp/moduleImport'
 import { convertExternalLorebook } from './lorebook.svelte'
+import { decodeRPack } from '../rpack/rpack_js'
 
 describe('legacy module export', () => {
     beforeEach(() => {
@@ -115,6 +120,37 @@ describe('legacy module export', () => {
         await importModuleData({ name: 'synthetic.json', data: Uint8Array.of(0xff), parsedJson: { value } })
         expect(first).toBeDefined()
         expect(DBState.db.modules[0]).toEqual(first)
+    })
+
+    it('offers a lorebook file picked for a module update as that update', async () => {
+        DBState.db.modules = [{ id: 'installed', name: 'Lore', description: '', lorebook: [] }]
+        const { chooseContentUpdate, contentUpdateDialog, importAsContentUpdate } = await import('../contentUpdate/flow.svelte')
+        const data = new TextEncoder().encode(JSON.stringify({ type: 'risu', data: [{ key: 'synthetic', content: 'lore' }] }))
+        const imported = importAsContentUpdate('module', 'installed', () => importModuleData({ name: 'synthetic.json', data }))
+        await vi.waitFor(() => expect(contentUpdateDialog.request && !contentUpdateDialog.busy).toBe(true))
+        expect(contentUpdateDialog.request?.kind).toBe('module')
+        expect(contentUpdateDialog.target).toBe('installed')
+        chooseContentUpdate('cancel')
+        // No location: the import intake opens nothing for a cancelled import.
+        expect(await imported).toBeNull()
+        expect(DBState.db.modules.map((module) => module.id)).toEqual(['installed'])
+    })
+
+    it('takes the update dialog down and stores nothing when a desktop JSON module import is cancelled while it asks', async () => {
+        mocks.platform = 'desktop'
+        DBState.db.modules = [{ id: 'installed', name: 'Lore', description: '', lorebook: [] }]
+        const { contentUpdateDialog } = await import('../contentUpdate/flow.svelte')
+        mocks.open.mockResolvedValue(['C:/synthetic/lore.json'])
+        mocks.readFile.mockResolvedValue(new TextEncoder().encode(JSON.stringify({ type: 'risuModule', id: 'source', name: 'Lore', lorebook: [] })))
+        const imported = importModule()
+        await vi.waitFor(() => expect(contentUpdateDialog.request && !contentUpdateDialog.busy).toBe(true))
+        cancelActiveNativeFileOperation()
+        await expect(imported).resolves.toBeNull()
+        expect(contentUpdateDialog.request).toBeNull()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'import', state: 'cancelled' })
+        expect(DBState.db.modules.map((module) => module.id)).toEqual(['installed'])
+        expect(alertError).not.toHaveBeenCalled()
+        expect(alertNormal).not.toHaveBeenCalled()
     })
 
     it('preserves browser malformed-byte replacement in JSON modules', async () => {
@@ -192,18 +228,31 @@ describe('legacy module export', () => {
 
     const moduleJson = (name: string) => new TextEncoder().encode(JSON.stringify({ type: 'risuModule', id: name, name }))
 
-    it('imports every module picked on desktop in one dialog', async () => {
+    it('imports every module picked on desktop in one dialog and says where each went', async () => {
         mocks.platform = 'desktop'
         mocks.open.mockResolvedValue(['C:/synthetic/first.json', 'C:/synthetic/second.lorebook'])
-        mocks.readFile.mockImplementation(async (path: string) => moduleJson(path.includes('first') ? 'First' : 'Second'))
+        mocks.readFile.mockImplementation(async (path: string) => path.includes('first')
+            ? moduleJson('First')
+            : new TextEncoder().encode(JSON.stringify({ type: 'risu', name: 'Second', data: [] })))
 
         await expect(importModule()).resolves.toBe('module')
 
         expect(mocks.open).toHaveBeenCalledWith(expect.objectContaining({ multiple: true }))
         expect(DBState.db.modules.map(module => module.name)).toEqual(['First', 'Second'])
         expect(get(nativeFileOperationOutcome)).toMatchObject({
-            kind: 'import', state: 'succeeded', batch: { total: 2, imported: 2, failures: [], declined: [] },
+            kind: 'import', state: 'succeeded', batch: {
+                total: 2, imported: 2, failures: [], declined: [],
+                entries: [
+                    { name: 'first.json', state: 'imported', location: { kind: 'module' } },
+                    { name: 'second.lorebook', state: 'imported', location: { kind: 'module-from-lorebook' } },
+                ],
+            },
         })
+
+        dismissNativeFileOperationOutcome()
+        mocks.open.mockResolvedValue(['C:/synthetic/first.json'])
+        await expect(importModule()).resolves.toBe('module')
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ state: 'succeeded', location: { kind: 'module' } })
     })
 
     it('imports every module picked on the web', async () => {
@@ -280,6 +329,8 @@ describe('legacy module export', () => {
             id: 'source-module-id',
             name: 'Byte exact module',
             description: 'Legacy asset roundtrip',
+            updateBase: 'asset://base',
+            updateLineage: 'author-module',
             assets: [
                 ['ordinary-asset-a', 'asset://source-a', 'bin', 'first-tail', { rank: 1 }],
                 ['ordinary-asset-b', 'asset://source-b', 'dat', 'second-tail', { rank: 2 }],
@@ -287,7 +338,12 @@ describe('legacy module export', () => {
         }
 
         const exported = await exportModuleLegacy(module, { alertEnd: false, saveData: false })
-        const imported = await readModule(Buffer.from(exported))
+        const file = Buffer.from(exported)
+        const main = JSON.parse(new TextDecoder().decode(await decodeRPack(file.subarray(6, 6 + file.readUInt32LE(2)))))
+        expect(main.module).not.toHaveProperty('updateBase')
+        expect(module.updateBase).toBe('asset://base')
+        const imported = await readModule(file)
+        expect(imported.updateLineage).toBe('author-module')
 
         expect(mocks.readImage.mock.calls.map(([source]) => source)).toEqual([
             'asset://source-a',

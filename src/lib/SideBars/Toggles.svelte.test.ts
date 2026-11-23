@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { writable } from 'svelte/store'
+import { language } from 'src/lang'
 import { DBState } from 'src/ts/stores.svelte'
 import Toggles from './Toggles.svelte'
 import { doingChat } from 'src/ts/process/generationState'
@@ -19,7 +20,13 @@ vi.mock('src/ts/stores.svelte', () => {
 vi.mock('src/ts/storage/database.svelte', () => ({
     getCurrentChat: () => DBState.db.characters[0].chats[DBState.db.characters[0].chatPage],
 }))
-vi.mock('src/ts/process/modules', () => ({ getModuleToggles: () => '' }))
+// A preset's integrated module adds a toggle.
+vi.mock('src/ts/process/modules', async () => {
+    const { DBState } = await import('src/ts/stores.svelte')
+    return {
+        getModuleToggles: (database = DBState.db) => database.moduleIntergration ? `example=Toggle of ${database.moduleIntergration}` : '',
+    }
+})
 // The persistent writes are covered by Chat.windowedInteractions.test.ts; here they apply in memory.
 vi.mock('src/ts/chatBindings.svelte', async () => {
     const { get } = await import('svelte/store')
@@ -35,11 +42,15 @@ vi.mock('src/ts/chatBindings.svelte', async () => {
     }
 })
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ mutateCharacterDetailFields: async () => false }))
+// The toggle takes the name an `example=` line of the template gives it.
 vi.mock('src/ts/util', () => ({
-    parseToggleSyntax: () => [{ type: syntax.type, key: 'example', value: 'Example toggle', options: ['A', 'B'] }],
+    parseToggleSyntax: (template: string) => [
+        { type: syntax.type, key: 'example', value: /^example=(.*)$/m.exec(template)?.[1] ?? 'Example toggle', options: ['A', 'B'] },
+    ],
 }))
 vi.mock('./ModelBind.svelte', () => ({ default: () => {} }))
 vi.mock('./PersonaBind.svelte', () => ({ default: () => {} }))
+vi.mock('./PresetBind.svelte', () => ({ default: () => {} }))
 // The binding controls are covered by Chat.windowedInteractions.test.ts; here they expose what they receive.
 vi.mock('./ToggleBind.svelte', () => ({ default: (_anchor: unknown, props: typeof toggleBind.props) => { toggleBind.props = props } }))
 vi.mock('./CustomSidebar.svelte', () => ({ default: () => {} }))
@@ -108,6 +119,36 @@ it('updates the switch when the active toggle value changes externally', async (
     DBState.db.globalChatVariables.toggle_example = '0'
     await tick()
     expect(customSwitch().checked).toBe(false)
+})
+
+it('shows nothing for a group without toggles instead of an unnamed switch', async () => {
+    await unmount(instance)
+    syntax.type = 'group'
+    instance = mount(Toggles, {
+        target: document.body,
+        props: { chara: DBState.db.characters[0], noContainer: true },
+    })
+    await tick()
+    expect(document.body.textContent).not.toContain('Example toggle')
+})
+
+it('shows the toggles and jailbreak switch of the preset it is given', async () => {
+    const jailbreakItem = { type: 'jailbreak', type2: 'normal', text: '', role: 'system' }
+    for (const preset of [{ jailbreak: 'Synthetic prompt' }, { promptTemplate: [jailbreakItem] }]) {
+        await unmount(instance)
+        const presetDatabase = { ...DBState.db, customPromptTemplateToggle: 'example=Edited toggle', ...preset } as typeof DBState.db
+        instance = mount(Toggles, { target: document.body, props: { noContainer: true, presetDatabase } })
+        await tick()
+        expect(document.body.textContent).toContain('Edited toggle')
+        expect(document.body.textContent).toContain(language.jailbreakToggle)
+    }
+
+    await unmount(instance)
+    DBState.db.moduleIntergration = 'Applied module'
+    const presetDatabase = { ...DBState.db, moduleIntergration: 'Edited module' } as typeof DBState.db
+    instance = mount(Toggles, { target: document.body, props: { noContainer: true, presetDatabase } })
+    await tick()
+    expect(document.body.textContent).toContain('Toggle of Edited module')
 })
 
 it('supports initially unset built-in switches and writes their bound values', async () => {
