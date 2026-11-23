@@ -1,6 +1,6 @@
 use super::lww_client::*;
 use crate::persistent_store::{
-    lww::{ApplyReceive, Header, UnitMutation},
+    lww::{Header, UnitMutation},
     PersistentStore, WorkingSetCommit,
 };
 use risunest_sync_server::{http, store::Store};
@@ -1788,6 +1788,61 @@ fn a_multi_page_bootstrap_from_cursor_zero_finishes_every_page() {
 }
 
 #[test]
+fn a_bootstrap_reports_what_is_left_of_its_pin_in_every_session() {
+    use super::progress::{within, ProgressLane};
+    let server = LocalServerFixture::new();
+    ServerWriter::new(&server.server).push_units("first-library", "unit", 1100);
+    raise_journal_floor(&server);
+    let (_root, mut target) = local();
+    server.client(&target);
+    let (_earlier_root, mut earlier) = local();
+    server.client(&earlier);
+    // Each page is read by a new client, as a later session would read it.
+    let page = |target: &mut PersistentStore| {
+        let lane = Arc::new(ProgressLane::default());
+        within(&lane, || {
+            let client = LocalServerFixture::reopen_client(target, Default::default())?;
+            receive_cycle(&client, target, &[])
+        }).unwrap();
+        let read = lane.snapshot("receive");
+        (read.backlog_done, read.backlog_left)
+    };
+    let log = |target: &PersistentStore| OperationLog::open(target.repository_root()).unwrap().0;
+    let counts = |target: &PersistentStore| -> i64 {
+        log(target).query_row("SELECT count(*) FROM bootstrap_received", [], |row| row.get(0)).unwrap()
+    };
+    let (done, left) = page(&mut target);
+    assert_eq!(done, 256);
+    let total = done + left;
+    assert!(total >= 1100, "{total}");
+    for pages in 2..=4 {
+        assert_eq!(page(&mut target), (256, total - 256 * pages));
+    }
+    assert_eq!(page(&mut target).1, 0);
+    assert_eq!(received_bootstrap_units(&target), 1100);
+    assert_eq!(counts(&target), 0);
+    // A bootstrap an earlier version began kept no count of what it received, so the rest of
+    // its pages report no known work.
+    page(&mut earlier);
+    let kept: (String, String, i64) = log(&earlier)
+        .query_row("SELECT pin,after_key,units FROM bootstrap_received", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap();
+    log(&earlier).execute("DELETE FROM bootstrap_received", []).unwrap();
+    for _ in 2..=3 {
+        assert_eq!(page(&mut earlier), (0, 0));
+    }
+    // Nor does a count an earlier version left behind when it read further pages.
+    log(&earlier)
+        .execute("INSERT INTO bootstrap_received VALUES(?1,?2,?3)", rusqlite::params![kept.0, kept.1, kept.2])
+        .unwrap();
+    for _ in 4..=5 {
+        assert_eq!(page(&mut earlier), (0, 0));
+    }
+    assert_eq!(received_bootstrap_units(&earlier), 1100);
+    assert_eq!(counts(&earlier), 0);
+}
+
+#[test]
 fn a_multi_page_bootstrap_from_a_received_cursor_keeps_it_until_the_last_page() {
     let server = LocalServerFixture::new();
     let writer = ServerWriter::new(&server.server);
@@ -1980,142 +2035,4 @@ fn receive_frontier_survives_retry_and_old_page_readers() {
     assert!(!complete.more);
     assert_eq!(complete.receive_frontier, Some(complete.page.progress.cursor));
     assert_eq!(b.query_plugin_storage(None).unwrap().items.len(), 300);
-}
-
-
-#[test]
-fn stored_receive_is_local_exact_and_recovers_the_result_through_ack_retry() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let reject_ack = Arc::new(AtomicBool::new(true));
-    let reject = reject_ack.clone();
-    let server = LocalServerFixture::with_router(move |router| router.layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| {
-            let reject = reject.clone();
-            async move {
-                if request.uri().path() == "/ack" && reject.load(Ordering::Relaxed) {
-                    return axum::response::Response::builder().status(503).body(axum::body::Body::empty()).unwrap();
-                }
-                next.run(request).await
-            }
-        },
-    )));
-    let (_source_dir, mut source) = local();
-    let (target_dir, mut target) = local();
-    let source_client = server.client(&source);
-    let mut target_client = server.client(&target);
-    target_client.client.retry_transient = false;
-    save(&mut source, &["root", "language"], serde_json::json!("ja"));
-    push(&source_client, &mut source);
-    let descriptor = target_client.receive_descriptor(&mut target, &header(&source)).unwrap();
-    // The pushed unit and the library format unit.
-    assert_eq!(descriptor.incoming_keys, vec![UnitKey::new(&["library-format"]).unwrap(), UnitKey::new(&["root", "language"]).unwrap()]);
-    let io = target_client.client.test_io.as_ref().unwrap().clone();
-    io.reset();
-    let request = ApplyReceive { header: descriptor.header.clone(), generating: vec![] };
-    let wrong_request = ApplyReceive { header: Header { request_id: "another-page".into(), ..request.header.clone() }, generating: vec![] };
-    assert_eq!(target_client.apply_stored_receive(&mut target, &wrong_request).unwrap_err().code, "receive-page-changed");
-    let wrong_binding = ApplyReceive { header: Header { binding_authority: 1.into(), ..request.header.clone() }, generating: vec![] };
-    let rejected = target_client.apply_stored_receive(&mut target, &wrong_binding).unwrap_err();
-    assert_eq!(rejected.code, "binding-authority-changed");
-    assert_eq!(rejected.receive_not_applied, Some(true));
-    let result = target_client.apply_stored_receive(&mut target, &request).unwrap();
-    assert_eq!(target.read_root(None).unwrap().value["language"], "ja");
-    assert_eq!(io.snapshot(), [0, 0, 0], "stored apply must not access the transport");
-    let config = target_client.client.config();
-    drop(target_client);
-    drop(target);
-    let mut target = PersistentStore::open(target_dir.path()).unwrap();
-    let mut target_client = LwwClient::new(target_dir.path(), config).unwrap();
-    target_client.client.retry_transient = false;
-    let replayed = target_client.apply_stored_receive(&mut target, &request).unwrap();
-    let mut expected_replay = result.clone();
-    expected_replay.current_state_recovery_required = true;
-    assert_eq!(serde_json::to_value(&replayed).unwrap(), serde_json::to_value(&expected_replay).unwrap());
-    target.lww_finish_receive(&request.header).unwrap();
-    assert!(target_client.finish_receive(&target, &request.header).is_err());
-    assert_eq!(serde_json::to_value(target_client.apply_stored_receive(&mut target, &request).unwrap()).unwrap(), serde_json::to_value(expected_replay).unwrap());
-    assert_eq!(target.revision().unwrap(), replayed.revision);
-    reject_ack.store(false, Ordering::Relaxed);
-    target_client.finish_receive(&target, &request.header).unwrap();
-    assert_eq!(target_client.apply_stored_receive(&mut target, &request).unwrap_err().code, "receive-page-missing");
-    assert_eq!(target.device_store().unwrap().connection().query_row("SELECT count(*) FROM device_settings WHERE key='native-server-receive-receipt.v1'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
-}
-
-#[test]
-fn stored_native_receive_settles_on_the_transport_acknowledgment_before_its_page_is_deleted() {
-    use crate::persistent_store::receive_batches::{AdvanceRequest, AdvanceResult, BeginRequest, BeginResult, DeliveryRequest, Outcome, Phase, RetireRequest, RetireResult, Source};
-    for superseded in [false, true] {
-    let server = LocalServerFixture::new();
-    let (_a, mut source) = local();
-    let (target_dir, mut target) = local();
-    let a = server.client(&source);
-    let b = server.client(&target);
-    save(&mut source, &["root", "language"], serde_json::json!("ja"));
-    push(&a, &mut source);
-    let request_header = header(&target);
-    let page = b.receive_page(&mut target, &request_header).unwrap();
-    target.lww_stage_receive(&page).unwrap();
-    let stored = Source::Stored { header: page.header.clone() };
-    let lease = target.acquire_revision(target.revision().unwrap()).unwrap().lease;
-    let baseline = target.read_native_receive_evidence(&lease).unwrap();
-    target.release_revision(&lease).unwrap();
-    let request = BeginRequest { candidate: target.prepare_native_receive(&stored).unwrap(), source: stored, native_baseline: Some(baseline) };
-    let (BeginResult::Admitted { mut state } | BeginResult::Existing { mut state }) = target.begin_stored_native_receive(&b.log.0, &request).unwrap()
-        else { panic!("fresh stored admission expected") };
-    let mut changed_identity = false;
-    for _ in 0..1000 {
-        if state.phase == Phase::Sealed { break; }
-        let advance = AdvanceRequest { capability: state.capability.clone(), expected_progress_token: state.progress_token.clone(), generating: vec![] };
-        let AdvanceResult::Advanced { state: next, .. } = target.advance_stored_native_receive(&b.log.0, &advance).unwrap() else { panic!("current token was stale") };
-        state = next;
-        if superseded && !changed_identity && target.read_root(None).unwrap().value["language"] == "ja" {
-            let peer = rusqlite::Connection::open(target_dir.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
-            peer.execute("UPDATE library_sync_selection SET selection_epoch='synthetic-foreign-selection' WHERE singleton=1", []).unwrap();
-            changed_identity = true;
-        }
-    }
-    assert_eq!((state.phase, state.outcome), (Phase::Sealed, Some(if superseded { Outcome::Superseded } else { Outcome::Processed })));
-    assert_eq!(target.read_root(None).unwrap().value["language"], "ja");
-    let roots = state.roots.clone().unwrap();
-    if superseded {
-        assert!(changed_identity && roots.library.pages.0 > 0);
-        target.lww_apply_receive(&ApplyReceive { header: page.header.clone(), generating: vec![] }).unwrap();
-        target.lww_finish_receive(&page.header).unwrap();
-        b.finish_receive(&target, &page.header).unwrap();
-        assert_eq!(b.log.0.query_row("SELECT count(*) FROM receive_pages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-        let BeginResult::Existing { state: retained } = target.begin_stored_native_receive(&b.log.0, &request).unwrap()
-            else { panic!("the superseded history must remain owned") };
-        assert_eq!((retained.phase, retained.roots.as_ref()), (Phase::Sealed, Some(&roots)));
-        let read = crate::persistent_store::receive_batches::ReadPage { capability: state.capability.clone(),
-            partition: crate::persistent_store::receive_batches::Partition::Library,
-            kind: crate::persistent_store::receive_batches::PageKind::Effects, ordinal: 0.into(), previous_digest: "0".repeat(64) };
-        target.read_native_receive_page(&read).unwrap();
-        assert!(target.cleanup_native_receive(&state.capability).is_err());
-        let lease = target.acquire_revision(target.revision().unwrap()).unwrap().lease;
-        let projection = target.read_native_receive_evidence(&lease).unwrap();
-        target.release_revision(&lease).unwrap();
-        let delivery = DeliveryRequest { capability: state.capability.clone(), roots: roots.clone(), projection };
-        assert_eq!(target.acknowledge_native_receive_delivery(&delivery).unwrap().phase, Phase::Delivered);
-        assert!(matches!(target.retire_native_receive(Some(&b.log.0), &RetireRequest { capability: state.capability.clone(), roots }).unwrap(), RetireResult::Retired));
-        for _ in 0..1000 { if target.cleanup_native_receive(&state.capability).unwrap() { break; } }
-        assert!(target.read_native_receive_page(&read).is_err());
-        let next_header = header(&target);
-        assert!(b.receive_page(&mut target, &next_header).unwrap().changes.is_empty());
-        continue;
-    }
-    let lease = target.acquire_revision(target.revision().unwrap()).unwrap().lease;
-    let delivery = DeliveryRequest { capability: state.capability.clone(), roots: roots.clone(), projection: target.read_native_receive_evidence(&lease).unwrap() };
-    target.release_revision(&lease).unwrap();
-    assert_eq!(target.acknowledge_native_receive_delivery(&delivery).unwrap().phase, Phase::Delivered);
-    target.lww_finish_receive(&page.header).unwrap();
-    let retire = RetireRequest { capability: state.capability.clone(), roots };
-    assert!(matches!(target.retire_native_receive(Some(&b.log.0), &retire).unwrap(), RetireResult::Pending));
-    b.finish_receive(&target, &page.header).unwrap();
-    let pending: i64 = b.log.0.query_row("SELECT count(*) FROM receive_pages", [], |row| row.get(0)).unwrap();
-    assert_eq!(pending, 0);
-    // The acknowledgment settled both partitions; a repeated exact delivery reports it.
-    assert_eq!(target.acknowledge_native_receive_delivery(&delivery).unwrap().phase, Phase::Settled);
-    let next_header = header(&target);
-    assert!(b.receive_page(&mut target, &next_header).unwrap().changes.is_empty());
-    }
 }

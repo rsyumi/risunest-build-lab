@@ -101,12 +101,6 @@ vi.mock('./storage/sync/external/bridge', async () => (await import('./bootstrap
 vi.mock('./process/transformers', async () => (await import('./bootstrap.testSupport')).transformersModule())
 vi.mock('./process/files/inlayProviderImage', async () => (await import('./bootstrap.testSupport')).inlayProviderImageModule())
 
-import { getPersistentDataRuntime, configurePersistentDataRuntime, initializeActiveWorkingSet } from './storage/persistentDataRuntime.svelte'
-import { checkpointNativePersistentStore } from './storage/nativePersistentMaintenance'
-import { NativeGenerationGuard, type NativeGenerationGuardCancelReason } from './storage/nativeGenerationGuard'
-import type { WorkingSetCommit } from './storage/persistentDataStore'
-import { PersistentMutationFencedError } from './storage/saveCoordinator'
-import { SaveCoordinator, makeStore, committedChanges, captureRoot, makeDatabase } from './storage/saveCoordinator.testSupport'
 import { loadData } from './bootstrap'
 import { changeLanguage, language } from 'src/lang'
 import { languageEnglish } from 'src/lang/en'
@@ -127,6 +121,7 @@ import { initializeNativeSyncBindings, installServerSyncProduction } from './sto
 import { createSyncExitCoordinator } from './storage/syncExitCoordinator'
 import { getExternalStorageBridge } from './storage/sync/external/bridge'
 import { beginDisplayWork, installDisplayRecovery, isDisplayRecoveryMarked } from './displayRecovery.svelte'
+import { characterURLImport, registerOpenedFileImports } from './characterCards'
 
 beforeEach(() => {
     vi.clearAllMocks()
@@ -257,6 +252,14 @@ describe('bootstrap recovery exclusions', () => {
         expect(loadPlugins).toHaveBeenCalledOnce()
     })
 
+    it('takes files opened during onboarding at every start, without the realm and hub import of a finished setup', async () => {
+        startup.native = true
+        startup.exclusions = []
+        await loadData()
+        expect(registerOpenedFileImports).toHaveBeenCalledOnce()
+        expect(characterURLImport).not.toHaveBeenCalled()
+    })
+
     it('reaches UI when registering the sync transports fails while sync is left off', async () => {
         startup.native = true
         startup.exclusions = ['sync']
@@ -306,12 +309,12 @@ describe('bootstrap recovery exclusions', () => {
     })
 })
 
-describe('exit sync after a start that left sync off', () => {
+describe('exit sync target', () => {
     type ExitDependencies = Parameters<typeof createSyncExitCoordinator>[0]
     const selection = (kind: 'server' | 'external', connectionId: string) => ({ kind, connectionId, selectionEpoch: '2', paused: false })
-    async function exitTarget(current: ReturnType<typeof selection>, clearedDuringSession = false) {
+    async function exitTarget(current: ReturnType<typeof selection>, clearedDuringSession = false, syncOffAtStart = true) {
         startup.native = true
-        startup.exclusions = ['sync']
+        startup.exclusions = syncOffAtStart ? ['sync'] : []
         startup.exitDrain.mockImplementation(() => ({ id: `external:${current.connectionId}:2` }))
         startup.serverDrain.mockImplementation((id: string) => ({ id }))
         vi.mocked(getExternalStorageBridge).mockReturnValue({
@@ -354,6 +357,12 @@ describe('exit sync after a start that left sync off', () => {
 
     it('leaves a server target alone when it was never started', async () => {
         const { target, drain } = await exitTarget(selection('server', 'server-1'))
+        expect(target.selectionId).toBe('none:2')
+        expect(drain).toBeNull()
+    })
+
+    it('leaves a paused server target alone after a start with sync on', async () => {
+        const { target, drain } = await exitTarget(selection('server', 'server-1'), false, false)
         expect(target.selectionId).toBe('none:2')
         expect(drain).toBeNull()
     })
@@ -484,143 +493,6 @@ describe('display recovery record', () => {
         } finally {
             await installDisplayRecovery(null)
         }
-    })
-})
-
-
-describe('native generation startup recovery', () => {
-    it.each([false, true])('installs recovery before working-set initialization independently of opt-in (native=%s)', async native => {
-        startup.native = native
-        startup.exclusions = ['sync']
-        startup.markers.getItem.mockReturnValue(null)
-        vi.resetModules()
-        const { configurePersistentDataRuntime, initializeActiveWorkingSet } = await import('./storage/persistentDataRuntime.svelte')
-        const { initializeOfficialAccountBootstrap } = await import('./storage/sync/officialAccountBootstrap')
-        const { invoke } = await import('@tauri-apps/api/core')
-        const { loadData } = await import('./bootstrap')
-        let initialized = false
-        vi.mocked(initializeActiveWorkingSet).mockImplementationOnce(async () => {
-            const configured = vi.mocked(configurePersistentDataRuntime).mock.calls
-                .find(([configuration]) => 'nativeGeneration' in configuration)![0].nativeGeneration
-            if (native) {
-                vi.mocked(invoke).mockResolvedValueOnce([])
-                await expect(configured!.active()).resolves.toEqual([])
-                expect(invoke).toHaveBeenCalledWith('native_generation_active')
-            } else expect(configured).toBeNull()
-            initialized = true
-        })
-        vi.mocked(initializeOfficialAccountBootstrap).mockImplementationOnce(async options => {
-            await options.initializeWorkingSet(startup.database)
-            return { database: startup.database, revision: 1, officialEnabled: false }
-        })
-        await loadData()
-        expect(initialized).toBe(true)
-        expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'native_generation_host_init')).toBe(false)
-        if (!native) expect(vi.mocked(invoke).mock.calls.some(([command]) => String(command).startsWith('native_generation_'))).toBe(false)
-    })
-})
-
-describe('native generation normal exit', () => {
-    async function exitHarness() {
-        startup.native = true
-        startup.exclusions = ['sync', 'account']
-        startup.reachUi = false
-        const root = captureRoot(makeDatabase())
-        let username = 'Stored input'
-        let storedUsername = username
-        const cancellations: NativeGenerationGuardCancelReason[] = []
-        let expireClose: (() => void) | undefined
-        let closeBound: number | undefined
-        const guard: NativeGenerationGuard = new NativeGenerationGuard({
-            cancel: (_ticket, reason) => { cancellations.push(reason) },
-            adopt: async () => {},
-            fence: () => save.markCommittedWorkingSetRefreshRequired(save.revision, new Error('Native close timed out')),
-            clock: {
-                setTimeout: (callback, delay) => { expireClose = callback; closeBound = delay; return callback },
-                clearTimeout: () => { expireClose = undefined },
-            },
-        })
-        const save = new SaveCoordinator({
-            store: makeStore(vi.fn(async (commit: WorkingSetCommit) => {
-                const changes = committedChanges(commit)
-                if (typeof changes.rootChanges.username === 'string') storedUsername = changes.rootChanges.username
-                return { revision: commit.expectedRevision + 1 }
-            })),
-            captureRoot: () => ({ ...root, username }), captureSelectedCharacter: () => null,
-            replaceDatabase: () => {}, nativeGenerationGuard: guard,
-        })
-        save.initialize(1)
-        const runtime = getPersistentDataRuntime()
-        Object.assign(runtime, {
-            closeNativeGenerations: (bound: number) => guard.close(bound),
-            flushPendingDataLocally: (reason: string) => save.flushPendingDataLocally(reason),
-            capturePersistentMutationToken: save.capturePersistentMutationToken.bind(save),
-            acquireDestructiveReplacementFence: async (token: Parameters<typeof save.acquireDestructiveReplacementFence>[0]) => {
-                const owner = await save.acquireDestructiveReplacementFence(token)
-                return { revision: save.revision, release: () => save.releaseDestructiveReplacementFence(owner) }
-            },
-        })
-        vi.mocked(getPersistentDataRuntime).mockReturnValueOnce(runtime)
-        vi.mocked(getExternalStorageBridge).mockReturnValue({
-            captureExitTarget: async () => ({ revision: String(save.revision), libraryEpoch: '1',
-                selection: { kind: 'none', selectionEpoch: '1', connectionId: null, paused: false } }),
-        } as never)
-        await loadData()
-        const dependencies = vi.mocked(createSyncExitCoordinator).mock.calls.at(-1)![0]
-        const real = await vi.importActual<typeof import('./storage/syncExitCoordinator')>('./storage/syncExitCoordinator')
-        const exit = real.createSyncExitCoordinator(dependencies)
-        const ticket = { epoch: '1', sequence: '1' }
-        return {
-            exit, save, guard, cancellations,
-            get storedUsername() { return storedUsername },
-            get closeBound() { return closeBound },
-            holdEdit() {
-                guard.install(ticket, { characterId: 'synthetic-character', conversationId: 'synthetic-chat' }, ['["root","username"]'])
-                username = 'Held input'
-            },
-            settle: () => guard.settle({ ticket, phase: 'cancelled', pendingCommit: false, output: 'none' }),
-            expire: () => { expect(expireClose).toBeTypeOf('function'); expireClose!() },
-        }
-    }
-
-    it.each(['local flush', 'mutation token'] as const)('settles native generation before the exit %s can park a held write', async (boundary) => {
-        const h = await exitHarness()
-        if (boundary === 'local flush') h.holdEdit()
-        else vi.mocked(checkpointNativePersistentStore).mockImplementationOnce(async () => { h.holdEdit() })
-        const exiting = h.exit.requestExit()
-        try {
-            await vi.waitFor(() => expect(h.cancellations).toEqual(['lifecycle']))
-            expect(h.storedUsername).toBe('Stored input')
-            await h.settle()
-            await expect(exiting).resolves.toBe('exit')
-            expect(h.storedUsername).toBe('Held input')
-            expect(h.guard.snapshot()).toEqual([])
-            expect(h.save.pendingWorkingSetRefreshRevision).toBeNull()
-        } finally {
-            await h.settle()
-        }
-    })
-
-    it('keeps a timed-out native close fenced through exit retry and cancellation', async () => {
-        const h = await exitHarness()
-        h.holdEdit()
-        let blocked = 0
-        h.exit.subscribe((state) => { if (state.phase === 'edit-blocked') blocked++ })
-        const exiting = h.exit.requestExit()
-        await vi.waitFor(() => expect(h.closeBound).toBeGreaterThan(0))
-        expect(h.closeBound).toBeLessThanOrEqual(1_500)
-        h.expire()
-        await vi.waitFor(() => expect(h.exit.snapshot().phase).toBe('edit-blocked'))
-        expect(h.storedUsername).toBe('Stored input')
-        expect(h.guard.snapshot()).toMatchObject([{ state: 'fenced', cancelled: true }])
-        expect(h.exit.decide('wait')).toBe(true)
-        await vi.waitFor(() => expect(blocked).toBe(2))
-        expect(h.exit.decide('cancel-exit')).toBe(true)
-        await expect(exiting).resolves.toBe('cancelled')
-        expect(h.cancellations).toEqual(['lifecycle'])
-        expect(h.save.pendingWorkingSetRefreshRevision).toBe(1)
-        await expect(h.save.flushPendingDataLocally('after-cancel-exit')).rejects.toBeInstanceOf(PersistentMutationFencedError)
-        expect(h.storedUsername).toBe('Stored input')
     })
 })
 

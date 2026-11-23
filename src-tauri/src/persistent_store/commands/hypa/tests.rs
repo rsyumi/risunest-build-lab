@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn frame(header: serde_json::Value, body: &[u8]) -> Vec<u8> {
     let encoded = serde_json::to_vec(&header).expect("serialize header");
@@ -114,60 +114,4 @@ fn a_base64_json_body_decodes_to_the_same_frame_as_a_raw_body() {
         decode_write_frame(&recovered).expect("decode write frame")[0].vector,
         body
     );
-}
-
-pub(super) fn frame_sets() -> (Value, Value) {
-    use sha2::{Digest, Sha256};
-    let cases = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/rust-core/memory/hypa-native-cache/frames.cases.json"));
-    let expected: Value = serde_json::from_slice(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/rust-core/memory/hypa-native-cache/frames.expected.json"))).unwrap();
-    assert_eq!(expected["fixtureSha256"], hex::encode(Sha256::digest(cases)));
-    (serde_json::from_slice(cases).unwrap(), expected)
-}
-pub(super) fn fixture_text(value: &Value) -> Result<String, std::string::FromUtf16Error> {
-    if let Some(value) = value.as_str() { return Ok(value.to_owned()); }
-    String::from_utf16(&value["u"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u16).collect::<Vec<_>>())
-}
-
-#[test]
-fn actual_ts_frame_bytes_reach_the_native_string_decoder() {
-    let (cases, expected) = frame_sets();
-    for (case, observed) in cases["cases"].as_array().unwrap().iter().zip(expected["cases"].as_array().unwrap()) {
-        assert_eq!(case["id"], observed["id"]);
-        if case["input"]["mode"] != "write" { continue; }
-        let entries = case["input"]["entries"].as_array().unwrap();
-        let bytes = hex::decode(observed["result"]["frameHex"].as_str().unwrap()).unwrap();
-        assert_eq!(bytes.len() as u64, observed["result"]["frameBytes"].as_u64().unwrap());
-        let expected_valid = entries.iter().all(|entry| fixture_text(&entry["model"]).is_ok()
-            && (entry["endpoint"].is_null() || fixture_text(&entry["endpoint"]).is_ok()));
-        let result = decode_write_frame(&bytes);
-        if !expected_valid {
-            assert!(result.is_err(), "{}", case["id"]);
-            continue;
-        }
-        let decoded = result.unwrap();
-        assert_eq!(decoded.len(), entries.len());
-        for (row, entry) in decoded.iter().zip(entries) {
-            assert_eq!(row.cache_key, entry["key"].as_str().unwrap());
-            assert_eq!(row.producer, "hypa-v1-text");
-            assert_eq!(row.model, fixture_text(&entry["model"]).unwrap());
-            assert_eq!(row.endpoint, (!entry["endpoint"].is_null()).then(|| fixture_text(&entry["endpoint"]).unwrap()));
-            assert_eq!(row.preprocess_version, 1);
-            assert!(row.metadata.is_none());
-            let bits = entry["bits"].as_array().unwrap().iter().map(|value| value.as_u64().unwrap() as u32).collect::<Vec<_>>();
-            assert_eq!(row.dimensions as usize, bits.len());
-            assert_eq!(row.vector, bits.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>());
-        }
-    }
-}
-
-#[test]
-fn write_frame_admission_is_inclusive_and_only_applies_at_ingress() {
-    let bytes = frame(json!({"entries":[]}), &[]);
-    assert!(split_frame(&bytes).is_ok());
-    assert!(validate_frame_length(bytes.len(), bytes.len() - 1).is_err());
-    assert!(validate_frame_length(bytes.len(), bytes.len()).is_ok());
-    assert!(validate_frame_length(bytes.len(), bytes.len() + 1).is_ok());
-    assert!(validate_frame_length(MAX_FRAME_BYTES, MAX_FRAME_BYTES).is_ok());
-    assert!(validate_frame_length(MAX_FRAME_BYTES + 1, MAX_FRAME_BYTES).is_err());
-    assert!(validate_frame_length(HEADER_LENGTH_BYTES - 1, MAX_FRAME_BYTES).is_err());
 }

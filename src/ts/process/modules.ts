@@ -7,7 +7,6 @@ import { downloadFile, forageStorage, LocalWriter, readImage, saveAsset, Virtual
 import { AppendableBuffer } from "../appendableBuffer"
 import { checkPersonaBinded, selectMultipleFile, sleep } from "../util"
 import { v4 } from "uuid"
-import { convertExternalLorebook } from "./lorebook.svelte"
 import { decodeRPack, encodeRPack } from "../rpack/rpack_js"
 import { DBState, HideIconStore, moduleBackgroundEmbedding, ReloadGUIPointer } from "../stores.svelte"
 import {get} from "svelte/store"
@@ -19,9 +18,11 @@ import { readFile } from '@tauri-apps/plugin-fs'
 import type { NativeFileJobOptions, NativeFileJobSource } from '../storage/nativeFileJobs'
 import { importContentBatch } from '../storage/contentImportBatch'
 import { runSharedNativeFileOperation, type SharedNativeFileOperationContext } from '../storage/nativeFileJobManager'
+import { convertJsonToModule, nativeModuleLocation, type ModuleImportLocation } from './moduleImportLocation'
 import { assertModuleMCPImportAllowed, StdioModuleImportError } from './mcp/moduleImport'
-import { selectConversationModules } from './moduleSelection'
+import { selectConversationModules, type ModuleSelectionSource } from './moduleSelection'
 import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
+import { markModuleImport } from '../contentUpdate/merge'
 
 export interface MCPModule{
     url: string
@@ -43,6 +44,10 @@ export interface RisuModule{
     customModuleToggle?:string
     mcp?:MCPModule
     icon?:string
+    /** Asset key of the module as last installed from a file, compared on the next update. */
+    updateBase?:string
+    /** Id the module had in the file it was installed from, so a later version finds it. */
+    updateLineage?:string
 }
 
 export async function importPreparedNativeModuleContent(
@@ -55,11 +60,9 @@ export async function importPreparedNativeModuleContent(
     const [
         { runNativePreparedContentRoute },
         { activatePreparedNativeModuleContent },
-        { prepareNativeContentImport },
     ] = await Promise.all([
         import('../storage/nativePreparedContentRoute'),
         import('../storage/nativeModuleContentActivation'),
-        import('../storage/nativeFileJobs'),
     ])
     const result = await runContentImport(
         input.displayName,
@@ -69,8 +72,6 @@ export async function importPreparedNativeModuleContent(
                 input.source,
                 input.displayName,
                 {
-                    prepare: (source, displayName, prepareOptions) =>
-                        prepareNativeContentImport(source, displayName, prepareOptions, undefined, 'module'),
                     map: async (content) => content,
                     activate: (content, lifecycle, signal) =>
                         activatePreparedNativeModuleContent(
@@ -146,6 +147,8 @@ export async function exportModuleLegacy(module:RisuModule, arg:{
 
     const assets = module.assets ?? []
     module = safeStructuredClone(module)
+    // The update base is an asset key of this device; it means nothing in the file.
+    delete module.updateBase
     module.assets ??= []
     module.assets = module.assets.map((asset) => {
         const retained = safeStructuredClone(asset)
@@ -319,9 +322,25 @@ export async function readModule(buf:Buffer):Promise<RisuModule> {
         alertClear()
     }
 
+    markModuleImport(module)
     module.id = v4()
     delete module.mcp
+    if(module.lowLevelAccess && !(await alertConfirm(language.lowLevelAccessConfirm))){
+        module.lowLevelAccess = false
+    }
     return module
+}
+
+/**
+ * Adds an imported module, or updates the installed one it is a new version of when the user
+ * chooses that. Returns where the import went, or null when the user cancelled it.
+ */
+async function commitImportedModuleData(module: RisuModule, location: ModuleImportLocation, signal: AbortSignal | undefined): Promise<ModuleImportLocation | null> {
+    const { commitImportedModule } = await import('../contentUpdate/flow.svelte')
+    const id = await commitImportedModule(module, async (value) => {
+        DBState.db.modules.push(value)
+    }, signal)
+    return id !== null ? location : null
 }
 
 export async function importModule() {
@@ -376,7 +395,7 @@ export async function importModule() {
     }
     const files = await selectMultipleFile(['json', 'lorebook', 'risum', 'charx'])
     let imported = false
-    for (const file of files ?? []) imported = await importModuleData(file) || imported
+    for (const file of files ?? []) imported = await importModuleData(file) !== null || imported
     return imported ? 'module' : null
 }
 
@@ -387,14 +406,22 @@ async function importDesktopModulePath(path: string, context: SharedNativeFileOp
             { source: { type: 'desktopPath', path }, displayName },
             { signal: context.signal, onStatus: context.onStatus },
         )
-        return result.kind === 'imported' ? result.value : null
+        if (result.kind !== 'imported') return null
+        context.setLocation(nativeModuleLocation(displayName))
+        return result.value
     }
     context.signal.throwIfAborted()
-    return await importModuleData({ name: displayName, data: await readFile(path) }) ? 'module' : null
+    const location = await importModuleData({ name: displayName, data: await readFile(path), signal: context.signal })
+    if (!location) return null
+    context.setLocation(location)
+    return 'module'
 }
 
-/** Adds the module the file holds and reports whether it did; a refusal is alerted here. */
-export async function importModuleData(f: { name: string; data: Uint8Array; parsedJson?: ParsedImportJson }): Promise<boolean> {
+/**
+ * Adds the module the file holds and says how it was added; a refusal is alerted here and returns null.
+ * When `signal` ends, an update dialog the import opened closes and the abort is thrown instead.
+ */
+export async function importModuleData(f: { name: string; data: Uint8Array; parsedJson?: ParsedImportJson; signal?: AbortSignal }): Promise<ModuleImportLocation | null> {
     let fileData = f.data
     if (f.name.endsWith('.charx')) {
         try {
@@ -406,29 +433,30 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
             })
             if (!char || typeof char === 'number') {
                 alertError(language.errors.noData)
-                return false
+                return null
             }
             const module = convertCharacterToModule(char)
-            DBState.db.modules.push(module)
+            if (!await commitImportedModuleData(module, { kind: 'module-from-charx' }, f.signal)) return null
         } catch (error) {
+            if (f.signal?.aborted) throw error
             console.error(error)
             alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
-            return false
+            return null
         }
         alertNormal(language.successImport)
-        return true
+        return { kind: 'module-from-charx' }
     }
     if (f.name.endsWith('.risum')) {
         try {
             const buf = Buffer.from(fileData)
             const module = await readModule(buf)
-            DBState.db.modules.push(module)
-            return true
+            return await commitImportedModuleData(module, { kind: 'module' }, f.signal)
         } catch (error) {
+            if (f.signal?.aborted) throw error
             console.error(error)
             alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
         }
-        return false
+        return null
     }
     try {
         const importData = (f.parsedJson ?? parseImportJson(fileData)).value
@@ -436,75 +464,33 @@ export async function importModuleData(f: { name: string; data: Uint8Array; pars
             assertModuleMCPImportAllowed(importData)
             if (!importData.name || !importData.id) {
                 alertError(language.errors.noData)
-                return false
+                return null
             }
+            markModuleImport(importData)
             importData.id = v4()
             delete importData.mcp
 
             if (importData.lowLevelAccess) {
                 const conf = await alertConfirm(language.lowLevelAccessConfirm)
                 if (!conf) {
-                    return false
+                    return null
                 }
             }
-            DBState.db.modules.push(importData)
-            return true
+            return await commitImportedModuleData(importData, { kind: 'module' }, f.signal)
         }
-        // importData.type === 'risu' in conflict with HypaV3 preset exports
-        // difference: record vs. array
-        if (
-            importData.type === 'risu' &&
-            importData.data &&
-            Array.isArray(importData.data)
-        ) {
-            const lores: loreBook[] = importData.data
-            const importModule = {
-                name: importData.name || 'Imported Lorebook',
-                description:
-                    importData.description || 'Converted from risu lorebook',
-                lorebook: lores,
-                id: v4(),
-            }
-            DBState.db.modules.push(importModule)
-            return true
-        }
-        if (importData.entries) {
-            const lores: loreBook[] = convertExternalLorebook(
-                importData.entries,
-            )
-            const importModule = {
-                name: importData.name || 'Imported Lorebook',
-                description:
-                    importData.description ||
-                    'Converted from external lorebook',
-                lorebook: lores,
-                id: v4(),
-            }
-            DBState.db.modules.push(importModule)
-            return true
-        }
-        if (importData.type === 'regex' && importData.data) {
-            const regexs: customscript[] = importData.data
-            const importModule = {
-                name: importData.name || 'Imported Regex',
-                description:
-                    importData.description || 'Converted from risu regex',
-                regex: regexs,
-                id: v4(),
-            }
-            DBState.db.modules.push(importModule)
-            return true
-        }
+        const converted = await convertJsonToModule(importData)
+        if (converted) return await commitImportedModuleData(converted.module, converted.location, f.signal)
     } catch (error) {
+        if (f.signal?.aborted) throw error
         console.error(error)
         if (error instanceof StdioModuleImportError) {
             alertError(error)
-            return false
+            return null
         }
     }
 
     alertNormal(language.errors.noData)
-    return false
+    return null
 }
 
 function getModuleById(id:string){
@@ -524,17 +510,17 @@ function getModuleById(id:string){
     return null
 }
 
-export function getModules(){
+export function getModules(database: ModuleSelectionSource = getDatabase()){
     return selectConversationModules(
-        getDatabase(),
+        database,
         getCurrentChat()?.modules,
         getCurrentCharacter()?.modules,
         checkPersonaBinded(),
     )
 }
 
-export function getModuleLorebooks() {
-    const modules = getModules()
+export function getModuleLorebooks(database: ModuleSelectionSource = getDatabase()) {
+    const modules = getModules(database)
     let lorebooks: loreBook[] = []
     for (const module of modules) {
         if(!module){
@@ -596,8 +582,9 @@ export function getModuleRegexScripts() {
     return customscripts
 }
 
-export function getModuleToggles() {
-    const modules = getModules()
+/** `database` names the preset whose integrated modules count, such as the one preset settings edit. */
+export function getModuleToggles(database?: ModuleSelectionSource) {
+    const modules = getModules(database)
     let costomModuleToggles: string = ''
     for (const module of modules) {
         if(!module){

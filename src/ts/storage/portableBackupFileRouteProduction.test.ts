@@ -74,6 +74,7 @@ vi.mock('./nativeFileJobs', async (original) => ({
     runNativeBlockRisuSaveRestore: m.block,
     runNativeLegacyLocalBackupRestore: m.legacy,
 }))
+import { language } from 'src/lang'
 import {
     exportPortableBackupFromSystemPicker,
     restoreBackupFromNativeSource,
@@ -127,6 +128,9 @@ describe('common backup file production route', () => {
     })
     it('materializes confirmed upstream Android source after format probe',async()=>{
         m.invoke.mockResolvedValue('local-backup')
+        // The restore job claims the materialized spool, so removing it afterwards finds nothing.
+        m.discard.mockResolvedValue(false)
+        m.legacy.mockResolvedValue({ ...result, warningCodes: [] })
         const bridge = {
             copyExport() {},
             materializeBackupSource(_token: string, report?: (progress: { copiedBytes: number; totalBytes: number | null }) => void) {
@@ -139,14 +143,14 @@ describe('common backup file production route', () => {
             expect(m.invoke).toHaveBeenCalledWith('native_backup_source_format',{source:{type:'androidSeekable',token:'synthetic-custody'}})
             return materializeAndroidBackupSource(token, options, bridge)
         })
-        await restoreBackupFromNativeSource({type:'androidSeekable',token:'synthetic-custody'})
+        await expect(restoreBackupFromNativeSource({type:'androidSeekable',token:'synthetic-custody'}))
+            .resolves.toMatchObject({ warningCodes: [] })
         expect(m.status).toHaveBeenCalledWith(expect.objectContaining({
             detail: expect.objectContaining({
                 stage: 'copying-source', stageUnit: 'bytes', stageCompleted: 4 * 1024 ** 3, stageTotal: 8 * 1024 ** 3,
             }),
         }))
         expect(m.legacy.mock.calls[0][1]).toEqual({type:'androidSpool',token:'synthetic-materialized'})
-        expect(m.discard).toHaveBeenCalledWith('synthetic-materialized')
     })
     it('propagates cancellation into the Android copy and removes its late result before restore', async () => {
         m.invoke.mockResolvedValue('local-backup')
@@ -299,6 +303,13 @@ describe('common backup file production route', () => {
             expect(selected).toHaveBeenCalledOnce()
             expect(m.manager).toHaveBeenCalledOnce()
             const options = selected.mock.calls[0][2]
+            const kind = format === 'portable' ? language.risuNest.importIntake.kindBackupPortable
+                : format === 'block-risu-save' ? language.risuNest.importIntake.kindBackupRisuSave
+                : language.risuNest.importIntake.kindBackupLocal
+            expect(options.confirmationDetails).toEqual([
+                { label: language.risuNest.importIntake.detailFile, value: 'misleading.bin · 30 B' },
+                { label: language.risuNest.importIntake.detailKind, value: kind },
+            ])
             if (format === 'portable') {
                 m.chooseRestore.mockResolvedValue({
                     library: true,
@@ -320,6 +331,21 @@ describe('common backup file production route', () => {
             expect(m.resume).not.toHaveBeenCalled()
         },
     )
+    it('names the dropped file instead of its copy and leaves a saved conflict backup unnamed', async () => {
+        m.invoke.mockResolvedValue('portable')
+        await restoreBackupFromNativeSource({ type: 'desktopPath', path: 'C:/synthetic/inbox/copy' }, { sourceInfo: { name: 'dropped.risunest', bytes: 2048 } })
+        expect(m.portable.mock.calls[0][2].confirmationDetails[0]).toEqual({ label: language.risuNest.importIntake.detailFile, value: 'dropped.risunest · 2.0 KiB' })
+        await restoreBackupFromNativeSource(async ({ onSource }) => {
+            onSource({ name: 'shared.risunest', bytes: 4096 })
+            return { type: 'androidSpool', token: 'synthetic-spool' }
+        })
+        expect(m.portable.mock.calls[1][2].confirmationDetails[0]).toEqual({ label: language.risuNest.importIntake.detailFile, value: 'shared.risunest · 4.0 KiB' })
+        await restoreBackupFromNativeSource(async ({ onSource }) => {
+            onSource({ name: '2026-11-01 12:00', bytes: 2048 })
+            return { type: 'savedConflict', token: 'synthetic-conflict' }
+        })
+        expect(m.portable.mock.calls[2][2]).not.toHaveProperty('confirmationDetails')
+    })
     it.each(['compatibility-import-required', 'unsupported-format', 'corrupt-input'])('retains %s and releases an unclaimed source without a browser retry', async code => {
         const { NativeFileJobError } = await import('./nativeFileJobs')
         m.invoke.mockResolvedValue('local-backup')
@@ -328,6 +354,26 @@ describe('common backup file production route', () => {
         expect(m.fallback).not.toHaveBeenCalled()
         expect(m.discard).toHaveBeenCalledWith('synthetic')
         expect(m.beginReplacement).not.toHaveBeenCalled()
+    })
+
+    it('refuses a second given backup while another restore runs instead of reporting the first one for it', async () => {
+        const manager = await vi.importActual<typeof import('./nativeFileJobManager')>('./nativeFileJobManager')
+        m.manager.mockImplementation(manager.runSharedNativeFileOperation)
+        let finishFirst!: () => void
+        m.portable.mockImplementationOnce(() => new Promise(resolve => { finishFirst = () => resolve(result) }))
+        const first = restoreBackupFromNativeSource({ type: 'desktopPath', path: 'C:/synthetic/first.risunest' })
+        await vi.waitFor(() => expect(m.portable).toHaveBeenCalledOnce())
+        await expect(restoreBackupFromNativeSource({ type: 'desktopPath', path: 'C:/synthetic/second.risunest' }))
+            .rejects.toBeInstanceOf(manager.NativeFileOperationBusyError)
+        finishFirst()
+        await expect(first).resolves.toEqual(result)
+        manager.dismissNativeFileOperationOutcome()
+        await expect(restoreBackupFromNativeSource({ type: 'desktopPath', path: 'C:/synthetic/second.risunest' })).resolves.toEqual(result)
+        expect(m.portable.mock.calls.map(call => call[1])).toEqual([
+            { type: 'desktopPath', path: 'C:/synthetic/first.risunest' },
+            { type: 'desktopPath', path: 'C:/synthetic/second.risunest' },
+        ])
+        manager.dismissNativeFileOperationOutcome()
     })
 
     it('native cancellation discards the unclaimed Android source', async () => {

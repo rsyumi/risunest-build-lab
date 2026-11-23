@@ -13,9 +13,6 @@ const expectedCases = {
     'session-end': ['commit', 'stop-requested', 'saved'],
     'read-session-end': ['saved-before-exit'],
     'session-end-unanswered': ['commit', 'stop-requested'],
-    generation: ['proof-at-issued', 'success-once', 'provider-error', 'cancel-before-execute', 'cancel-after-dispatch', 'unknown-ticket'],
-    'generation-reload': ['listed-after-loss', 'resolved-once'],
-    'generation-lost': ['listed-after-loss', 'resolved-once'],
 }
 // The failure record keeps the error's cause chain, which `error` alone drops.
 const failureText = report => report.failure ? JSON.stringify(report.failure) : report.error

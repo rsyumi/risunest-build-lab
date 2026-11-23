@@ -6,7 +6,7 @@
     import type { AssetSection } from "src/ts/gallery/assetGallery";
     let galleryOwner = $state<{ id: string; section: AssetSection } | null>(null)
     import { language } from "../../lang";
-    import { tokenizeAccurateList } from "../../ts/tokenizer";
+    import { tokenizeAccurate } from "../../ts/tokenizer";
     import { getCurrentCharacter, type character } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { untrack } from 'svelte';
@@ -20,13 +20,14 @@
     import BarIcon from "./BarIcon.svelte";
     import { selectMultipleFile, selectSingleFile } from "../../ts/util";
     import Help from "../Others/Help.svelte";
-    import { exportChar } from "src/ts/characterCards";
+    import { exportChar, importCharacter } from "src/ts/characterCards";
     import { getElevenTTSVoices, getWebSpeechTTSVoices, getVOICEVOXVoices, oaiVoices, getNovelAIVoices } from "src/ts/process/tts";
     import { getFileSrc, saveAsset } from "src/ts/globalApi.svelte";
 
     import TextInput from "../UI/GUI/TextInput.svelte";
     import NumberInput from "../UI/GUI/NumberInput.svelte";
     import TextAreaInput from "../UI/GUI/TextAreaInput.svelte";
+    import ToggleDefinitionEditor from "../UI/ToggleDefinitionEditor.svelte";
     import Button from "../UI/GUI/Button.svelte";
     import SelectInput from "../UI/GUI/SelectInput.svelte";
     import OptionInput from "../UI/GUI/OptionInput.svelte";
@@ -69,26 +70,18 @@
         firstMsg: string | null,
         localNote: string
     ) {
-        const fields: ('desc' | 'firstMsg' | 'localNote')[] = []
         if (desc !== null && lasttokens.desc !== desc) {
             lasttokens.desc = desc
-            fields.push('desc')
+            tokens.desc = await tokenizeAccurate(desc)
         }
         if (firstMsg !== null && lasttokens.firstMsg !== firstMsg) {
             lasttokens.firstMsg = firstMsg
-            fields.push('firstMsg')
+            tokens.firstMsg = await tokenizeAccurate(firstMsg)
         }
         if (lasttokens.localNote !== localNote) {
             lasttokens.localNote = localNote
-            fields.push('localNote')
+            tokens.localNote = await tokenizeAccurate(localNote)
         }
-        if (fields.length === 0) return
-        const texts = fields.map((field) => lasttokens[field])
-        const counts = await tokenizeAccurateList(texts)
-        // A count that resolves after a newer text for the same field is dropped.
-        fields.forEach((field, index) => {
-            if (lasttokens[field] === texts[index]) tokens[field] = counts[index]
-        })
     }
 
 
@@ -198,6 +191,19 @@
 
 
     });
+
+    // The forms bind directly to these configs, and blocks can update before
+    // $effect.pre runs, so hold a form back until the effects above have created its config.
+    const ttsConfigReady = $derived.by(() => {
+        const chara = DBState.db.characters[$selectedCharID] as character
+        switch (chara.ttsMode) {
+            case 'novelai': return chara.naittsConfig !== undefined
+            case 'gptsovits': return chara.gptSoVitsConfig !== undefined
+            case 'fishspeech': return chara.fishSpeechConfig !== undefined
+            case 'openai': return chara.oaiTTSConfig !== undefined
+            default: return true
+        }
+    })
 
     async function getFishSpeechModels() {
         try {
@@ -680,6 +686,12 @@
         }} className="mt-2">{language.exportCharacter}</Button>
     {/if}
 
+    <Button size="sm" onclick={async () => {
+        const characterId = DBState.db.characters[$selectedCharID].chaId
+        const { importAsContentUpdate } = await import('src/ts/contentUpdate/flow.svelte')
+        await importAsContentUpdate('character', characterId, () => importCharacter())
+    }} className="mt-2">{language.risuNest.contentUpdate.updateAction}</Button>
+
     {#if archiveIsAvailable()}
         <Button onclick={async () => {
             await archiveCharacterWithConfirmation(DBState.db.characters[$selectedCharID].chaId)
@@ -768,7 +780,7 @@
                 <span class="text-textcolor">Intonation scale</span>
                 <NumberInput size={"sm"} marginBottom bind:value={DBState.db.characters[$selectedCharID].voicevoxConfig.INTONATION_SCALE}/>
                 <span class="text-sm mb-2 text-textcolor2">To use VOICEVOX, you need to run a colab and put the localtunnel URL in "Settings → Other Bots". https://colab.research.google.com/drive/1tyeXJSklNfjW-aZJAib1JfgOMFarAwze</span>
-        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'novelai'}
+        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'novelai' && ttsConfigReady}
             <span class="text-textcolor">Custom Voice Seed</span>
             <Check bind:check={DBState.db.characters[$selectedCharID].naittsConfig.customvoice}/>
             {#if !DBState.db.characters[$selectedCharID].naittsConfig.customvoice}
@@ -793,7 +805,7 @@
                 <OptionInput value="v1">v1</OptionInput>
                 <OptionInput value="v2">v2</OptionInput>
             </SelectInput>
-        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'openai'}
+        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'openai' && ttsConfigReady}
             <span class="text-textcolor">Voice</span>
             {#if !DBState.db.characters[$selectedCharID].oaiTTSConfig?.enabled}
                 <SelectInput className="mb-4 mt-2" bind:value={DBState.db.characters[$selectedCharID].oaiVoice}>
@@ -857,7 +869,7 @@
                     character.vits = model
                 })
             }}>{language.selectModel}</Button>
-        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'gptsovits'}
+        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'gptsovits' && ttsConfigReady}
             <span class="text-textcolor">Volume</span>
             <SliderInput min={0.0} max={1.0} step={0.01} fixed={2} bind:value={DBState.db.characters[$selectedCharID].gptSoVitsConfig.volume}/>
             <span class="text-textcolor">URL</span>
@@ -962,7 +974,7 @@
                 <OptionInput value="cut4">Cut 4 (Split by English periods)</OptionInput>
                 <OptionInput value="cut5">Cut 5 (Split by various punctuation marks)</OptionInput>
             </SelectInput>        
-        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'fishspeech'}
+        {:else if DBState.db.characters[$selectedCharID].ttsMode === 'fishspeech' && ttsConfigReady}
             {#await getFishSpeechModels()}
                 <span class="text-textcolor">Loading...</span>
             {:then}
@@ -1073,8 +1085,9 @@
         <span class="text-textcolor mt-2">{language.translatorNote} <Help key="translatorNote" /></span>
         <TextAreaInput margin="both" autocomplete="off" bind:value={DBState.db.characters[$selectedCharID].translatorNote}></TextAreaInput>
 
-        <span class="text-textcolor mt-2">{language.customPromptTemplateToggle} <Help key="customPromptTemplateToggle" /></span>
-        <TextAreaInput margin="both" autocomplete="off" bind:value={DBState.db.characters[$selectedCharID].customModuleToggle}></TextAreaInput>
+        <ToggleDefinitionEditor className="mt-2 mb-2" value={DBState.db.characters[$selectedCharID].customModuleToggle} onChange={(text) => {
+            DBState.db.characters[$selectedCharID].customModuleToggle = text
+        }} />
 
         <span class="text-textcolor">{language.creator}</span>
         <TextInput size="sm" autocomplete="off" bind:value={DBState.db.characters[$selectedCharID].additionalData.creator} />

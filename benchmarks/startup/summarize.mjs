@@ -1,13 +1,9 @@
 import { readFile } from 'node:fs/promises'
-import { maxConcurrentResources, percentile, sanitizeObservationManifest, assertCompleteObservation, IPC_COMMANDS } from './metrics.mjs'
+import { maxConcurrentResources, percentile } from './metrics.mjs'
 
 const result = JSON.parse(await readFile(process.argv[2], 'utf8'))
-const observation = sanitizeObservationManifest(result.ipcObservation)
-if (result.ipcObservation != null && !observation) throw new Error('Unsupported invocation observation boundary')
-if (!observation && result.samples.some(sample => sample.ipcObservation != null)) throw new Error('Mixed legacy invocation observations')
 const groups = new Map()
 for (const sample of result.samples.filter((s) => !s.warmup)) {
-    if (observation) assertCompleteObservation(sample, observation)
     const key = `${sample.assets}/${sample.mode}/${sample.kind}`
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(sample)
@@ -21,7 +17,7 @@ const distribution = (values) => ({
 const sum = (values) => values.reduce((a, b) => a + b, 0)
 const openTotal = (sample, field) => {
     const calls = sample.calls.filter((c) => c.command === 'pds_open')
-    return calls.length && calls.every((c) => Number.isFinite(c[field]) && (!observation || c.success))
+    return calls.length && calls.every((c) => Number.isFinite(c[field]))
         ? sum(calls.map((c) => c[field]))
         : null
 }
@@ -50,7 +46,6 @@ for (const samples of groups.values()) {
         'capture-database',
         'flush',
         'clean-chunks',
-        ...(observation ? ['store-commit'] : []),
     ]) {
         operations[stage] = distribution(
             samples.map((s) => sum(s.operations.filter((o) => o.stage === stage).map((o) => o.ms))),
@@ -77,10 +72,6 @@ for (const samples of groups.values()) {
         mode: first.mode,
         kind: first.kind,
         count: samples.length,
-        observationBoundary: observation?.boundary ?? 'legacy-transport-or-store',
-        ...(observation ? { ipcObservation: observation } : {
-            legacyObservationWarning: 'Legacy fetch/store observations may perturb transport and are not an uncontaminated invocation baseline.',
-        }),
         interactiveMs: distribution(samples.map((s) => s.interactiveMs)),
         bootstrapToInteractiveMs: distribution(
             samples.map(
@@ -115,22 +106,12 @@ for (const samples of groups.values()) {
         scrollMs: distribution(samples.map((s) => s.interaction?.scrollMs)),
         interactionFailures: samples.filter((s) => s.interaction && !s.interaction.success).length,
         stabilizationTimeouts: samples.filter((s) => s.stabilizationTimeout).length,
-        ...(observation ? {
-            semanticCommitCount: distribution(samples.map(sample => sample.operations.filter(operation =>
-                operation.stage === 'store-commit' && operation.success).length)),
-            semanticCommitMs: distribution(samples.flatMap(sample => sample.operations.filter(operation =>
-                operation.stage === 'store-commit' && operation.success).map(operation => operation.ms))),
-            semanticCommitFailures: samples.flatMap(sample => sample.operations).filter(operation =>
-                operation.stage === 'store-commit' && !operation.success).length,
-            sdkInvocationsByCommand: Object.fromEntries(IPC_COMMANDS.flatMap(command => {
-                const calls = samples.flatMap(sample => sample.calls.filter(call => call.command === command))
-                return calls.length ? [[command, { count: calls.length, failed: calls.filter(call => !call.success).length,
-                    durationMs: distribution(calls.map(call => call.ms)) }]] : []
-            })),
-        } : {
-            commits: distribution(samples.map(s => s.calls.filter(c => c.command === 'pds_commit').length)),
-            replacements: distribution(samples.map(s => s.calls.filter(c => c.command === 'pds_replace_commit').length)),
-        }),
+        commits: distribution(
+            samples.map((s) => s.calls.filter((c) => c.command === 'pds_commit').length),
+        ),
+        replacements: distribution(
+            samples.map((s) => s.calls.filter((c) => c.command === 'pds_replace_commit').length),
+        ),
         revisionDelta: distribution(
             samples.map((s) =>
                 Number.isFinite(s.lastRevision) && Number.isFinite(s.firstRevision)

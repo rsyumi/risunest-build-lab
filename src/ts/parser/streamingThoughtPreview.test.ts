@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { getStreamingThoughtPreview } from './streamingThoughtPreview'
 
 describe('streaming Thought preview', () => {
@@ -109,38 +109,5 @@ describe('streaming Thought preview', () => {
         const first = preview.recent.charCodeAt(0)
         expect(first >= 0xdc00 && first <= 0xdfff).toBe(false)
         expect(preview.recent.endsWith('z')).toBe(true)
-    })
-
-    it('reports the Unicode version of the segmenter it splits with from the grapheme and case probes', async () => {
-        const original = Intl.Segmenter
-        const upper = String.prototype.toUpperCase
-        // The first segment of each probe that a generation keeps in one cluster: U+113D1 prepends from Unicode 16
-        // and U+1ACF extends from Unicode 17. A Unicode 18 engine maps U+0277 to its new capital U+A7DD.
-        const v16 = ['\u{113D1}a']
-        const v17 = [...v16, 'a\u{1ACF}']
-        const engines: [string | null, string[] | null, boolean][] = [[null, null, false], ['before16', [], false],
-            ['unicode16', v16, false], ['unicode17', v17, false], ['from18', v17, true], ['from18', v16, true]]
-        try {
-            for (const [row, [version, joined, case18]] of engines.entries()) {
-                class Segmenter {
-                    segment(text: string) {
-                        const segment = joined!.includes(text) ? text : String.fromCodePoint(text.codePointAt(0)!)
-                        return { [Symbol.iterator]: () => [{ segment }][Symbol.iterator]() }
-                    }
-                }
-                Object.defineProperty(Intl, 'Segmenter', { value: joined ? Segmenter : undefined, configurable: true, writable: true })
-                vi.spyOn(String.prototype, 'toUpperCase').mockImplementation(function (this: string) {
-                    const value = String(this)
-                    return case18 && value === '\u{277}' ? '\u{A7DD}' : upper.call(value)
-                })
-                vi.resetModules()
-                const { graphemeSegmenterUnicode } = await import('./streamingThoughtPreview')
-                expect(graphemeSegmenterUnicode(), `row ${row}`).toBe(version)
-                vi.restoreAllMocks()
-            }
-        } finally {
-            vi.restoreAllMocks()
-            Object.defineProperty(Intl, 'Segmenter', { value: original, configurable: true, writable: true })
-        }
     })
 })

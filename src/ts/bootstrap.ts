@@ -16,7 +16,6 @@ import { setDatabase, getDatabase, type Database } from "./storage/database.svel
 import { getStartupExclusions, loadDeviceSettings } from "./storage/deviceSettings";
 import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
 import { generationDiagnostics } from './generationDiagnostics'
-import { createNativeGenerationPort } from './storage/nativeGeneration'
 import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
@@ -24,7 +23,7 @@ import { afterPluginsStarted, keepPluginsOffForThisStart, loadPlugins, loadPlugi
 import { setPluginStartupSyncExcluded } from './plugins/pluginStartupGate';
 import { alertActionConfirm, alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
 import { backgroundErrorMessage } from "./storage/backgroundErrorMessage";
-import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
+import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL, registerOpenedFileImports } from "./characterCards";
 import { initializeNativeLocalUrls } from "./nativeLocalUrls";
 import { loadRisuAccountData } from "./drive/accounter";
 import { updateAnimationSpeed } from "./gui/animation";
@@ -51,7 +50,7 @@ import {
     setUsingSw
 } from "./globalApi.svelte";
 import { isTauri, isTauriAndroid, isTauriDesktop, isTauriIOS } from "./platform";
-import { expireMobileDeferredHolds, mobileDeferredHoldsSettled } from "./mobileBackgroundTask";
+import { mobileDeferredHoldsSettled } from "./mobileBackgroundTask";
 import { setGenerationBackground } from "./process/generationState";
 import { beginGenerationBackground } from "./process/generationBackground";
 import { registerModelDynamic } from "./model/modellist";
@@ -168,7 +167,6 @@ import {
     type RetainableReplacementFence,
 } from './storage/retainableReplacementFence'
 
-const NATIVE_GENERATION_EXIT_CLOSE_MILLIS = 1_500
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 let disposeLifecycleCommitListeners: (() => void) | undefined
 let disposeMacosLifecycle: (() => void) | undefined
@@ -285,7 +283,6 @@ export async function loadData() {
         if (recoveredNativeFileJobs.libraryRestoreCommitted) holdServerSyncAfterRestore()
         const recoveredNativeRestoreJobs =
             recoveredNativeFileJobs.pendingRestoreAcknowledgements
-        configurePersistentDataRuntime({ nativeGeneration: isTauri ? createNativeGenerationPort() : null })
         const runtime = getPersistentDataRuntime()
         const { flush: flushLifecycle, flushForLifecycle } = createLifecycleFlush({
             runtime,
@@ -700,11 +697,8 @@ export async function loadData() {
         let heldExitRevision: number | undefined
         let heldExitFence: RetainableReplacementFence | undefined
         let selectedExitDrain: SyncExitDrainAdapter | null = null
-        const closeNativeGenerationsForExit = () =>
-            runtime.closeNativeGenerations(NATIVE_GENERATION_EXIT_CLOSE_MILLIS)
         const syncExitCoordinator = createSyncExitCoordinator({
             async acquireEditFence() {
-                await closeNativeGenerationsForExit()
                 const token = await runtime.capturePersistentMutationToken(
                     'normal-exit-fence',
                     { publishOfficial: false },
@@ -716,10 +710,7 @@ export async function loadData() {
                 heldExitFence = fence
                 return fence
             },
-            flushLocal: async () => {
-                await closeNativeGenerationsForExit()
-                await runtime.flushPendingDataLocally('normal-exit')
-            },
+            flushLocal: () => runtime.flushPendingDataLocally('normal-exit'),
             checkpointLocal: async () => {
                 if (!isTauri) return
                 const { checkpointNativePersistentStore } = await import(
@@ -870,6 +861,7 @@ export async function loadData() {
             void initializeNativeLocalUrls((id) => {
                 if (getDatabase().didFirstSetup) void downloadRisuHub(id)
             })
+        registerOpenedFileImports()
         if (getDatabase().didFirstSetup) void characterURLImport()
 
         await transition('format-update', language.risuNest.startup.data)
@@ -971,7 +963,6 @@ export async function loadData() {
           schedulePeriodicNativeSnapshot();
           installIOSPersistenceLifecycle((reason) => flushLifecycle(reason, true), {
             settled: mobileDeferredHoldsSettled,
-            expire: expireMobileDeferredHolds,
           });
         }
         if (!excluded('modules')) moduleUpdate()

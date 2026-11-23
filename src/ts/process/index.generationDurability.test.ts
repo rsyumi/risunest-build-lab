@@ -42,7 +42,6 @@ const harness = vi.hoisted(() => {
     })
     const tokenize = vi.fn(async () => 8)
     const tokenizeNum = vi.fn(async () => [1])
-    const prefetchTokenIds = vi.fn(async (_texts: string[]) => new Map<string, number[]>())
     const runTrigger = vi.fn(async (_char?: any, _event?: string, _context?: any): Promise<any> => null)
     const processScriptFull = vi.fn(async (_char, data: string, _mode?: string) => ({
         data,
@@ -88,7 +87,6 @@ const harness = vi.hoisted(() => {
         requestChatData,
         tokenize,
         tokenizeNum,
-        prefetchTokenIds,
         runTrigger,
         processScriptFull,
         runInlayScreen,
@@ -122,7 +120,6 @@ vi.mock('../stores.svelte', () => ({
 vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')).tokenizerModule({
     tokenize: harness.tokenize,
     tokenizeNum: harness.tokenizeNum,
-    prefetchTokenIds: harness.prefetchTokenIds,
 }))
 vi.mock('../alert', async () => (await import('./tests/sendChatTestHarness')).alertModule())
 vi.mock('../parser/chatML', async () => (await import('./tests/sendChatTestHarness')).chatMLModule({
@@ -703,22 +700,6 @@ describe('sendChat generation durability control flow', () => {
 
         expect(harness.acknowledge).toHaveBeenCalledOnce()
         expect(harness.CharEmotion.value()[character.chaId]?.at(-1)?.[0]).toBe('happy')
-    })
-
-    it('builds the emotion bias from the token IDs of one batch', async () => {
-        const character = harness.DBState.db.characters[0]
-        character.viewScreen = 'emotion'
-        character.emotionImages = [['happy', 'asset'], ['sad', 'asset-2']]
-        harness.DBState.db.emotionProcesser = 'submodel'
-        harness.CharEmotion.set({ [character.chaId]: [['sad', 'asset-2', 1]] })
-        harness.prefetchTokenIds.mockImplementationOnce(async (texts) =>
-            new Map(texts.map((text) => [text, text === 'happy' ? [100] : [101]])))
-        harness.requests.push(success('Emotion response'), success('happy'))
-
-        await expect(sendChat()).resolves.toBe(true)
-
-        expect(harness.prefetchTokenIds).toHaveBeenCalledOnce()
-        expect((harness.requestChatData.mock.calls[1] as any[])[0].bias).toEqual({ 100: 10, 101: -10 })
     })
 
     it('acknowledges before auto-continue recursion and before releasing doingChat', async () => {

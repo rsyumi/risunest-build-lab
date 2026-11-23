@@ -32,6 +32,15 @@ export interface NativeCharacterContentActivationDependencies {
         createOrMutate: PersistentCompleteCharacterUpsert,
         options?: PersistentCompleteCharacterUpsertOptions,
     ): Promise<boolean>
+    /**
+     * Commits the mapped character through `commit`, or offers to update an installed one
+     * instead. Resolves the id the import ended as, or null when the user cancelled it.
+     */
+    commitImport?(
+        character: character,
+        commit: (value: character) => Promise<unknown>,
+        signal?: AbortSignal,
+    ): Promise<string | null>
 }
 
 export interface NativeCharacterContentActivationResult {
@@ -160,18 +169,14 @@ export async function prepareAdditionalAssetOwnerHead(
     }
 }
 
-// The character the native mapping produced, or undefined where the TS mapping runs instead: on every decline, so an
-// invalid card fails with the TS mapping's own error.
-function nativeMappedCharacter(
-    mapping: PreparedNativeContent['nativeMapping'],
-): character | undefined {
-    return mapping?.outcome === 'mapped' && 'character' in mapping ? mapping.character as unknown as character : undefined
-}
-
 const productionDependencies: NativeCharacterContentActivationDependencies = {
     decodePng: decodePreparedNativePngCharacterCard,
     map: mapPreparedNativeCharacterCard,
     upsert: upsertPersistentCompleteCharacter,
+    commitImport: async (character, commit, signal) => {
+        const { commitImportedCharacter } = await import('../contentUpdate/flow.svelte')
+        return commitImportedCharacter(character, commit, signal)
+    },
 }
 
 export async function activatePreparedNativeCharacterContent(
@@ -189,22 +194,30 @@ export async function activatePreparedNativeCharacterContent(
     if (!character) return null
 
     const assetAliases = preparedAliases(content)
-    throwIfAborted(signal)
-    const assetOwnerHead = await prepareAdditionalAssetOwnerHead(
-        character,
-        assetAliases,
-        lifecycle.prepareOwnerManifestAndSeal,
-    )
-    await dependencies.upsert(
-        character.chaId,
-        'native-content-import',
-        () => character,
-        {
+    // Sealed only once the import commits, so a cancelled import releases what it prepared.
+    const commit = async (value: character) => {
+        throwIfAborted(signal)
+        const assetOwnerHead = await prepareAdditionalAssetOwnerHead(
+            value,
             assetAliases,
-            assetOwnerHeads: [assetOwnerHead],
-        },
-    )
-    return { characterId: character.chaId }
+            lifecycle.prepareOwnerManifestAndSeal,
+        )
+        await dependencies.upsert(
+            value.chaId,
+            'native-content-import',
+            () => value,
+            {
+                assetAliases,
+                assetOwnerHeads: [assetOwnerHead],
+            },
+        )
+    }
+    if (!dependencies.commitImport) {
+        await commit(character)
+        return { characterId: character.chaId }
+    }
+    const characterId = await dependencies.commitImport(character, commit, signal)
+    return characterId ? { characterId } : null
 }
 
 export async function mapPreparedNativeContent(
@@ -221,7 +234,6 @@ export async function mapPreparedNativeContent(
     }
     const cardAssets =
         content.assets as import('./nativeFileJobs').PreparedCardContentAssetDescriptor[]
-    const receiptAssetCount = cardAssets.length
     throwIfAborted(signal)
     const card =
         content.format === 'png-card'
@@ -232,11 +244,7 @@ export async function mapPreparedNativeContent(
             : requireCharacterCardMetadata(content.metadata)
     throwIfAborted(signal)
     if (!card) return null
-    // The native mapping read the receipt's assets, so a card whose PNG inline payloads were staged since is mapped in TS.
-    const nativeCharacter = cardAssets.length === receiptAssetCount
-        ? nativeMappedCharacter(content.nativeMapping)
-        : undefined
-    const character = nativeCharacter ?? await dependencies.map({
+    const character = await dependencies.map({
         card,
         assets: cardAssets.map(({ token, logicalId }) => ({
             token,

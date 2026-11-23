@@ -5,9 +5,6 @@ import { randomUUID, createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { verifyReport } from './report.mjs'
 import { startOfficialAccountFixtureServer } from '../../benchmarks/official-account/server.mjs'
-import { startOllamaFixture } from './ollamaFixture.mjs'
-import { REALM_BLOCKED_URL_PATTERNS } from '../../scripts/realmBlocklist.mjs'
-import { createServer } from 'node:net'
 
 const root = resolve(import.meta.dirname, '../..')
 const smallAssets = process.argv.includes('--asset-benchmark-small')
@@ -54,57 +51,7 @@ const phaseGroups = assetBenchmark ? [[officialAccount ? 'official-account-bench
 // The repeated-close escape exists where closing the window quits; SIGTERM asks only Linux to save.
 if (!assetBenchmark && (process.platform === 'win32' || process.platform === 'linux')) phaseGroups.push(['close-escape'])
 if (!assetBenchmark && process.platform === 'linux') phaseGroups.push(['session-end', 'read-session-end'], ['session-end-unanswered'])
-// Native generation reaches a loopback Ollama fixture; only WebView2 lets the runner crash the renderer.
-if (!assetBenchmark) phaseGroups.push(['generation'], ['generation-reload'])
-if (!assetBenchmark && process.platform === 'win32') phaseGroups.push(['generation-lost'])
 const accountServer = officialAccount ? await startOfficialAccountFixtureServer() : null
-const ollamaFixture = assetBenchmark ? null : await startOllamaFixture({ control: true })
-const freePort = () => new Promise((accept, reject) => {
-    const server = createServer()
-    server.on('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-        const { port } = server.address()
-        server.close(error => error ? reject(error) : accept(port))
-    })
-})
-// Ends the hidden WebView's renderer process the way a renderer crash does.
-async function crashRenderer(port) {
-    const deadline = Date.now() + 30_000
-    for (;;) {
-        let socket
-        try {
-            const targets = await (await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(1_000) })).json()
-            const page = targets.find(value => value.type === 'page' && /^https?:\/\/tauri\.localhost/.test(value.url))
-            if (page) {
-                socket = new WebSocket(page.webSocketDebuggerUrl)
-                await new Promise((accept, reject) => {
-                    socket.addEventListener('open', accept, { once: true })
-                    socket.addEventListener('error', reject, { once: true })
-                })
-                const replies = new Map()
-                socket.addEventListener('message', event => {
-                    const message = JSON.parse(String(event.data))
-                    replies.get(message.id)?.(message)
-                })
-                const send = (id, method, params = {}) => new Promise((accept, reject) => {
-                    const timer = setTimeout(() => reject(new Error(`CDP ${method} timeout`)), 5_000)
-                    replies.set(id, message => { clearTimeout(timer); message.error ? reject(new Error(`CDP ${method} failed`)) : accept() })
-                    socket.send(JSON.stringify({ id, method, params }))
-                })
-                await send(1, 'Network.enable')
-                await send(2, 'Network.setBlockedURLs', { urls: REALM_BLOCKED_URL_PATTERNS })
-                // The renderer exits before it can answer.
-                socket.send(JSON.stringify({ id: 3, method: 'Page.crash', params: {} }))
-                await new Promise(resolve => { socket.addEventListener('close', resolve, { once: true }); setTimeout(resolve, 3_000) })
-                return
-            }
-        } catch (error) {
-            if (Date.now() > deadline) throw error
-        } finally { socket?.close() }
-        if (Date.now() > deadline) throw new Error('Renderer debugging endpoint unavailable')
-        await new Promise(resolve => setTimeout(resolve, 100))
-    }
-}
 try {
 for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat()) {
     // Linux registers the identifier as a D-Bus name, whose elements cannot start with a digit.
@@ -131,15 +78,11 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
             const reportPath = join(output, `${phase}.json`)
             const memoryPath = join(output, `${phase}.memory.jsonl`)
             let memoryDone = Promise.resolve(null)
-            const debugPort = phase === 'generation-lost' ? await freePort() : null
             const status = await new Promise((accept, reject) => {
-                // The generation phases read the Ollama fixture's origin from the same field.
-                const origin = accountServer?.origin ?? (phase.startsWith('generation') ? ollamaFixture?.origin : undefined)
                 const child = spawn(executable, [], { cwd: root, windowsHide: true, stdio: 'inherit', detached: process.platform !== 'win32', env: {
                     ...env, RISUNEST_BOUNDARY_ID: runId, RISUNEST_BOUNDARY_ROOT: ownedRoot,
                     RISUNEST_BOUNDARY_APP_LOCK_UNAVAILABLE: appLockUnavailable ? '1' : '0',
-                    ...(origin ? { RISUNEST_BOUNDARY_ACCOUNT_ORIGIN: origin } : {}),
-                    ...(debugPort ? { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort}` } : {}),
+                    ...(accountServer ? { RISUNEST_BOUNDARY_ACCOUNT_ORIGIN: accountServer.origin } : {}),
                     RISUNEST_BOUNDARY_PHASE: phase, RISUNEST_BOUNDARY_REPORT: reportPath,
                 } })
                 if (officialAccount && process.platform === 'win32' && child.pid) {
@@ -151,15 +94,10 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
                     })
                 }
                 let timedOut = false
-                let crashError
-                const terminate = phase.startsWith('session-end') || debugPort ? setInterval(() => {
+                const terminate = phase.startsWith('session-end') ? setInterval(() => {
                     if (!existsSync(`${reportPath}.ready`)) return
                     clearInterval(terminate)
-                    if (!debugPort) return child.kill('SIGTERM')
-                    crashRenderer(debugPort).catch(error => {
-                        crashError = error
-                        spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
-                    })
+                    child.kill('SIGTERM')
                 }, 50) : undefined
                 const timeout = setTimeout(() => {
                     timedOut = true
@@ -170,7 +108,7 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
                 child.on('close', code => {
                     clearTimeout(timeout)
                     clearInterval(terminate)
-                    crashError ? reject(crashError) : timedOut ? reject(new Error(`Native ${phase} timed out`)) : accept(code)
+                    timedOut ? reject(new Error(`Native ${phase} timed out`)) : accept(code)
                 })
             })
             const report = JSON.parse(readFileSync(reportPath, 'utf8'))
@@ -210,5 +148,4 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
 }
 } finally {
     await accountServer?.close()
-    await ollamaFixture?.close()
 }

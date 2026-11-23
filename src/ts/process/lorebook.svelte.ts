@@ -3,7 +3,7 @@ import { getChatVar } from '../parser/chatVar.svelte';
 import {selectedCharID} from '../stores.svelte'
 import { type Message, type loreBook } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
-import { tokenCountBatch } from "../tokenizer";
+import { tokenize } from "../tokenizer";
 import { risuChatParser } from "../parser/parser.svelte";
 import { findCharacterbyId, pickHashRand, selectSingleFile } from "../util";
 import { alertError, alertNormal } from "../alert";
@@ -340,7 +340,6 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
         }|null
     }[] = []
     const activatedIndexes = new Set<number>()
-    const activeTokens = tokenCountBatch()
     let disabledUIPrompts:string[] = []
     let matchTimes = 0
     while(matching){
@@ -667,17 +666,13 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
                     // so cutoff reflects what actually reaches the context, not the unevaluated source.
                     // runVar is left false (matching the output path in index.svelte.ts), so this
                     // evaluation has no side effects like setvar.
-                    tokens: await activeTokens.add(risuChatParser(content, {chara: char})),
+                    tokens: await tokenize(risuChatParser(content, {chara: char})),
                     priority: priority,
                     source: fullLore[i].comment || `lorebook ${i}`,
                     inject: inject ?? null
                 })
                 activatedIndexes.add(i)
 
-                // These chat variables outlive the send, so a count that fails surfaces before they are set.
-                if(keepActivateAfterMatch || dontActivateAfterMatch){
-                    await activeTokens.flush()
-                }
                 if(keepActivateAfterMatch){
                     setSelectedChatVariable('__internal_ka_' + (fullLore[i].id ?? pickHashRand(5555,fullLore[i].content).toString()), 'true')
                 }
@@ -702,8 +697,6 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
             }
         }
     }
-
-    for(const [index, rest] of (await activeTokens.settle()).entries()) actives[index].tokens += rest
 
     const activesSorted = actives.sort((a,b) => {
         return b.priority - a.priority
@@ -792,16 +785,10 @@ export async function importLoreBook(mode:'global'|'local'|'sglobal'){
     if (!file?.data) return
 
     try {
-        const imported = JSON.parse(Buffer.from(file.data).toString('utf-8'))
-        const entries: loreBook[] = imported.type === 'risu' && Array.isArray(imported.data)
-            ? imported.data
-            : imported.entries ? convertExternalLorebook(imported.entries) : []
+        const entries = lorebookFileEntries(JSON.parse(Buffer.from(file.data).toString('utf-8')))
         if (!entries.length) return
         if (mode === 'global') {
-            const { mutatePersistentCharacterDetail } = await import('../storage/persistentDataRuntime.svelte')
-            await mutatePersistentCharacterDetail(characterId, 'import-character-lore', ({ character }) => {
-                character.globalLore.push(...entries)
-            })
+            await appendCharacterLorebook(characterId, entries)
         } else {
             const { editSelectedChatList } = await import('../characters')
             await editSelectedChatList(characterId, 'import-chat-lore', (character) => {
@@ -814,6 +801,21 @@ export async function importLoreBook(mode:'global'|'local'|'sglobal'){
     } catch (error) {
         alertError(error)
     }
+}
+
+/** The entries a lorebook file holds: RisuAI lorebook data, or converted external entries. */
+export function lorebookFileEntries(imported: any): loreBook[] {
+    return imported.type === 'risu' && Array.isArray(imported.data)
+        ? imported.data
+        : imported.entries ? convertExternalLorebook(imported.entries) : []
+}
+
+/** Appends entries to a character's own lorebook; false when the character no longer exists. */
+export async function appendCharacterLorebook(characterId: string, entries: loreBook[]): Promise<boolean> {
+    const { mutatePersistentCharacterDetail } = await import('../storage/persistentDataRuntime.svelte')
+    return await mutatePersistentCharacterDetail(characterId, 'import-character-lore', ({ character }) => {
+        character.globalLore.push(...entries)
+    })
 }
 
 export interface CCLorebook{

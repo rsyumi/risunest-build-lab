@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../alert', () => ({ alertConfirm: vi.fn() }))
@@ -8,7 +6,6 @@ vi.mock('./persistentDataRuntime.svelte', () => ({ appendPersistentRootModule: v
 import type {
     PreparedNativeContent,
     PreparedNativeContentActivationLifecycle,
-    PreparedNativeModuleMapping,
 } from './nativeFileJobs'
 import {
     activatePreparedNativeModuleContent,
@@ -16,7 +13,6 @@ import {
 } from './nativeModuleContentActivation'
 import { runNativePreparedContentRoute } from './nativePreparedContentRoute'
 import { PersistentRootModuleAppendRejectedError } from './saveCoordinator'
-import { canonicalClone } from './saveCoordinatorHelpers'
 import { StdioModuleImportError } from '../process/mcp/moduleImport'
 
 const hash = (byte: string) => byte.repeat(64)
@@ -101,6 +97,27 @@ describe('native RISUM module activation', () => {
         expect(append.mock.calls[0][0].module).not.toHaveProperty('mcp')
     })
 
+    it('lets the update offer install the module, update another or cancel before sealing', async () => {
+        const lifecycle = { prepareOwnerManifestAndSeal: vi.fn(), sealPreparedContent: vi.fn() }
+        const append = vi.fn()
+        const base = { confirmLowLevelAccess: async () => true, createId: () => 'new-id', append }
+        expect(await activatePreparedNativeModuleContent(risumContent(), lifecycle, {
+            ...base, commitImport: async () => null,
+        })).toBeNull()
+        expect(lifecycle.sealPreparedContent).not.toHaveBeenCalled()
+        expect(append).not.toHaveBeenCalled()
+
+        expect(await activatePreparedNativeModuleContent(risumContent(), lifecycle, {
+            ...base,
+            commitImport: async (module, commit) => {
+                await commit(module)
+                return 'installed-id'
+            },
+        })).toEqual({ moduleId: 'installed-id' })
+        expect(lifecycle.sealPreparedContent).toHaveBeenCalledOnce()
+        expect(append.mock.calls[0][0].module).toMatchObject({ id: 'new-id', updateLineage: 'source-id' })
+    })
+
     it('confirms low-level access, seals native roots, then atomically appends full metadata', async () => {
         const events: string[] = []
         const append = vi.fn(async () => { events.push('append') })
@@ -129,6 +146,7 @@ describe('native RISUM module activation', () => {
                 name: 'Imported module',
                 lowLevelAccess: true,
                 unknownFutureField: { retained: true },
+                updateLineage: 'source-id',
                 assets: [
                     ['same', `assets/${hash('a')}.PNG`, 'PNG'],
                     ['same', `assets/${hash('b')}.bin`, 'bin'],
@@ -337,97 +355,5 @@ describe('native RISUM module activation', () => {
         )).rejects.toThrow('commit response lost')
 
         expect(lifecycle.abortPreparedContent).not.toHaveBeenCalled()
-    })
-})
-
-// The RISUM receipts of the import wiring oracle with what the TS activation appended for each, recorded by
-// benchmarks/rust-core-oracles/formats-wiring.oracle.test.ts. `native` is the mapping the Rust receipt carries.
-type WiringCase = {
-    id: string
-    receipt: PreparedNativeContent
-    native: 'mapped' | { reason: 'unsupported' | 'invalid'; name: string }
-    result: { mapped?: string; stored?: string; aliases?: unknown; ownerHead?: unknown; error?: string; confirms: number }
-}
-const fixture = (name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `tests/fixtures/rust-core/formats/${name}.json`), 'utf8'))
-const wiringResults = new Map((fixture('wiring.expected').cases as { id: string; result: WiringCase['result'] }[]).map(({ id, result }) => [id, result]))
-const wiringCases = (fixture('wiring.cases').cases as Omit<WiringCase, 'result'>[])
-    .filter((entry) => entry.receipt.format === 'risu-module')
-    .map((entry) => ({ ...entry, result: wiringResults.get(entry.id)! }))
-
-// The module record, aliases and owner head the append keeps, as the oracle records them, beside the dependencies
-// the TS steps call: the confirmation answers yes and the module id is the oracle's first draw.
-function activateReceipt(entry: WiringCase, nativeMapping: PreparedNativeModuleMapping) {
-    let draws = 0
-    const kept: Pick<WiringCase['result'], 'stored' | 'aliases' | 'ownerHead'> = {}
-    const dependencies = {
-        confirmLowLevelAccess: vi.fn(async () => true),
-        createId: vi.fn(() => `00000000-0000-4000-8000-${String(++draws).padStart(12, '0')}`),
-        append: vi.fn(async (input: PreparedRootModuleAppend) => {
-            kept.stored = JSON.stringify(canonicalClone(input.module))
-            kept.aliases = canonicalClone(input.assetAliases)
-            kept.ownerHead = canonicalClone(input.ownerHead)
-        }),
-    }
-    const result = activatePreparedNativeModuleContent(
-        { ...structuredClone(entry.receipt), nativeMapping },
-        { prepareOwnerManifestAndSeal: vi.fn(), sealPreparedContent: vi.fn(async () => undefined) },
-        dependencies,
-    )
-    return { result, kept, dependencies }
-}
-
-describe('native RISUM mapping', () => {
-    const named = <Entry extends WiringCase>(entries: Entry[]) => entries.map((entry) => [entry.id, entry] as const)
-    const mapped = wiringCases.filter((entry) => entry.native === 'mapped')
-    const declined = wiringCases.flatMap((entry) => entry.native === 'mapped' ? [] : [{ ...entry, native: entry.native }])
-    const declinedAndStored = declined.filter((entry) => entry.result.stored !== undefined)
-    const declinedAndFailed = declined.filter((entry) => entry.result.error !== undefined)
-    const recorded = ({ result }: WiringCase) => ({ stored: result.stored, aliases: result.aliases, ownerHead: result.ownerHead })
-
-    it('replays every RISUM wiring receipt', () => {
-        expect([mapped.length, declinedAndStored.length, declinedAndFailed.length]).toEqual([7, 2, 6])
-    })
-
-    // With the Rust receipt test, which proves the native mapping is the text the TS steps stringify to, this is the
-    // same module through both paths.
-    it.each(named(mapped))('appends the native mapping of %s exactly as the TS steps append their own', async (_id, entry) => {
-        const module = JSON.parse(entry.result.mapped!) as Record<string, unknown>
-        const { result, kept, dependencies } = activateReceipt(entry, { outcome: 'mapped', module })
-
-        await expect(result).resolves.toEqual({ moduleId: module.id })
-        expect(kept).toEqual(recorded(entry))
-        expect(dependencies.createId).not.toHaveBeenCalled()
-        expect(dependencies.confirmLowLevelAccess).not.toHaveBeenCalled()
-    })
-
-    it.each(named(declinedAndStored))('runs the TS steps for %s where the native mapping declines it', async (_id, entry) => {
-        const { result, kept, dependencies } = activateReceipt(entry, { outcome: 'declined', ...entry.native })
-
-        await expect(result).resolves.toEqual({ moduleId: '00000000-0000-4000-8000-000000000001' })
-        expect(kept).toEqual(recorded(entry))
-        expect(dependencies.confirmLowLevelAccess).toHaveBeenCalledTimes(entry.result.confirms)
-    })
-
-    it.each([
-        ['limit', 'moduleBytes'],
-        ['cancelled', ''],
-        ['host', 'stack'],
-        ['failed', 'panic'],
-        ['invalid', 'assetMetadata'],
-    ] as const)('runs the TS steps for a module the native mapping declines as %s %s', async (reason, name) => {
-        const entry = mapped[0]
-        const { result, kept, dependencies } = activateReceipt(entry, { outcome: 'declined', reason, name })
-
-        await expect(result).resolves.toEqual({ moduleId: '00000000-0000-4000-8000-000000000001' })
-        expect(kept).toEqual(recorded(entry))
-        expect(dependencies.createId).toHaveBeenCalledOnce()
-    })
-
-    it.each(named(declinedAndFailed))('rejects %s with the exact TS error where the native mapping declines it', async (_id, entry) => {
-        const { result, dependencies } = activateReceipt(entry, { outcome: 'declined', ...entry.native })
-
-        await expect(result).rejects.toHaveProperty('message', entry.result.error)
-        expect(dependencies.append).not.toHaveBeenCalled()
-        expect(dependencies.confirmLowLevelAccess).not.toHaveBeenCalled()
     })
 })

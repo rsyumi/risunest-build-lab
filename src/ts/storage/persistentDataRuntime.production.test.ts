@@ -1,6 +1,3 @@
-import { readFileSync } from 'node:fs'
-import { safeStructuredClone } from '../safeStructuredClone'
-import type { ConversationHistoryMapping } from './conversationJournalRebase'
 import { assetGalleryItems, deleteGalleryAssets, replaceGalleryAsset, prepareGalleryModuleMutation, readPinnedAssetOwner } from '../gallery/assetGallery'
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -14,7 +11,7 @@ vi.mock('../gui/receivedDisplaySettings', () => ({ applyReceivedDisplaySettings:
 const pluginRuntime = vi.hoisted(() => ({ load: vi.fn(async () => undefined) }))
 vi.mock('../plugins/plugins.svelte', async (importOriginal) => ({ ...await importOriginal<typeof import('../plugins/plugins.svelte')>(), requestPluginReloadAfterSync: pluginRuntime.load }))
 import { createBrowserPluginDeviceBackend, getPluginDeviceKeyspace } from '../plugins/pluginDeviceKeyspace'
-import { selectedCharID } from '../stores.svelte'
+import { selectedCharID, settingsOpen } from '../stores.svelte'
 import { doingChat } from '../process/generationState'
 import { getRuntimePerformanceBudgets } from '../runtimePerformanceProfile'
 import {
@@ -22,26 +19,30 @@ import {
     registerPluginStorageLifecycle,
 } from '../plugins/pluginStorageStore'
 import { getV2PluginAPIs } from '../plugins/plugins.svelte'
-import type { Database } from './database.svelte'
-import { ArchivedCharacterError, type PersistentDataStore, type LwwApplyResult, type PersistentUnitMutation, type WorkingSetCommit } from './persistentDataStore'
+import type { Chat, Database, PresetSource } from './database.svelte'
+import type { PersistentDataStore, PersistentUnitMutation, WorkingSetCommit } from './persistentDataStore'
 import { createStoreStub } from './persistentDataStore.testSupport'
-import { captureCurrentPreset, fillRootFieldDefaults, getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride, setPreset } from './database.svelte'
+import { applyConversationPresetBinding, captureCurrentPreset, carryPresetBinding, carryPresetOverride, fillRootFieldDefaults, getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride, setPreset } from './database.svelte'
 import { createPresetWorkingSetController } from './presetWorkingSetOperations'
+import { presetEditorDBState } from './presetEditor.svelte'
 import {
     configurePersistentDataRuntime,
     createProductionStateAdapter,
 } from './persistentDataRuntime.svelte'
 import {
     createCatalogCharacterStub,
-    getCatalogCharacterMetadata,
     isCatalogCharacterStub,
     isCatalogPresetWorkingSet,
     projectCompleteScalableWorkingSet,
+    projectPinnedScalableWorkingSet,
+    projectScalableWorkingSetAtRevision,
 } from './workingSetCatalog'
 import { workingSetResidency } from './workingSetResidency'
-import { canonicalJson, SaveCoordinator, type PersistentCharacterAssetOwnerHead } from './saveCoordinator'
+import { canonicalJson, PersistentMutationFencedError, SaveCoordinator, type PersistentCharacterAssetOwnerHead } from './saveCoordinator'
 import { capturePersistentRoot, createPersistentDataRuntime } from './persistentDataRuntime'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
+import { prepareUpstreamImport } from './importedIdentity'
+import { preparePersistentRootForWorkingSet } from './databasePreparation'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
 import { appendCharacterIdToOrder, removeCharacterIdFromOrder } from './characterOrderMutation'
 import { clearStreamingConversation, setStreamingConversation } from './streamingConversationRegistry'
@@ -199,48 +200,6 @@ describe('production persistent working-set publication', () => {
         expect(await keyspace.getItem('string', 'key')).toBe('received')
         await backend.write(owner, [{type:'clear', space:'string'}])
     })
-    it('invalidates device caches before retrying an unknown stored receive outcome', async () => {
-        const initial = normalizeDatabaseDefaults({} as Database)
-        initial.botPresets[0].id = 'preset'
-        initial.personas[0].id = 'persona'
-        const store = new IndexedDbPersistentDataStore(`unknown-device-receive-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
-        await store.open()
-        await store.replaceFromDatabase(initial)
-        setDatabaseLite(initial)
-        selectedCharID.set(-1)
-        const runtime = createPersistentDataRuntime({ store, state: createProductionStateAdapter(), prepareDatabase: async value => value })
-        await runtime.initializeActiveWorkingSet(getDatabase())
-        store.lwwFinishReceive = async () => undefined
-        const owner = `unknown-device-owner-${crypto.randomUUID()}`
-        const keyspace = getPluginDeviceKeyspace(owner)
-        const backend = createBrowserPluginDeviceBackend()
-        await backend.write(owner, [{ type: 'set', space: 'string', key: 'key', value: 'before' }])
-        expect(await keyspace.getItem('string', 'key')).toBe('before')
-        let entered!: () => void
-        let release!: () => void
-        const blocked = new Promise<void>(resolve => { entered = resolve })
-        const resume = new Promise<void>(resolve => { release = resolve })
-        const key = JSON.stringify(['plugin-local', owner, 'string', 'key'])
-        let attempt = 0
-        const receiving = runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'unknown-device-receive', incomingKeys: [key] }, async () => {
-            if (attempt++ === 0) {
-                await backend.write(owner, [{ type: 'set', space: 'string', key: 'key', value: 'received' }])
-                throw new Error('synthetic lost device receive response')
-            }
-            entered(); await resume
-            return { revision: runtime.revision, affectedKeys: [key], pluginStorageChangedKeys: [key], heldKeys: [], deferredKeys: [] }
-        })
-        try {
-            await blocked
-            expect(await keyspace.getItem('string', 'key')).toBe('received')
-        } finally {
-            release()
-            await receiving
-            await backend.write(owner, [{ type: 'clear', space: 'string' }])
-            keyspace.dispose()
-        }
-    })
-
     it('applies received root changes as display settings', () => {
         createProductionStateAdapter().afterRemoteRootChange!(new Set(['colorSchemeName']))
 
@@ -1203,10 +1162,132 @@ describe('preset chain override across a whole working-set replacement', () => {
         setEffectivePresetOverride('preset-b')
         expect(getDatabase().mainPrompt).toBe('Prompt B')
         const replacement = resident ? structuredClone(initial) : projectCompleteScalableWorkingSet(initial, null, revision, new Set())
-        createProductionStateAdapter({ readPreset: (id) => store.readPreset(id) }).replaceDatabase(replacement, new Set(), false)
-        await vi.waitFor(() => expect(getEffectivePresetId()).toBe('preset-b'))
+        createProductionStateAdapter().replaceDatabase(replacement, new Set(), false)
+        expect(getEffectivePresetId()).toBe('preset-b')
         expect(getDatabase().mainPrompt).toBe('Prompt B')
         expect(getDatabase().botPresets.find((preset) => preset.id === 'preset-a')!.mainPrompt).toBe('Prompt A')
+    })
+
+    it.each([[true, true], [false, true], [true, false], [false, false]])('keeps the applied conversation binding only while a request runs (resident=%s, generating=%s)', async (resident, generating) => {
+        const initial = presetDatabase()
+        const store = new IndexedDbPersistentDataStore(`binding-carry-${resident}-${generating}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        await applyConversationPresetBinding(getDatabase(), { id: 'chat', promptPresetId: 'preset-b' } as Chat)
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
+        // A running request reads the mirrors as soon as the replacement is installed. Otherwise
+        // the conversation the replacement selects, here none, gives the binding.
+        doingChat.set(generating)
+        const replacement = resident ? structuredClone(initial) : projectCompleteScalableWorkingSet(initial, null, revision, new Set())
+        createProductionStateAdapter().replaceDatabase(replacement, new Set(), false)
+        expect(getEffectivePresetId()).toBe(generating ? 'preset-b' : 'preset-a')
+        expect(getDatabase().mainPrompt).toBe(generating ? 'Prompt B' : 'Prompt A')
+        expect(getDatabase().botPresetsId).toBe(0)
+    })
+
+    it.each([false, true])('reads the body of a binding the replacement holds as a summary, reporting no fenced read (fenced=%s)', async (fenced) => {
+        const initial = presetDatabase()
+        const store = new IndexedDbPersistentDataStore(`binding-carry-read-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        // Projected before the request applied its binding.
+        const replacement = projectCompleteScalableWorkingSet(initial, null, revision, new Set())
+        await applyConversationPresetBinding(getDatabase(), { id: 'chat', promptPresetId: 'preset-b' } as Chat)
+        doingChat.set(true)
+        const backgroundErrors: unknown[] = []
+        configurePersistentDataRuntime({ onBackgroundError: (error) => { backgroundErrors.push(error) } })
+        let refused = false
+        const presets: PresetSource = { store, withPausedPersistentWrites: fenced
+            ? () => { refused = true; throw new PersistentMutationFencedError() }
+            : (_reason, operation) => operation({ revision, mutationGeneration: 0 }) }
+        try {
+            createProductionStateAdapter({ presets: () => presets }).replaceDatabase(replacement, new Set(), false)
+            if (fenced) {
+                expect(refused).toBe(true)
+                await new Promise((resolve) => setTimeout(resolve, 0))
+            } else {
+                await vi.waitFor(() => expect(getEffectivePresetId()).toBe('preset-b'))
+                expect(getDatabase().mainPrompt).toBe('Prompt B')
+            }
+            expect(backgroundErrors).toEqual([])
+        } finally {
+            configurePersistentDataRuntime({ onBackgroundError: undefined })
+        }
+    })
+
+    it('keeps the applied conversation binding across a working set projected from the store', async () => {
+        const initial = presetDatabase()
+        const store = new IndexedDbPersistentDataStore(`binding-carry-pinned-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        setDatabase(projectCompleteScalableWorkingSet(initial, null, revision, new Set()))
+        selectedCharID.set(-1)
+        await carryPresetBinding('preset-b', {store, withPausedPersistentWrites: (_reason, operation) => operation({revision, mutationGeneration: 0})})
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
+        doingChat.set(true)
+        const replacement = await projectScalableWorkingSetAtRevision(store, revision, { selectedCharacterId: null })
+        createProductionStateAdapter().replaceDatabase(replacement, new Set(), false)
+        expect(getEffectivePresetId()).toBe('preset-b')
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
+    })
+
+    it.each([['queryCharacters', 'binding'], ['preset-a', 'binding'], ['preset-a', 'override'], ['preset-c', 'binding']] as const)('keeps the preset a request applied while the replacement was read (paused on %s, %s)', async (paused, applied) => {
+        const initial = presetDatabase()
+        initial.botPresets.push({ ...structuredClone(initial.botPresets[0]), id: 'preset-c', name: 'Preset C', mainPrompt: 'Prompt C' })
+        const store = new IndexedDbPersistentDataStore(`binding-during-projection-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        setDatabase(projectCompleteScalableWorkingSet(initial, null, revision, new Set()))
+        selectedCharID.set(-1)
+        const source: PresetSource = {store, withPausedPersistentWrites: (_reason, operation) => operation({revision, mutationGeneration: 0})}
+        // The chain applied C before the replacement, so the projection reads it after the selection.
+        if (paused === 'preset-c') await carryPresetOverride('preset-c', source)
+        const lease = await store.acquireRevision(revision)
+        let reading!: () => void
+        const characterRead = new Promise<void>((resolve) => { reading = resolve })
+        let resume!: () => void
+        const resumed = new Promise<void>((resolve) => { resume = resolve })
+        // The projection waits on a read while the request applies its preset.
+        const reader = new Proxy(lease, { get: (target, key, receiver) => {
+            const value = Reflect.get(target, key, receiver)
+            return key === 'queryCharacters' || key === 'readPreset' ? async (...args: unknown[]) => {
+                if (key === paused || args[0] === paused) { reading(); await resumed }
+                return value.apply(target, args)
+            } : value
+        } })
+        const projection = projectPinnedScalableWorkingSet(reader, { selectedCharacterId: null })
+        await characterRead
+        doingChat.set(true)
+        await (applied === 'binding' ? carryPresetBinding : carryPresetOverride)('preset-b', source)
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
+        resume()
+        const replacement = await projection
+        await lease.release()
+        createProductionStateAdapter().replaceDatabase(replacement, new Set(), false)
+        expect(getEffectivePresetId()).toBe('preset-b')
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
+    })
+
+    it('reads the selected body when the projected selection fell back to a catalog summary', async () => {
+        const initial = presetDatabase()
+        initial.botPresetsId = 1
+        initial.mainPrompt = 'Prompt B'
+        const store = new IndexedDbPersistentDataStore(`selection-fallback-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        // The selected preset was removed on another device.
+        const removed = await store.commit({ expectedRevision: revision, unitMutations: [{ key: '["root","botPresetsId"]', type: 'set', value: 'preset-removed' }] })
+        const replacement = await projectScalableWorkingSetAtRevision(store, removed.revision, { selectedCharacterId: null })
+        createProductionStateAdapter().replaceDatabase(replacement, new Set(), false)
+        expect(getDatabase().mainPrompt).toBe('Prompt A')
+        expect(getDatabase().botPresetsId).toBe(0)
+        expect(getDatabase().botPresets[0].mainPrompt).toBe('Prompt A')
     })
 
     it('clears the override when its preset is gone', () => {
@@ -1222,16 +1303,6 @@ describe('preset chain override across a whole working-set replacement', () => {
 })
 
 describe('received removal of the selected character or conversation', () => {
-    const nativeHistoryProofs = JSON.parse(readFileSync('tests/fixtures/nativeConversationHistory.json', 'utf8')) as Array<{ name: string; mapping: ConversationHistoryMapping }>
-    const installNativeHistoryProof = (store: PersistentDataStore, name: string) => {
-        const packet = nativeHistoryProofs.find(value => value.name === name)!.mapping
-        // The native store contract validates these proof packets; this is the IPC boundary for runtime tests.
-        store.rebaseConversationHistory = async request => {
-            expect(request.baseline.revision).toBeLessThanOrEqual(request.current.revision)
-            expect([request.characterId, request.conversationId]).toEqual(['char-b', 'b-chat-1'])
-            return structuredClone(packet)
-        }
-    }
     const chat = (id: string) => ({ id, name: id, note: '', localLore: [], message: [{ role: 'char', data: `${id} message`, chatId: `${id}-message` }] })
     const character = (chaId: string, chats: string[]) => ({ type: 'character', chaId, name: chaId, chatPage: 0, chatFolders: [], chats: chats.map(chat) })
 
@@ -1277,346 +1348,8 @@ describe('received removal of the selected character or conversation', () => {
             }
             await runtime.applyLwwReceive({ bindingAuthority: '1', requestId: crypto.randomUUID(), changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
         }
-        return { store, runtime, receive, saveFailures, atProjection, state }
+        return { store, runtime, receive, saveFailures, atProjection }
     }
-
-    it.each([true, false])('projects a received archive without reading archived detail (windowed=%s)', async (windowed) => {
-        const { store, runtime, saveFailures } = await receiveRuntime(windowed, 1)
-        let archived = false
-        const acquire = store.acquireRevision.bind(store)
-        vi.spyOn(store, 'acquireRevision').mockImplementation(async revision => {
-            const lease = await acquire(revision)
-            const summary = lease.readCharacterSummary.bind(lease)
-            const detail = lease.readCharacter.bind(lease)
-            lease.readCharacterSummary = async id => {
-                const value = await summary(id)
-                return value && archived && id === 'char-b' ? { ...value, archived: { archivedAt: 1, conversationCount: 2, messageCount: 2 } } : value
-            }
-            lease.readCharacter = async id => {
-                if (archived && id === 'char-b') throw new ArchivedCharacterError(id)
-                return detail(id)
-            }
-            return lease
-        })
-        store.lwwFinishReceive = async () => undefined
-        await runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'archive-selected', incomingKeys: ['["archive","char-b"]'] }, async () => {
-            const committed = await store.commit({ expectedRevision: runtime.revision, unitMutations: [{ type: 'set', key: '["character","char-b","creatorNotes"]', value: 'Native archive revision' }] })
-            archived = true
-            return { ...committed, affectedKeys: ['["archive","char-b"]'], heldKeys: [], deferredKeys: [] }
-        })
-        expect(getCatalogCharacterMetadata(getDatabase().characters[1])?.residency).toBe('archived')
-        expect(get(selectedCharID)).toBe(1)
-        expect(runtime.captureSelectedConversationTarget()).toBeNull()
-        expect(runtime.getSelectedConversationMode()).toBeNull()
-        expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
-        getDatabase().username = 'Local root after archive'
-        await runtime.flushPendingDataLocally('after-received-archive')
-        expect((await store.readRoot()).value.username).toBe('Local root after archive')
-        expect(saveFailures).toEqual([])
-    })
-
-    it.each([false, true])('retains live edits and the refresh fence when a received archive conflicts (locally added=%s)', async introduced => {
-        const { store, runtime } = await receiveRuntime(false, 1)
-        const acquire = store.acquireRevision.bind(store)
-        const targetId = introduced ? 'local-archive-owner' : 'char-b'
-        const incomingOwner = { ...safeStructuredClone(getDatabase().characters[1]), chaId: targetId }
-        let archived = false
-        vi.spyOn(store, 'acquireRevision').mockImplementation(async revision => {
-            const lease = await acquire(revision)
-            const summary = lease.readCharacterSummary.bind(lease)
-            lease.readCharacterSummary = async id => {
-                const value = await summary(id)
-                return value && archived && id === targetId ? { ...value, archived: { archivedAt: 1, conversationCount: 2, messageCount: 2 } } : value
-            }
-            return lease
-        })
-        store.lwwFinishReceive = async () => undefined
-        let result: { revision: number; affectedKeys: string[]; heldKeys: string[]; deferredKeys: string[] } | undefined
-        const apply = async () => {
-            if (!result) {
-                const committed = await store.commit(introduced ? { expectedRevision: runtime.revision, addCharacter: incomingOwner } :
-                    { expectedRevision: runtime.revision, unitMutations: [{ type: 'set', key: '["character","char-b","creatorNotes"]', value: 'Native archive revision' }] })
-                archived = true
-                result = { ...committed, affectedKeys: [JSON.stringify(['archive', targetId])], heldKeys: [], deferredKeys: [] }
-                if (introduced) getDatabase().characters.push(structuredClone(incomingOwner))
-                getDatabase().characters.find(owner => owner.chaId === targetId)!.chats[0].note = 'Local note during archive'
-                runtime.markPersistentDataDirty(1)
-            }
-            return result
-        }
-        await expect(runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'archive-dirty', incomingKeys: [JSON.stringify(['archive', targetId])] }, apply)).rejects.toThrow('Received archive conflicts with unsaved character edits')
-        await expect(runtime.retryCommittedWorkingSetRefresh()).resolves.toMatchObject({ projection: 'refresh-required' })
-        expect(getDatabase().characters.find(owner => owner.chaId === targetId)!.chats[0].note).toBe('Local note during archive')
-        expect(runtime.pendingWorkingSetRefreshRevision).not.toBeNull()
-    })
-
-    it.each(['root', 'history'] as const)('rebases a pending windowed message edit across a native %s change', async change => {
-        const { store, runtime, saveFailures } = await receiveRuntime(true, 1)
-        installNativeHistoryProof(store, change === 'history' ? 'prefix-single' : 'unchanged-single')
-        const controller = await runtime.captureWindowedMessageMutation(runtime.captureSelectedConversationTarget()!, 0,
-            { role: 'char', data: 'b-chat-1 message', chatId: 'b-chat-1-message' })
-        expect(controller).not.toBeNull()
-        store.lwwFinishReceive = async () => undefined
-        let result: { revision: number; affectedKeys: string[]; heldKeys: string[]; deferredKeys: string[] } | undefined
-        const receivedWidth = !getDatabase().classicMaxWidth
-        const affectedKeys = change === 'root' ? ['["root","classicMaxWidth"]'] : ['["messages","char-b","b-chat-1"]']
-        await runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'windowed-journal-rebase', incomingKeys: affectedKeys }, async () => {
-            if (!result) {
-                const committed = await store.commit({ expectedRevision: runtime.revision,
-                    ...(change === 'root' ? { rootMutations: [{ type: 'set' as const, key: 'classicMaxWidth', value: receivedWidth }] }
-                        : { conversations: [{ type: 'replace-range' as const, characterId: 'char-b', conversationId: 'b-chat-1', start: 0, deleteCount: 0,
-                            messages: [{ role: 'user' as const, data: 'Native earlier row', chatId: 'native-earlier-row' }] }] }),
-                })
-                expect(controller!.applyRange(0, 1,
-                    [{ role: 'char', data: 'Local edited row', chatId: 'b-chat-1-message' }], 'edit')).toBe(true)
-                controller!.release()
-                result = { ...committed, affectedKeys, heldKeys: [], deferredKeys: [] }
-            }
-            return result
-        })
-        await runtime.flushPendingDataLocally('windowed-received-journal-rebase')
-        expect((await store.readConversation('char-b', 'b-chat-1'))?.value.message).toEqual([
-            ...(change === 'history' ? [{ role: 'user', data: 'Native earlier row', chatId: 'native-earlier-row' }] : []),
-            { role: 'char', data: 'Local edited row', chatId: 'b-chat-1-message' },
-        ])
-        if (change === 'root') expect(getDatabase().classicMaxWidth).toBe(receivedWidth)
-        expect(runtime.getSelectedConversationMode()).toBe('windowed')
-        expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
-        expect(saveFailures).toEqual([])
-    })
-
-    it('keeps the published complete session editable after confirmed discard', async () => {
-        const { store, runtime } = await receiveRuntime(false, 1)
-        const originalSession = runtime.getActiveConversationSession()!
-        let failFinish = true
-        store.lwwFinishReceive = async () => {
-            if (failFinish) { failFinish = false; throw new Error('Complete receive finish response lost') }
-        }
-        let result: LwwApplyResult | undefined
-        await expect(runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'discard-complete-conflict', incomingKeys: [] }, async () => {
-            if (!result) {
-                originalSession.append({ role: 'user', data: 'Discarded complete row' })
-                result = { revision: runtime.revision, affectedKeys: [], heldKeys: [], deferredKeys: [] }
-            }
-            return result
-        })).rejects.toThrow('Complete receive finish response lost')
-        expect(await runtime.captureStoredReceiveDiscard('char-b', 'b-chat-1')!.discard()).toMatchObject({ projection: 'applied' })
-        const published = getDatabase().characters.find(owner => owner.chaId === 'char-b')!.chats[0]
-        const session = runtime.getActiveConversationSession()!
-        expect(originalSession.isActive).toBe(false)
-        expect(session.matchesConversation('char-b', published)).toBe(true)
-        expect(session.totalMessages).toBe(1)
-        published.note = 'Direct metadata after complete discard'
-        session.append({ role: 'user', data: 'Later complete row' })
-        const source = runtime.getActiveConversationViewportSource()!
-        await source.ensureRange({ startIndex: 0, limit: 2, reason: 'viewport' })
-        expect(source.snapshot().rowAt(1)?.message.data).toBe('Later complete row')
-        await runtime.flushPendingDataLocally('after-complete-discard')
-        const saved = (await store.readConversation('char-b', 'b-chat-1'))!.value
-        expect(saved.message.map(message => message.data)).toEqual(['b-chat-1 message', 'Later complete row'])
-        expect(saved.note).toBe('Direct metadata after complete discard')
-        expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
-    })
-
-    it.each(['none', 'finish', 'derive'] as const)('discards a confirmed conflicting windowed journal without loading history (later failure: %s)', async failure => {
-        const { store, runtime, state } = await receiveRuntime(true, 1)
-        installNativeHistoryProof(store, 'changed-single')
-        const originalAuthority = runtime.captureSelectedConversationAuthority()!
-        const controller = await runtime.captureWindowedMessageMutation(runtime.captureSelectedConversationTarget()!, 0,
-            { role: 'char', data: 'b-chat-1 message', chatId: 'b-chat-1-message' })
-        const fullReads: { mock: { calls: unknown[][] } }[] = []
-        const acquire = store.acquireRevision.bind(store)
-        vi.spyOn(store, 'acquireRevision').mockImplementation(async revision => {
-            const lease = await acquire(revision)
-            fullReads.push(vi.spyOn(lease, 'readConversation'))
-            return lease
-        })
-        let failNextFinish = false
-        store.lwwFinishReceive = async () => {
-            if (failNextFinish) { failNextFinish = false; throw new Error('Discard finish response lost') }
-        }
-        const key = '["messages","char-b","b-chat-1"]'
-        let result: LwwApplyResult | undefined
-        await expect(runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'discard-windowed-conflict', incomingKeys: [key] }, async () => {
-            if (!result) {
-                result = { ...(await store.commit({ expectedRevision: runtime.revision, conversations: [{ type: 'replace-range',
-                    characterId: 'char-b', conversationId: 'b-chat-1', start: 0, deleteCount: 1,
-                    messages: [{ role: 'char', data: 'Received conflicting row', chatId: 'b-chat-1-message' }] }] })), affectedKeys: [key], heldKeys: [], deferredKeys: [] }
-                expect(controller!.applyRange(0, 1, [{ role: 'char', data: 'Unsaved local row', chatId: 'b-chat-1-message' }], 'edit')).toBe(true)
-            }
-            return result
-        })).rejects.toThrow()
-        const action = runtime.captureStoredReceiveDiscard('char-b', 'b-chat-1')!
-        const observations: Array<{ revision: number; authorityRevision: number; cleanVersion: boolean; coherent: boolean }> = []
-        const unsubscribe = runtime.subscribeActiveConversationViewportSource(() => {
-            const current = runtime.captureSelectedConversationAuthority()
-            if (!current || current.sessionToken === originalAuthority.sessionToken) return
-            let coherent = false
-            try { coherent = runtime.captureStoredReceiveDiscard('char-b', 'b-chat-1') !== null } catch { /* Collected below, never hidden by observer error handling. */ }
-            observations.push({ revision: runtime.revision, authorityRevision: current.storeRevision,
-                cleanVersion: current.sessionVersion === current.persistedSessionVersion, coherent })
-        })
-        failNextFinish = failure === 'finish'
-        let failNextDerivation = failure === 'derive'
-        const derive = state.afterRemoteApply!
-        state.afterRemoteApply = () => {
-            derive()
-            if (failNextDerivation) { failNextDerivation = false; throw new Error('Discard derivation failed after publication') }
-        }
-        expect(await action.discard()).toMatchObject({ projection: failure === 'none' ? 'applied' : 'refresh-required' })
-        const authority = runtime.captureSelectedConversationAuthority()!
-        expect(authority.sessionToken).not.toBe(originalAuthority.sessionToken)
-        expect(authority).toMatchObject({ sessionVersion: 0, persistedSessionVersion: 0, totalMessages: 1 })
-        expect(controller!.isCurrent()).toBe(false)
-        expect(observations).toContainEqual({ revision: result!.revision, authorityRevision: result!.revision, cleanVersion: true, coherent: true })
-        expect(observations.every(value => value.revision === value.authorityRevision && value.cleanVersion && value.coherent)).toBe(true)
-        unsubscribe()
-        if (failure !== 'none') {
-            const fenced = await runtime.captureWindowedMessageMutation(runtime.captureSelectedConversationTarget()!, 0,
-                { role: 'char', data: 'Received conflicting row', chatId: 'b-chat-1-message' })
-            expect(fenced).not.toBeNull()
-            expect(() => fenced!.applyRange(0, 1, [{ role: 'char', data: 'Forbidden fenced edit' }], 'edit')).toThrow()
-            fenced!.release()
-            getDatabase().characters.find(owner => owner.chaId === 'char-b')!.chats[0].note = 'Later metadata after published discard'
-            installNativeHistoryProof(store, 'unchanged-single')
-            expect(await runtime.retryCommittedWorkingSetRefresh()).toMatchObject({ projection: 'applied' })
-            expect(getDatabase().characters.find(owner => owner.chaId === 'char-b')!.chats[0].note).toBe('Later metadata after published discard')
-        }
-        expect(fullReads.every(read => read.mock.calls.length === 0)).toBe(true)
-        const source = runtime.getActiveConversationViewportSource()!
-        await source.ensureRange({ startIndex: 0, limit: 1, reason: 'viewport' })
-        expect(source.snapshot().rowAt(0)!.message.data).toBe('Received conflicting row')
-        const later = await runtime.captureWindowedMessageMutation(runtime.captureSelectedConversationTarget()!, 0,
-            { role: 'char', data: 'Received conflicting row', chatId: 'b-chat-1-message' })
-        expect(later!.applyRange(0, 1, [{ role: 'char', data: 'Edit after discard', chatId: 'b-chat-1-message' }], 'edit')).toBe(true)
-        later!.release()
-        await runtime.flushPendingDataLocally('after-windowed-discard')
-        expect((await store.readConversation('char-b', 'b-chat-1'))!.value.message.map(message => message.data)).toEqual(['Edit after discard'])
-        if (failure !== 'none') expect((await store.readConversation('char-b', 'b-chat-1'))!.value.note).toBe('Later metadata after published discard')
-        expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
-    })
-
-    it.each(['apply', 'history-proof'] as const)('rebases metadata-only windowed recency changed during %s without replacing native fields', async timing => {
-        const { store, runtime } = await receiveRuntime(true, 1)
-        installNativeHistoryProof(store, 'unchanged-single')
-        store.lwwFinishReceive = async () => undefined
-        const character = getDatabase().characters.find(value => value.chaId === 'char-b')!
-        const before = character.lastInteraction
-        const localRecency = timing === 'history-proof' ? 333 : 222
-        if (timing === 'history-proof') {
-            const readProof = store.rebaseConversationHistory!
-            let edited = false
-            store.rebaseConversationHistory = async request => {
-                const proof = await readProof(request)
-                if (!edited) {
-                    edited = true
-                    expect(runtime.recordSelectedCharacterLastInteraction(runtime.captureSelectedConversationAuthority()!, 222, localRecency)).toBe(true)
-                }
-                return proof
-            }
-        }
-        const affectedKeys = ['["character","char-b","lastInteraction"]', '["character","char-b","creatorNotes"]']
-        await runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'windowed-metadata-only', incomingKeys: affectedKeys }, async () => {
-            const committed = await store.commit({ expectedRevision: runtime.revision, unitMutations: [
-                { type: 'set', key: affectedKeys[0], value: 111 },
-                { type: 'set', key: affectedKeys[1], value: 'Native metadata retained' },
-            ] })
-            expect(runtime.recordSelectedCharacterLastInteraction(runtime.captureSelectedConversationAuthority()!, before, 222)).toBe(true)
-            return { ...committed, affectedKeys, heldKeys: [], deferredKeys: [] }
-        })
-        await runtime.flushPendingDataLocally('windowed-metadata-only-rebase')
-        expect((await store.readCharacter('char-b'))?.value).toMatchObject({ lastInteraction: localRecency, creatorNotes: 'Native metadata retained' })
-        expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
-    })
-
-    it('retains only the effective windowed snapshot across finish failures and later local edits', async () => {
-        const { store, runtime } = await receiveRuntime(true, 1)
-        installNativeHistoryProof(store, 'unchanged-single')
-        const controller = await runtime.captureWindowedMessageMutation(runtime.captureSelectedConversationTarget()!, 0,
-            { role: 'char', data: 'b-chat-1 message', chatId: 'b-chat-1-message' })
-        expect(controller).not.toBeNull()
-        const active = new Set<object>()
-        let maximum = 0
-        const acquire = store.acquireRevision.bind(store)
-        vi.spyOn(store, 'acquireRevision').mockImplementation(async revision => {
-            const lease = await acquire(revision)
-            active.add(lease)
-            maximum = Math.max(maximum, active.size)
-            const release = lease.release.bind(lease)
-            lease.release = async () => { await release(); active.delete(lease) }
-            return lease
-        })
-        let finishes = 0
-        store.lwwFinishReceive = async () => {
-            if (++finishes <= 2) {
-                if (finishes === 1) expect(controller!.applyRange(0, 1,
-                    [{ role: 'char', data: 'Local edit 1', chatId: 'b-chat-1-message' }], 'edit')).toBe(true)
-                throw new Error('synthetic finish response loss')
-            }
-        }
-        let result: { revision: number; affectedKeys: string[]; heldKeys: string[]; deferredKeys: string[] } | undefined
-        const apply = async () => {
-            if (!result) result = { ...(await store.commit({ expectedRevision: runtime.revision,
-                rootMutations: [{ type: 'set', key: 'classicMaxWidth', value: !getDatabase().classicMaxWidth }] })),
-                affectedKeys: ['["root","classicMaxWidth"]'], heldKeys: [], deferredKeys: [] }
-            return result
-        }
-        await expect(runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'windowed-finish-retry', incomingKeys: ['["root","classicMaxWidth"]'] }, apply))
-            .rejects.toThrow('synthetic finish response loss')
-        expect(active.size).toBe(1)
-        await expect(runtime.retryCommittedWorkingSetRefresh()).resolves.toMatchObject({ projection: 'refresh-required' })
-        expect(active.size).toBe(1)
-        await expect(runtime.retryCommittedWorkingSetRefresh()).resolves.toMatchObject({ projection: 'applied' })
-        expect(active.size).toBe(0)
-        expect(maximum).toBeLessThanOrEqual(2)
-        expect(controller!.applyRange(0, 1, [{ role: 'char', data: 'Local edit 2', chatId: 'b-chat-1-message' }], 'edit')).toBe(true)
-        controller!.release()
-        await runtime.flushPendingDataLocally('windowed-finish-retry-local-edits')
-        expect((await store.readConversation('char-b', 'b-chat-1'))?.value.message)
-            .toEqual([{ role: 'char', data: 'Local edit 2', chatId: 'b-chat-1-message' }])
-    })
-
-    it('recovers a stored receive across native deletion and windowed message changes without loading full histories', async () => {
-        const { store, runtime, saveFailures } = await receiveRuntime(true, 1)
-        const receivedWidth = !getDatabase().classicMaxWidth
-        const fullReads: { mock: { calls: unknown[][] } }[] = []
-        const acquire = store.acquireRevision.bind(store)
-        vi.spyOn(store, 'acquireRevision').mockImplementation(async revision => {
-            const lease = await acquire(revision)
-            fullReads.push(vi.spyOn(lease, 'readConversation'))
-            return lease
-        })
-        store.lwwFinishReceive = async () => undefined
-        let result: { revision: number; affectedKeys: string[]; heldKeys: string[]; deferredKeys: string[] } | undefined
-        let lost = 2
-        const apply = async () => {
-            if (!result) {
-                const committed = await store.commit({ expectedRevision: runtime.revision, rootMutations: [{type: 'set', key: 'classicMaxWidth', value: receivedWidth}] })
-                result = { ...committed, affectedKeys: ['["root","classicMaxWidth"]'], heldKeys: [], deferredKeys: [] }
-                getDatabase().characters[1].chats[0].note = 'Local note during receive'
-                runtime.markPersistentDataDirty(1)
-            }
-            if (lost-- > 0) throw new Error('synthetic lost stored-page response')
-            return result
-        }
-        await expect(runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'windowed-recovery', incomingKeys: ['["root","classicMaxWidth"]'] }, apply)).rejects.toThrow('synthetic lost stored-page response')
-        await store.commit({ expectedRevision: (await store.readRoot()).revision,
-            unitMutations: [{type: 'delete', key: '["exists","character","char-a"]'}],
-            conversations: [{type: 'replace-range', characterId: 'char-b', conversationId: 'b-chat-1', start: 1, deleteCount: 0,
-                messages: [{role: 'char', data: 'Later native message', chatId: 'later-native-message'}]}],
-        })
-        await expect(runtime.retryCommittedWorkingSetRefresh()).resolves.toMatchObject({projection: 'applied'})
-        expect(getDatabase().classicMaxWidth).toBe(receivedWidth)
-        expect(getDatabase().characters.map(value => value.chaId)).toEqual(['char-b'])
-        expect(get(selectedCharID)).toBe(0)
-        expect(getDatabase().characters[0].chats[0].note).toBe('Local note during receive')
-        expect(runtime.getSelectedConversationMode()).toBe('windowed')
-        expect(runtime.getActiveConversationViewportSource()?.snapshot().totalMessages).toBe(2)
-        expect(fullReads.flatMap(read => read.mock.calls)).toEqual([])
-        await runtime.flushPendingDataLocally('windowed-receive-recovered')
-        expect((await store.readConversationMetadata('char-b', 'b-chat-1'))?.value).toMatchObject({totalMessages: 2, conversation: {note: 'Local note during receive'}})
-        expect(saveFailures).toEqual([])
-    })
 
     it.each([true, false])('returns to no selection when the selected character is removed (windowed=%s)', async (windowed) => {
         const { store, runtime, receive, saveFailures, atProjection } = await receiveRuntime(windowed, 1)
@@ -1891,6 +1624,8 @@ describe('preset list operations', () => {
         const initial = normalizeDatabaseDefaults({} as Database)
         initial.botPresets[0].id = 'first-preset'
         initial.botPresets[0].name = 'First'
+        initial.botPresets[0].currentPluginProvider = 'removed-plugin'
+        initial.currentPluginProvider = 'removed-plugin'
         initial.personas[0].id = 'persona'
         const store = new IndexedDbPersistentDataStore(`preset-list-${catalog}-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
         await store.open()
@@ -1924,9 +1659,72 @@ describe('preset list operations', () => {
         expect(new Set(ids).size).toBe(2)
         expect(ids).toContain('first-preset')
 
+        // A removed plugin provider leaves every stored body, also those behind catalog stubs.
+        await controller.clearPluginProvider(['removed-plugin'])
+        const providers = await Promise.all(ids.map(async (id) => (await store.readPreset(id))!.value.currentPluginProvider))
+        expect(providers).toEqual(['', ''])
+        expect(getDatabase().currentPluginProvider).toBe('')
+
         const commit = vi.spyOn(store, 'commit')
         await runtime.flushPendingDataLocally('after-preset-list-operations')
         expect(commit).not.toHaveBeenCalled()
+    })
+
+    it.each([true, false])('changes only the selection in a bound conversation (catalog=%s)', async (catalog) => {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        Object.assign(initial.botPresets[0], { id: 'preset-a', name: 'A', mainPrompt: 'Prompt A' })
+        for (const id of ['b', 'c']) {
+            initial.botPresets.push({ ...structuredClone(initial.botPresets[0]), id: `preset-${id}`, name: id.toUpperCase(), mainPrompt: `Prompt ${id.toUpperCase()}` })
+        }
+        initial.mainPrompt = 'Prompt A'
+        initial.personas[0].id = 'persona'
+        initial.characters = [{ type: 'character', chaId: 'character', name: 'Character', chatPage: 0, chatFolders: [],
+            chats: [{ id: 'chat', name: 'Chat', note: '', localLore: [], message: [], promptPresetId: 'preset-b' }] }] as unknown as Database['characters']
+        const store = new IndexedDbPersistentDataStore(`preset-bound-selection-${catalog}-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const {revision} = await store.replaceFromDatabase(initial)
+        setDatabaseLite(catalog ? projectCompleteScalableWorkingSet(initial, 'character', revision, new Set(['character'])) : structuredClone(initial))
+        selectedCharID.set(0)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const controller = createPresetWorkingSetController({
+            getDatabase, captureCurrentPreset, getEffectivePresetId,
+            applyPreset: (root, preset) => setPreset(root as Database, preset),
+            mutatePersistentPresets: (reason, mutate) => runtime.mutatePersistentPresets(reason, mutate),
+        })
+        // The chat lifecycle reads a bound catalog stub through the runtime this test does not install.
+        await carryPresetBinding('preset-b', runtime)
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
+        const storedPrompts = async () => Promise.all(['a', 'b', 'c'].map(async (id) => (await store.readPreset(`preset-${id}`))!.value.mainPrompt))
+
+        await controller.changeToPreset(1)
+        expect(getDatabase().botPresetsId).toBe(1)
+        await controller.changeToPreset(2)
+        expect(getDatabase().botPresetsId).toBe(2)
+        expect((await store.readRoot()).value.botPresetsId).toBe('preset-c')
+        expect(getEffectivePresetId()).toBe('preset-b')
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
+        expect(await storedPrompts()).toEqual(['Prompt A', 'Prompt B', 'Prompt C'])
+
+        // The settings window edits the selection, which saves like any other edit.
+        const dispose = observePersistentSaveChanges({
+            readDatabase: getDatabase, readSelectedCharacter: () => null,
+            markDirty: (bytes) => runtime.markPersistentDataDirty(bytes),
+        })
+        settingsOpen.set(true)
+        try {
+            flushSync()
+            // Installing the observer marks the data dirty once.
+            await runtime.flushPendingDataLocally('observer-installed')
+            expect(presetEditorDBState.db.mainPrompt).toBe('Prompt C')
+            presetEditorDBState.db.mainPrompt = 'Edited C'
+            flushSync()
+            await vi.waitFor(async () => expect(await storedPrompts()).toEqual(['Prompt A', 'Prompt B', 'Edited C']), { timeout: 3000 })
+        } finally {
+            settingsOpen.set(false)
+            dispose()
+        }
+        expect(getDatabase().mainPrompt).toBe('Prompt B')
     })
 })
 
@@ -2070,10 +1868,12 @@ describe('received persona replacement', () => {
 })
 
 describe('received preset selection', () => {
+    // A preset left bound would stay loaded in the next test's working set.
+    afterEach(() => applyConversationPresetBinding(getDatabase(), undefined))
     async function presetRuntime(catalog: boolean) {
         const initial = normalizeDatabaseDefaults({} as Database)
         const preset = initial.botPresets[0]
-        initial.botPresets = [{...structuredClone(preset), id: 'preset-a', name: 'A'}, {...structuredClone(preset), id: 'preset-b', name: 'B'}]
+        initial.botPresets = ['A', 'B', 'C'].map((name) => ({...structuredClone(preset), id: `preset-${name.toLowerCase()}`, name, mainPrompt: `Prompt ${name}`}))
         initial.botPresetsId = 1
         initial.personas[0].id = 'persona'
         const store = new IndexedDbPersistentDataStore(`received-preset-selection-${catalog}-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
@@ -2083,7 +1883,7 @@ describe('received preset selection', () => {
         selectedCharID.set(-1)
         const saveFailures: unknown[] = []
         const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
-            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) }})
+            prepareRoot: (root) => preparePersistentRootForWorkingSet(root), onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) }})
         await runtime.initializeActiveWorkingSet(getDatabase())
         getDatabase().classicMaxWidth = true
         await runtime.flushPendingDataLocally('received-preset-selection-settle')
@@ -2098,50 +1898,31 @@ describe('received preset selection', () => {
         return mutations
     }
 
-    it('refreshes an inactive preset catalog after a lost receive response without loading its body', async () => {
-        const { store, runtime, saveFailures } = await presetRuntime(true)
-        const acquire = store.acquireRevision.bind(store)
-        vi.spyOn(store, 'acquireRevision').mockImplementation(async revision => {
-            const lease = await acquire(revision)
-            const read = lease.readPreset.bind(lease)
-            lease.readPreset = async id => {
-                if (id === 'preset-a') throw new Error('Inactive preset body must stay unloaded')
-                return read(id)
-            }
-            return lease
-        })
-        store.lwwFinishReceive = async () => undefined
-        let result: { revision: number; affectedKeys: string[]; heldKeys: string[]; deferredKeys: string[] } | undefined
-        let lost = 2
-        const apply = async () => {
-            if (!result) {
-                const committed = await store.commit({ expectedRevision: runtime.revision, rootMutations: [{ type: 'set', key: 'username', value: 'Received username' }] })
-                result = { ...committed, affectedKeys: ['["root","username"]'], heldKeys: [], deferredKeys: [] }
-            }
-            if (lost-- > 0) throw new Error('synthetic lost preset receive response')
-            return result
-        }
-        await expect(runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: 'preset-catalog-recovery', incomingKeys: ['["root","username"]'] }, apply)).rejects.toThrow('synthetic lost preset receive response')
-        await store.commit({ expectedRevision: (await store.readRoot()).revision, unitMutations: [
-            { type: 'set', key: '["preset","preset-a","name"]', value: 'Later native name' },
-            { type: 'set', key: '["preset","preset-a","image"]', value: 'assets/synthetic-preset.png' },
-        ] })
-        await expect(runtime.retryCommittedWorkingSetRefresh()).resolves.toMatchObject({ projection: 'applied' })
-        expect(getDatabase().botPresets.find(value => value.id === 'preset-a')).toMatchObject({ name: 'Later native name', image: 'assets/synthetic-preset.png' })
-        expect(getDatabase().botPresets[getDatabase().botPresetsId].id).toBe('preset-b')
-        expect(isCatalogPresetWorkingSet(getDatabase().botPresets)).toBe(true)
-        await runtime.flushPendingDataLocally('after-preset-catalog-recovery')
-        expect(saveFailures).toEqual([])
-    })
-
-    it.each([false, true])('does not write back a fallback for a received selection naming a preset this device does not hold (catalog=%s)', async (catalog) => {
+    it.each([
+        [false, false, 'preset-elsewhere', false], [true, false, 'preset-elsewhere', false], [true, true, 'preset-elsewhere', false],
+        [true, false, 'preset-elsewhere', true], [true, false, undefined, false], [true, false, 2, false], [true, false, 0, true],
+    ])('selects the stored body of a received selection without saving it back (catalog=%s, refresh=%s, selection=%s, reorder=%s)', async (catalog, refresh, received, reorder) => {
         const {store, runtime, saveFailures} = await presetRuntime(catalog)
-        const selection = {key: JSON.stringify(['root', 'botPresetsId']), type: 'set' as const, value: 'preset-elsewhere'}
-        await receiveCommit(store, runtime, {unitMutations: [selection]}, [selection.key])
-        expect(getDatabase().botPresets[getDatabase().botPresetsId]).toBeDefined()
+        const selectionKey = JSON.stringify(['root', 'botPresetsId'])
+        const unitMutations: PersistentUnitMutation[] = [received === undefined ? {key: selectionKey, type: 'delete'} : {key: selectionKey, type: 'set', value: received}]
+        // The first preset after the receive is a summary on this device.
+        if (reorder) unitMutations.push({key: JSON.stringify(['order', 'presets']), type: 'set', value: ['preset-c', 'preset-a', 'preset-b']})
+        // An index names the preset at that position after the receive; any other selection this device cannot resolve falls back to the first.
+        const fallback = (reorder ? ['C', 'A', 'B'] : ['A', 'B', 'C'])[typeof received === 'number' ? received : 0]
+        if (refresh) {
+            const {revision} = await store.commit({expectedRevision: runtime.revision, unitMutations})
+            const fence = await runtime.acquireCommittedWorkingSetRefreshFence()
+            try {
+                await expect(fence.refreshCommittedWorkingSet(revision)).resolves.toMatchObject({projection: 'applied'})
+            } finally {
+                fence.release()
+            }
+        } else await receiveCommit(store, runtime, {unitMutations}, unitMutations.map((value) => value.key))
+        expect(getDatabase().botPresets[getDatabase().botPresetsId]).toMatchObject({name: fallback, mainPrompt: `Prompt ${fallback}`})
+        expect(getDatabase().mainPrompt).toBe(`Prompt ${fallback}`)
         const mutations = await savedMutations(store, runtime)
         expect(mutations.map((value) => value.key)).toEqual(['classicMaxWidth'])
-        expect((await store.readRoot()).value.botPresetsId).toBe('preset-elsewhere')
+        expect((await store.readRoot()).value.botPresetsId).toBe(received)
         expect(saveFailures).toEqual([])
     })
 
@@ -2153,6 +1934,122 @@ describe('received preset selection', () => {
         runtime.markPersistentDataDirty(1)
         await runtime.flushPendingDataLocally('after-local-preset-selection')
         expect((await store.readRoot()).value.botPresetsId).toBe('preset-b')
+        expect(saveFailures).toEqual([])
+    })
+
+    it('binds the stored body of a catalog stub that received a field and saves it whole', async () => {
+        const {store, runtime, saveFailures} = await presetRuntime(true)
+        const temperature = {key: JSON.stringify(['preset', 'preset-a', 'temperature']), type: 'set' as const, value: 3}
+        await receiveCommit(store, runtime, {unitMutations: [temperature]}, [temperature.key])
+        await carryPresetBinding('preset-a', runtime)
+        expect(getEffectivePresetId()).toBe('preset-a')
+        expect(getDatabase().mainPrompt).toBe('Prompt A')
+        expect(getDatabase().temperature).toBe(3)
+        // Reading the body is no edit of the preset.
+        expect((await savedMutations(store, runtime)).filter((value) => value.key.startsWith('["preset",'))).toEqual([])
+        const controller = createPresetWorkingSetController({
+            getDatabase, captureCurrentPreset, getEffectivePresetId,
+            applyPreset: (root, preset) => setPreset(root as Database, preset),
+            mutatePersistentPresets: (reason, mutate) => runtime.mutatePersistentPresets(reason, mutate),
+        })
+        await controller.saveCurrentPreset()
+        expect((await store.readPreset('preset-a'))!.value).toMatchObject({mainPrompt: 'Prompt A', temperature: 3})
+        expect(saveFailures).toEqual([])
+    })
+
+    it.each([[false, 'preset-c'], [true, 'preset-b']] as const)('keeps a preset a request applied while a refresh released its revision unless it removed it (removed=%s)', async (removed, applied) => {
+        const {store, runtime, saveFailures} = await presetRuntime(true)
+        // C holds what the selection B holds, so applying it leaves the captured root as it was.
+        const copy = {key: JSON.stringify(['preset', 'preset-c', 'mainPrompt']), type: 'set' as const, value: 'Prompt B'}
+        await receiveCommit(store, runtime, {unitMutations: [copy]}, [copy.key])
+        // C is loaded on this device but applied nowhere when the refresh reads the presets.
+        await carryPresetOverride('preset-c', runtime)
+        setEffectivePresetOverride(null)
+        const temperature = {key: JSON.stringify(['preset', 'preset-a', 'temperature']), type: 'set' as const, value: 3}
+        const removal: PersistentUnitMutation[] = removed ? [{key: JSON.stringify(['exists', 'preset', 'preset-c']), type: 'delete'},
+            {key: JSON.stringify(['order', 'presets']), type: 'set', value: ['preset-a', 'preset-b']}] : []
+        const {revision} = await store.commit({expectedRevision: runtime.revision, unitMutations: [temperature, ...removal]})
+        let releasing!: () => void
+        const released = new Promise<void>((resolve) => { releasing = resolve })
+        let resume!: () => void
+        const resumed = new Promise<void>((resolve) => { resume = resolve })
+        const acquire = store.acquireRevision.bind(store)
+        vi.spyOn(store, 'acquireRevision').mockImplementation(async (value) => new Proxy(await acquire(value), { get: (target, key, receiver) => {
+            const member = Reflect.get(target, key, receiver)
+            return key === 'release' ? async () => { releasing(); await resumed; return member.call(target) } : member
+        } }))
+        const fence = await runtime.acquireCommittedWorkingSetRefreshFence()
+        try {
+            const refresh = fence.refreshCommittedWorkingSet(revision)
+            await released
+            doingChat.set(true)
+            await carryPresetBinding('preset-c', runtime)
+            expect(getEffectivePresetId()).toBe('preset-c')
+            resume()
+            await expect(refresh).resolves.toMatchObject({projection: 'applied'})
+        } finally {
+            resume()
+            fence.release()
+        }
+        expect(getEffectivePresetId()).toBe(applied)
+        expect(saveFailures).toEqual([])
+    })
+
+    it('keeps a field received while the body of a catalog stub was read', async () => {
+        const {store, runtime, saveFailures} = await presetRuntime(true)
+        const temperature = {key: JSON.stringify(['preset', 'preset-a', 'temperature']), type: 'set' as const, value: 3}
+        let carried!: Promise<void>
+        await receiveCommit(store, runtime, {unitMutations: [temperature]}, [temperature.key], () => {
+            carried = carryPresetBinding('preset-a', {withPausedPersistentWrites: runtime.withPausedPersistentWrites, store: {readPreset: async (id) => {
+                const value = await store.readPreset(id)
+                // The read finishes once the receive has applied the field.
+                await vi.waitFor(() => expect(getDatabase().botPresets[0].temperature).toBe(3))
+                return value
+            }}})
+        })
+        await carried
+        expect(getDatabase().botPresets[0]).toMatchObject({mainPrompt: 'Prompt A', temperature: 3})
+        // The receive applied no binding for the selected conversation; the preset is bound again.
+        await carryPresetBinding('preset-a')
+        expect(getDatabase().temperature).toBe(3)
+        const controller = createPresetWorkingSetController({
+            getDatabase, captureCurrentPreset, getEffectivePresetId,
+            applyPreset: (root, preset) => setPreset(root as Database, preset),
+            mutatePersistentPresets: (reason, mutate) => runtime.mutatePersistentPresets(reason, mutate),
+        })
+        await controller.saveCurrentPreset()
+        expect((await store.readPreset('preset-a'))!.value).toMatchObject({mainPrompt: 'Prompt A', temperature: 3})
+        expect(saveFailures).toEqual([])
+    })
+
+    it('does not save the mirrors a restore derives for root fields its backup did not hold', async () => {
+        const {store, runtime, saveFailures} = await presetRuntime(true)
+        const backup = normalizeDatabaseDefaults({} as Database)
+        backup.botPresets = [{...structuredClone(backup.botPresets[0]), id: 'preset-c', name: 'C', extractJson: 'json-c'}]
+        backup.botPresetsId = 0
+        delete (backup as Partial<Database>).extractJson
+        backup.personas[0].id = 'persona'
+        await runtime.replacePersistentDatabase(prepareUpstreamImport(backup), 'restore')
+        expect(getDatabase().extractJson).toBe('json-c')
+        expect((await savedMutations(store, runtime)).map((value) => value.key)).toEqual(['classicMaxWidth'])
+        expect(saveFailures).toEqual([])
+    })
+
+    it('selects the stored body of a catalog stub that received a field when a received deletion removes the selection', async () => {
+        const {store, runtime, saveFailures} = await presetRuntime(true)
+        const temperature = {key: JSON.stringify(['preset', 'preset-a', 'temperature']), type: 'set' as const, value: 3}
+        await receiveCommit(store, runtime, {unitMutations: [temperature]}, [temperature.key])
+        const keys = [JSON.stringify(['exists', 'preset', 'preset-b']), JSON.stringify(['order', 'presets'])]
+        await receiveCommit(store, runtime, {unitMutations: [{key: keys[0], type: 'delete'}, {key: keys[1], type: 'set', value: ['preset-a']}]}, keys)
+        expect(getDatabase().botPresets[getDatabase().botPresetsId]).toMatchObject({id: 'preset-a', mainPrompt: 'Prompt A', temperature: 3})
+        expect(getDatabase().mainPrompt).toBe('Prompt A')
+        const controller = createPresetWorkingSetController({
+            getDatabase, captureCurrentPreset, getEffectivePresetId,
+            applyPreset: (root, preset) => setPreset(root as Database, preset),
+            mutatePersistentPresets: (reason, mutate) => runtime.mutatePersistentPresets(reason, mutate),
+        })
+        await controller.saveCurrentPreset()
+        expect((await store.readPreset('preset-a'))!.value).toMatchObject({mainPrompt: 'Prompt A', temperature: 3})
         expect(saveFailures).toEqual([])
     })
 })

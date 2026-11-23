@@ -71,7 +71,7 @@ import {
 } from './globalApi.svelte'
 import { open as openFile, remove, writeFile } from '@tauri-apps/plugin-fs'
 import { alertToast } from './alert'
-import { doingChat, reserveGeneration, allowNativeGenerationNavigation } from './process/generationState'
+import { doingChat } from './process/generationState'
 import { save } from '@tauri-apps/plugin-dialog'
 import { navigationActivity } from './ui/navigationActivity'
 import { get } from 'svelte/store'
@@ -201,17 +201,6 @@ describe('conversation navigation', () => {
 
         expect(state.fencePersistentNavigation).toHaveBeenCalledOnce()
         expect(state.activateConversation).toHaveBeenCalledWith('chat-b')
-    })
-
-    test('allows chat navigation only for the native reservation after preparation handoff', async () => {
-        const reservation = reserveGeneration()!
-        try {
-            await expect(changeChatTo('chat-b')).resolves.toBe(false)
-            const release = allowNativeGenerationNavigation(reservation)
-            await expect(changeChatTo('chat-b')).resolves.toBe(true)
-            release()
-            await expect(changeChatTo('chat-b')).resolves.toBe(false)
-        } finally { reservation.release() }
     })
 
     test('refuses a chat switch during generation without fencing the running response', async () => {

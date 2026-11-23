@@ -13,6 +13,7 @@ import {
     type SharedNativeFileOperationContext,
 } from './nativeFileJobManager'
 import { syntheticNativeFileJobStatus } from './nativeFileJobs'
+import { nativeModuleLocation } from '../process/moduleImportLocation'
 
 export function importAndroidContentFromPicker(
     destination: 'character' | 'module',
@@ -68,11 +69,10 @@ function spoolFailures(failures: readonly AndroidSpoolFailure[]) {
     }))
 }
 
-/** The JSON converter destination of an opened spool, or null when `importPrepared` decides, as for a preset. */
+/** The JSON converter destination of an opened spool, or null when the native classifier decides. */
 export function androidSpoolReplayDestination(
     source: AndroidSpoolReady,
 ): 'character' | 'module' | 'auto' | null {
-    if (source.importDestination === 'preset') return null
     return source.importDestination
         ?? (/\.lorebook$/i.test(source.displayName) ? 'module'
             : /\.json$/i.test(source.displayName) ? 'auto' : null)
@@ -164,38 +164,46 @@ async function consumeAndroidContentSpool(
             )
             if (destination === 'module' || moduleJson) {
                 const { importModuleData } = await import('../process/modules')
-                return await importModuleData({ name: displayName, data, ...(parsedJson && { parsedJson }) }) ? 'module' : null
+                const location = await importModuleData({ name: displayName, data, signal: context.signal, ...(parsedJson && { parsedJson }) })
+                if (!location) return null
+                context.setLocation(location)
+                return 'module'
             }
             const { importCharacterProcess } = await import('../characterCards')
             const { getDatabase } = await import('./database.svelte')
             const index = await importCharacterProcess({
                 name: displayName,
                 data,
+                quiet: true,
+                signal: context.signal,
                 ...(parsedJson && { parsedJson }),
             })
-            return typeof index === 'number'
+            const chaId = typeof index === 'number'
                 ? (getDatabase().characters[index]?.chaId ?? null)
                 : null
+            if (chaId) context.setLocation({ kind: 'character', chaId })
+            return chaId
         }
         const options = {
             signal: context.signal,
             onStatus: context.onStatus,
         }
-        const result =
-            destination === 'module' || /\.risum$/i.test(displayName)
-                ? await (
-                      await import('../process/modules')
-                  ).importPreparedNativeModuleContent(
-                      { source: nativeSource, displayName },
-                      options,
-                  )
-                : await (
-                      await import('../characterCards')
-                  ).importPreparedNativeCharacterContent(
-                      { source: nativeSource, displayName },
-                      options,
-                  )
-        return result.kind === 'imported' ? result.value : null
+        if (destination === 'module' || /\.risum$/i.test(displayName)) {
+            const { importPreparedNativeModuleContent } = await import('../process/modules')
+            const result = await importPreparedNativeModuleContent({ source: nativeSource, displayName }, options)
+            if (result.kind !== 'imported') return null
+            context.setLocation(nativeModuleLocation(displayName))
+            return result.value
+        }
+        const result = await (
+            await import('../characterCards')
+        ).importPreparedNativeCharacterContent(
+            { source: nativeSource, displayName },
+            options,
+        )
+        if (result.kind !== 'imported') return null
+        context.setLocation({ kind: 'character', chaId: result.value })
+        return result.value
     } finally {
         // A native job consumes the spool. Metadata-only imports release their ready spool here.
         if (/\.(json|lorebook)$/i.test(displayName)) await discardContentSpool(source.token)

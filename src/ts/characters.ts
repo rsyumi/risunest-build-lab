@@ -1,6 +1,7 @@
 import { imageAliases, imageFormatFromBytes, stripImageExtension } from './media/imageFormats'
 import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
+import { normalizePocketChat } from './drive/pocketRisuFeatures'
 import { materializeAuthorNote } from './authorNotePresets'
 import DOMPurify from 'dompurify'
 import { get, writable } from "svelte/store";
@@ -18,7 +19,7 @@ import { updateInlayScreen } from "./process/inlayScreen";
 import { parseMarkdownSafe } from "./parser/parser.svelte";
 import { translateHTML } from "./translator/translator";
 import { beginMobileBackgroundTask, type MobileBackgroundTask } from "./mobileBackgroundTask";
-import { doingChat, isNativeGenerationNavigationAllowed } from "./process/generationState";
+import { doingChat } from "./process/index.svelte";
 import { importCharacter } from "./characterCards";
 import { PngChunk } from "./pngChunk";
 import {
@@ -321,7 +322,7 @@ export async function exportChat(page:number){
             const stringl = Buffer.from(JSON.stringify({
                 type: 'risuChat',
                 ver: 2,
-                data: materializeAuthorNote(db.authorNotePresets, chat),
+                data: exportedChat(db.authorNotePresets, chat),
                 folders: folders
             }), 'utf-8')
     
@@ -545,6 +546,8 @@ export async function importChat(){
                             chat.folderId = folderIdMap[chat.folderId]
                         }
                         chat.id = v4()
+                        // PocketRisu and RisuBard chats carry their preset binding and swipes in their own fields.
+                        normalizePocketChat(chat, chat.id)
                     })
                     character.chats.unshift(...chats)
                     return null
@@ -638,7 +641,7 @@ export async function exportAllChats() {
             : null
         if (!char) throw new Error('Character was not found')
         const date = new Date().toISOString().replace(/[:.]/g, "-")
-        const allChats = char.chats.map((chat) => materializeAuthorNote(db.authorNotePresets, chat))
+        const allChats = char.chats.map((chat) => exportedChat(db.authorNotePresets, chat))
         const allFolders = char.chatFolders
         const stringl = Buffer.from(JSON.stringify({
             type: 'risuAllChats',
@@ -651,6 +654,13 @@ export async function exportAllChats() {
     } catch (error) {
         alertError(error)
     }
+}
+
+/** A chat as a chat file holds it. A preset binding an earlier import left under PocketRisu's name is not the chat's. */
+function exportedChat(authorNotePresets: readonly unknown[] | undefined, chat: Chat): Chat {
+    const copy: Chat & { bindedBotPreset?: unknown } = materializeAuthorNote(authorNotePresets, chat)
+    delete copy.bindedBotPreset
+    return copy
 }
 
 function formatTavernChat(chat:string, charName:string){
@@ -1038,7 +1048,7 @@ export async function changeChar(index: number, arg:{
         reseter()
         return true
     }
-    if(get(doingChat) && !isNativeGenerationNavigationAllowed()){
+    if(get(doingChat)){
       alertToast(language.navigationBlockedWhileGenerating)
       return false
     }

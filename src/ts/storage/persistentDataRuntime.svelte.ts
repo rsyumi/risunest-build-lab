@@ -1,7 +1,6 @@
 import type { PluginStorageWriteCheck } from '../plugins/pluginStorageProtection'
 import { generatingConversations } from './generatingConversationRegistry'
 import type { LwwStageReceive, LwwApplyResult } from './persistentDataStore'
-import type { NativeGenerationPort } from './nativeGenerationPort'
 import { flushPersistentIdentityEdits, derivePersistentIdentityMirrors } from './persistentIdentityHooks'
 import { applyReceivedDisplaySettings } from '../gui/receivedDisplaySettings'
 import { isConversationStreaming } from './streamingConversationRegistry'
@@ -10,7 +9,7 @@ import { isTauri } from '../platform'
 import { restoreStreamingConversationState } from './streamingConversationRegistry'
 import { fillLorebookText } from './lorebookText'
 import { derived, get, readonly, writable } from 'svelte/store'
-import { doingChat, isNativeGenerationNavigationAllowed } from '../process/generationState'
+import { doingChat } from '../process/generationState'
 import { ReloadGUIPointer, selectedCharID, selIdState } from '../stores.svelte'
 import type { ActiveConversationSession } from './activeConversationSession'
 import type {
@@ -22,9 +21,9 @@ import type {
     WindowedConversationMutationController,
 } from './activeWorkingSet.svelte'
 import type { ConversationViewportSource } from '../conversationViewportSource'
-import type { Chat, Database, botPreset, character, loreBook } from './database.svelte'
-import { fillRootFieldDefaults, getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
-import { getEffectivePresetOverride } from './effectiveIdentityState'
+import type { Chat, Database, character, loreBook } from './database.svelte'
+import { carryPresetBinding, carryPresetOverride, deriveEffectivePresetMirrors, fillRootFieldDefaults, getDatabase, restoreSelectedConversationPresetBinding, setDatabase, type PresetSource } from './database.svelte'
+import { getEffectivePresetBinding, getEffectivePresetOverride, isLoadedPresetRecord } from './effectiveIdentityState'
 import { prepareDatabaseForPersistence, preparePersistentRootForWorkingSet } from './databasePreparation'
 import { getPersistentDataStore, getPersistentStorageAuthority } from './persistentDataStoreFactory'
 import { collectCharacterConversationAssetKeys, scheduleDeletedOwnerAssetCleanup, type AssetAliasCleanupTarget } from './deletedOwnerAssetCleanup'
@@ -46,6 +45,7 @@ import type {
     PersistentMutationToken,
     PersistentSelectedConversation,
 } from './saveCoordinator'
+import { PersistentMutationFencedError } from './saveCoordinator'
 import type { CharacterActivationOptions } from './activeWorkingSet.svelte'
 import { notifyLocalPersistentRevision } from './persistentRevisionEvents'
 import { retryCommittedWorkingSetRefreshWithContinuation } from './committedWorkingSetContinuation'
@@ -77,7 +77,6 @@ import {
     resolveLifecyclePluginStorageOwner,
 } from '../plugins/pluginStorageStore'
 import {
-    canonicalClone,
     applyPluginStorageMutationsInPlace,
     orderPluginStorageKeys,
 } from './saveCoordinatorHelpers'
@@ -99,34 +98,6 @@ export { createPersistentDataRuntime } from './persistentDataRuntime'
 
 type CompleteCharacter = character
 
-// Catalog entries carry only their summary and the local fields normalization adds.
-const catalogPresetKeys = new Set(['id', 'name', 'image', 'localNetworkMode', 'localNetworkTimeoutSec'])
-export const isLoadedPreset = (value: botPreset | undefined): boolean =>
-    !!value && Object.keys(value).some((key) => !catalogPresetKeys.has(key))
-
-/// A whole replacement starts a new identity state, so a preset chain override
-/// is applied again when its preset is still in the library.
-function carryPresetOverride(id: string, readPreset?: (id: string) => Promise<{ value: botPreset } | null>): void {
-    const database = getDatabase()
-    const record = database.botPresets?.find((value) => value?.id === id)
-    if (!record) return
-    if (isLoadedPreset(record)) {
-        setEffectivePresetOverride(id, database)
-        return
-    }
-    if (!readPreset) return
-    const selectedId = database.botPresets[database.botPresetsId]?.id
-    void readPreset(id).then((value) => {
-        const current = getDatabase()
-        if (!value || current !== database || getEffectivePresetOverride(current) !== null ||
-            current.botPresets[current.botPresetsId]?.id !== selectedId) return
-        const index = current.botPresets.findIndex((preset) => preset?.id === id)
-        if (index < 0) return
-        if (!isLoadedPreset(current.botPresets[index])) current.botPresets[index] = value.value
-        setEffectivePresetOverride(id, current)
-    }).catch((error) => productionConfiguration.onBackgroundError?.(error))
-}
-
 /// Every character the runtime installs takes its streaming state from this
 /// document's generations, and lorebook text in the shape its readers expect.
 function prepareResidentCharacter(character: { globalLore?: loreBook[], chats: Chat[] }): void {
@@ -138,14 +109,15 @@ function prepareResidentCharacter(character: { globalLore?: loreBook[], chats: C
 }
 
 export function createProductionStateAdapter(options: {
-    readPreset?(id: string): Promise<{ value: botPreset } | null>
+    /** Reads a preset applied before a replacement that the replacement holds only as a summary. */
+    presets?(): PresetSource
 } = {}): PersistentDataRuntimeStateAdapter {
     const characterIndex = $derived.by(() => new Map(getDatabase().characters.map((value) => [value.chaId,value])))
     const residentIndex = $derived.by(() => new Map([...characterIndex].filter(([,value]) => !isWorkingSetCharacterStub(value))))
     const residentCharacters = () => [...residentIndex.values()].filter((value) => !workingSetResidency.isCharacterReleased(value.chaId))
     const residentPresets = $derived.by(() => {
         const presets = getDatabase().botPresets ?? []
-        return isCatalogPresetWorkingSet(presets) ? presets.filter((value) => value && Object.keys(value).some((key) => !['id','name','image'].includes(key))) : []
+        return isCatalogPresetWorkingSet(presets) ? presets.filter((value) => isLoadedPresetRecord(presets, value)) : []
     })
     const readSelectedCharacter = () => {
         const selected = getDatabase().characters[selIdState.selId]
@@ -227,6 +199,9 @@ export function createProductionStateAdapter(options: {
         replaceDatabase(database, activeCharacterIds, forceScalableProjection) {
             const liveDatabase = getDatabase()
             const presetOverride = getEffectivePresetOverride(liveDatabase)
+            // A running request keeps the binding of the conversation it generates for.
+            const generating = get(doingChat)
+            const presetBinding = generating ? getEffectivePresetBinding(liveDatabase) : null
             const selectedCharacter = liveDatabase.characters[get(selectedCharID)]
             const selectedCharacterId = selectedCharacter?.chaId ?? null
             const selectedConversationId = selectedCharacter
@@ -250,27 +225,27 @@ export function createProductionStateAdapter(options: {
                 selectedConversationId,
                 (index) => selectedCharID.set(index),
             )
-            if (presetOverride) carryPresetOverride(presetOverride, options.readPreset)
+            if (!generating) restoreSelectedConversationPresetBinding(getDatabase())
+            // The selection may have fallen back to another preset, such as after a remote deletion.
+            deriveEffectivePresetMirrors(getDatabase())
+            // A request reads the mirrors per streamed chunk, so its binding cannot wait for the chat lifecycle.
+            for (const carried of [
+                presetOverride && carryPresetOverride(presetOverride, options.presets?.()),
+                presetBinding && carryPresetBinding(presetBinding, options.presets?.()),
+            ]) if (carried) carried.catch((error) => {
+                // A replacement made while writes are fenced cannot read a summarized preset's body.
+                if (!(error instanceof PersistentMutationFencedError)) productionConfiguration.onBackgroundError?.(error)
+            })
         },
         publishPresetWorkingSet({ revision, root, presets }) {
             const database = getDatabase()
-            const scalable = isCatalogPresetWorkingSet(database.botPresets)
-            const loadedIds = new Set(database.botPresets.filter((value) => Object.keys(value).some((key) => !['id','name','image'].includes(key))).map((value) => value['id']))
-            if (!scalable) {
+            if (!isCatalogPresetWorkingSet(database.botPresets)) {
                 database.botPresets = presets
                 patchWorkingSetRoot(database, root)
                 derivePersistentIdentityMirrors()
                 return
             }
-            database.botPresets = createPresetCatalogWorkingSetFromValues(
-                presets,
-                revision,
-                root.botPresetsId,
-            )
-            for (let index = 0; index < database.botPresets.length; index++) {
-                const id = database.botPresets[index]?.['id']
-                if (loadedIds.has(id)) database.botPresets[index] = canonicalClone(presets.find((value) => value['id'] === id)!)
-            }
+            database.botPresets = createPresetCatalogWorkingSetFromValues(presets, revision, root.botPresetsId)
             patchWorkingSetRoot(database, root)
             derivePersistentIdentityMirrors()
         },
@@ -441,7 +416,7 @@ export function createProductionStateAdapter(options: {
         },
         conversationViewportRowBudget: getRuntimePerformanceBudgets().chatMountedMessageBudget,
         canActivateWorkingSet() {
-            return !get(doingChat) || isNativeGenerationNavigationAllowed()
+            return !get(doingChat)
         },
         canDeactivateWorkingSet() {
             return !get(doingChat)
@@ -466,8 +441,6 @@ export interface ProductionRuntimeConfiguration {
     onLocalRevision?: (revision: DataRevision) => void
     onFlushPromise?: (promise: Promise<void> | null) => void
     onBackgroundError?: (error: unknown) => void
-    /** The native generation commands; absent where the build has none. */
-    nativeGeneration?: NativeGenerationPort | null
     projectWorkingSet?(
         database: Database,
         selectedCharacterId: string | null,
@@ -502,7 +475,7 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
         const store = getPersistentDataStore()
         productionRuntime = createPersistentDataRuntime({
             store,
-            state: createProductionStateAdapter({ readPreset: (id) => store.readPreset(id) }),
+            state: createProductionStateAdapter({ presets: () => productionRuntime! }),
             getOfficialPublisher: () => productionConfiguration.officialPublisher,
             onLocalRevision: (revision) => {
                 productionConfiguration.onLocalRevision?.(revision)
@@ -510,7 +483,6 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
             },
             onFlushPromise: (promise) => productionConfiguration.onFlushPromise?.(promise),
             onBackgroundError: (error) => productionConfiguration.onBackgroundError?.(error),
-            getNativeGenerationPort: () => productionConfiguration.nativeGeneration ?? null,
             onLocalSaveFailure: (error) => localSaveFailure.set(error),
             onWorkingSetRefreshRequired: (revision) => workingSetRefreshRevision.set(revision),
             onDestructiveReplacementFenceChanged: (active) => destructiveReplacementActive.set(active),
@@ -842,7 +814,6 @@ export const hasPendingOfficialPublication = (): boolean =>
 
 export const getPersistentRevision = (): DataRevision => getPersistentDataRuntime().revision
 export const applyPersistentLwwReceive = (request: LwwStageReceive): Promise<LwwApplyResult> => getPersistentDataRuntime().applyLwwReceive(request)
-export const applyPersistentStoredLwwReceive: PersistentDataRuntime['applyStoredLwwReceive'] = (request, apply) => getPersistentDataRuntime().applyStoredLwwReceive(request, apply)
 export const commitPersistentUnitIntent: PersistentDataRuntime['commitPersistentUnitIntent'] = (reason, mutations, conversations, wholeMessages, projectionObserver, check) =>
     getPersistentDataRuntime().commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages, projectionObserver, check)
 export const commitPreparedUnitIntent: PersistentDataRuntime['commitPreparedUnitIntent'] = (reason, prepare) =>

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
-import { language } from 'src/lang'
-import { nativeFileOperationOutcome, waitForActiveNativeFileOperation } from 'src/ts/storage/nativeFileJobManager'
+import { changeLanguage, language } from 'src/lang'
+import { nativeFileJobHost, nativeFileOperationOutcome, waitForActiveNativeFileOperation } from 'src/ts/storage/nativeFileJobManager'
 import NativeFileJobDialog from './NativeFileJobDialog.svelte'
 import { syntheticNativeFileJobStatus } from 'src/ts/storage/nativeFileJobs'
 import { failureReason } from 'src/ts/gui/nativeFileJobDialogModel'
@@ -9,8 +9,14 @@ import { failureReason } from 'src/ts/gui/nativeFileJobDialogModel'
 import { get } from 'svelte/store'
 import type { OfficialAccountAssetOutcome } from 'src/ts/storage/sync/officialAccountAssetOutcome'
 
-const h = vi.hoisted(() => ({ alertError: vi.fn<typeof import('src/ts/alert')['alertError']>(), busy: true }))
+const h = vi.hoisted(() => ({
+    alertError: vi.fn<typeof import('src/ts/alert')['alertError']>(),
+    openImportResult: vi.fn<typeof import('src/ts/importIntake/openResult')['openImportResult']>(),
+    busy: true,
+}))
 vi.mock('src/ts/alert', () => ({ alertError: h.alertError }))
+vi.mock('src/ts/stores.svelte', async () => ({ alertStore: (await import('svelte/store')).writable({ type: 'none', msg: '' }) }))
+vi.mock('src/ts/importIntake/openResult', () => ({ openImportResult: h.openImportResult, canOpenImportResult: () => true }) satisfies typeof import('src/ts/importIntake/openResult'))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
     getServerSyncController: () => ({ assertFileOperationAvailable() { if (h.busy) throw Object.assign(new Error('server-sync-busy'), { code: 'server-sync-busy' }) } }),
 }))
@@ -25,6 +31,7 @@ afterEach(async () => {
     target?.remove()
     nativeFileOperationOutcome.set(null)
     h.alertError.mockClear()
+    h.openImportResult.mockClear()
     h.busy = true
     resetFlow?.()
     resetFlow = undefined
@@ -156,5 +163,116 @@ describe('file operation error details', () => {
             ['program.exe', failureReason('unsupported-source', 'import')],
             ['locked.png'],
         ])
+
+        // A batch that records every file lists all of them, each with its location or reason.
+        nativeFileOperationOutcome.set({
+            kind: 'import', format: 'content', state: 'failed', startedAt: 0, finishedAt: 1,
+            observedStages: [], warningCodes: [], partialWritesPossible: false, error: io,
+            batch: {
+                total: 3, imported: 1, failures: [{ name: 'first.png', error: io }], declined: ['locked.png'],
+                entries: [
+                    { name: 'first.png', state: 'failed', error: io },
+                    { name: 'Mira.png', state: 'imported', location: { kind: 'character', chaId: 'synthetic' } },
+                    { name: 'locked.png', state: 'declined' },
+                ],
+            },
+        })
+        await tick()
+        expect(target.querySelector('[data-testid="native-file-job-failed-files"]')).toBeNull()
+        const entries = [...target.querySelectorAll('[data-testid="native-file-job-batch-entries"] li')].map(row => [
+            row.getAttribute('data-entry-state'), row.querySelector('svg') !== null,
+            ...[...row.querySelectorAll('span > span')].map(span => span.textContent),
+        ])
+        expect(entries).toEqual([
+            ['failed', true, 'first.png', failureReason('source-read-failed', 'import')],
+            ['imported', true, 'Mira.png', language.risuNest.importIntake.locationCharacter],
+            ['declined', false, 'locked.png'],
+        ])
+        expect(buttonLabels()).toEqual([language.risuNest.importDialog.errorDetails, language.risuNest.importDialog.close])
+    })
+
+    it('names where a single imported file went and opens it before closing the result', async () => {
+        const location = { kind: 'character-lorebook' as const, chaId: 'synthetic', characterName: 'Mira' }
+        nativeFileOperationOutcome.set({
+            kind: 'import', format: 'content', state: 'succeeded', startedAt: 0, finishedAt: 1,
+            observedStages: [], warningCodes: [], partialWritesPossible: false, source: { name: 'Harbor.json', bytes: 10 }, location,
+        })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(NativeFileJobDialog, { target })
+        await tick()
+        expect(target.querySelector('[role="status"]')?.textContent).toContain(language.risuNest.importIntake.locationCharacterLorebook.replace('{0}', 'Mira'))
+        expect(buttonLabels()).toEqual([language.risuNest.importIntake.open, language.risuNest.importDialog.close])
+        button(language.risuNest.importIntake.open).click()
+        await vi.waitFor(() => expect(h.openImportResult).toHaveBeenCalledExactlyOnceWith(location))
+        expect(get(nativeFileOperationOutcome)).toBeNull()
+    })
+
+    it.each([
+        ['onboarding is on screen', 'onboarding', true],
+        ['the result cannot be opened over the screen', 'dialog', false],
+    ] as const)('offers nothing to open while %s', async (_, host, openable) => {
+        nativeFileJobHost.set(host)
+        try {
+            nativeFileOperationOutcome.set({
+                kind: 'import', format: 'content', state: 'succeeded', startedAt: 0, finishedAt: 1, observedStages: [], warningCodes: [],
+                partialWritesPossible: false, source: { name: 'Mira.png', bytes: 10 }, location: { kind: 'character', chaId: 'synthetic' },
+            })
+            target = document.createElement('div')
+            document.body.append(target)
+            component = mount(NativeFileJobDialog, { target, props: { canOpen: () => openable } })
+            await tick()
+            expect(target.querySelector('[role="status"]')?.textContent).toContain(language.risuNest.importIntake.locationCharacter)
+            expect(buttonLabels()).toEqual([language.risuNest.importDialog.close])
+        } finally {
+            nativeFileJobHost.set('dialog')
+        }
     })
 })
+
+describe('result text', () => {
+    it('closes a finished result with Escape', async () => {
+        nativeFileOperationOutcome.set({
+            kind: 'import', format: 'content', state: 'succeeded', startedAt: 0, finishedAt: 1,
+            observedStages: [], warningCodes: [], partialWritesPossible: false, source: { name: 'Harbor.json', bytes: 10 },
+        })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(NativeFileJobDialog, { target })
+        await tick()
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+        await vi.waitFor(() => expect(get(nativeFileOperationOutcome)).toBeNull())
+    })
+
+    it('uses the language chosen after the result was first shown', async () => {
+        const outcome = {
+            kind: 'import', format: 'content', state: 'succeeded', startedAt: 0, finishedAt: 1,
+            observedStages: [], warningCodes: [], partialWritesPossible: false, source: { name: 'Harbor.json', bytes: 10 },
+        } satisfies Parameters<typeof nativeFileOperationOutcome.set>[0]
+        nativeFileOperationOutcome.set(outcome)
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(NativeFileJobDialog, { target })
+        await tick()
+        expect(buttonLabels()).toEqual([language.risuNest.importDialog.close])
+        nativeFileOperationOutcome.set(null)
+        await tick()
+        changeLanguage('ko')
+        try {
+            expect(language.risuNest.importDialog.close).not.toBe('Close')
+            nativeFileOperationOutcome.set({ ...outcome })
+            await tick()
+            expect(buttonLabels()).toEqual([language.risuNest.importDialog.close])
+        } finally {
+            changeLanguage('en')
+        }
+    })
+})
+
+function buttonLabels() {
+    return [...target!.querySelectorAll('button')].map(button => button.textContent?.trim())
+}
+
+function button(label: string) {
+    return [...target!.querySelectorAll('button')].find(button => button.textContent?.trim() === label)!
+}

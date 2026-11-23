@@ -19,7 +19,6 @@ import type { ConversationSummary, LwwStageReceive, PersistentDataStore, Working
 import { createLeaseStub } from './persistentDataStore.testSupport'
 import { planConversationInsertPages } from './conversationInsertPages'
 import { PluginDeviceKeyspace } from '../plugins/pluginDeviceKeyspace'
-import { ActiveConversationSession } from './activeConversationSession'
 
 async function harness() {
     const database = structuredClone(fixtureDatabase)
@@ -123,70 +122,6 @@ describe('LWW renderer save path', () => {
         expect(invalidated).toHaveBeenCalledWith('synthetic')
         expect(await keyspace.getItem('string', 'key')).toBe('received')
         expect(reload).not.toHaveBeenCalled()
-    })
-
-    it.each(['matched', 'drifted', 'missing'] as const)('checks the %s device fence before publishing a stored receive', async evidenceKind => {
-        let value = 'before'
-        const keyspace = new PluginDeviceKeyspace('evidence-owner', {
-            hydrate: async () => ({ complete: true, byteSize: value.length, entries: [{ space: 'string', key: 'key', value }] }),
-            read: async () => value, keys: async () => ['key'], write: async () => {},
-        })
-        expect(await keyspace.getItem('string', 'key')).toBe('before')
-        const invalidated = vi.fn(() => keyspace.invalidate())
-        const reload = vi.fn()
-        const { runtime, store } = await runtimeHarness(undefined, { onPluginDeviceStorageChanged: invalidated, afterRemotePluginChange: reload })
-        const originalFence = { instanceId: 'device', revision: '9007199254740993' }
-        const identity = { storeId: 'store', libraryEpoch: 'library', generation: 'generation', selectionEpoch: 'selection', revision: runtime.revision }
-        let currentFence = originalFence
-        store.readNativeReceiveEvidence = async lease => ({ identity: { ...identity, revision: lease.revision }, bindingAuthority: '1', devicePlugins: currentFence })
-        store.lwwFinishReceive = async () => {}
-        await runtime.applyStoredLwwReceive({ bindingAuthority: '1', requestId: `evidence-${evidenceKind}`, incomingKeys: [] }, async request => {
-            expect(request.nativeBaseline).toEqual({ identity, bindingAuthority: '1', devicePlugins: originalFence })
-            if (evidenceKind !== 'matched') {
-                value = 'native-device-change'
-                currentFence = { ...originalFence, revision: '9007199254740994' }
-            }
-            return { revision: runtime.revision, affectedKeys: [], heldKeys: [], deferredKeys: [], pluginStorageChangedKeys: [],
-                ...(evidenceKind === 'missing' ? {} : { nativeDevicePluginFence: originalFence }) }
-        })
-        expect(await keyspace.getItem('string', 'key')).toBe(evidenceKind === 'matched' ? 'before' : 'native-device-change')
-        if (evidenceKind === 'matched') expect(invalidated).not.toHaveBeenCalled()
-        else expect(invalidated).toHaveBeenCalledWith()
-        expect(reload).not.toHaveBeenCalled()
-    })
-
-    it('captures only the chosen local conversation and detects later edits without consuming them', async () => {
-        const { database, coordinator } = await harness()
-        const owner = database.characters[0]
-        const chat = owner.chats[0]
-        owner.name = 'Local owner name'
-        chat.note = 'Captured local note'
-        const session = new ActiveConversationSession({ characterId: owner.chaId, conversationId: chat.id!, conversation: chat,
-            storeRevision: coordinator.revision, onMutation: event => coordinator.recordActiveConversationMutation(event) })
-        session.append({ role: 'user', data: 'Captured local message' })
-        const captured = coordinator.captureReceiveConversationEdits(owner.chaId, chat.id!, coordinator.revision)
-        expect(captured.characterFields).toContainEqual({ type: 'set', field: 'name', value: 'Local owner name' })
-        expect(captured.conversationFields).toContainEqual({ type: 'set', field: 'note', value: 'Captured local note' })
-        expect(captured.ranges.flatMap(range => range.messages)).toContainEqual({ role: 'user', data: 'Captured local message' })
-        expect(captured.isCurrent()).toBe(true)
-        const other = { ...structuredClone(chat), id: 'other-local-chat', note: 'Unrelated local edit' }
-        owner.chats.push(other)
-        expect(captured.isCurrent()).toBe(true)
-        const beforeTransient = structuredClone(chat.message)
-        session.append({ role: 'char', data: 'Transient suffix' })
-        session.replaceRange(session.positionAt(chat.message.length - 1), 1, [])
-        expect(chat.message).toEqual(beforeTransient)
-        expect(captured.isCurrent()).toBe(false)
-        expect(() => captured.assertPrefixCurrent()).not.toThrow()
-        chat.note = 'Later local note'
-        session.append({ role: 'char', data: 'Later local message' })
-        expect(captured.isCurrent()).toBe(false)
-        expect(() => captured.assertPrefixCurrent()).not.toThrow()
-        expect(captured.conversationFields).toContainEqual({ type: 'set', field: 'note', value: 'Captured local note' })
-        expect(captured.ranges.flatMap(range => range.messages)).not.toContainEqual({ role: 'char', data: 'Later local message' })
-        expect(owner.chats).toContain(other)
-        expect(chat.note).toBe('Later local note')
-        coordinator.markCommittedWorkingSetRefreshRequired(coordinator.revision, new Error('Synthetic retained receive conflict'))
     })
 
     it('stores every page of a newly added character with its final conversation order', async () => {
@@ -307,7 +242,9 @@ describe('LWW renderer save path', () => {
     it.each([
         ['preset', '["root","botPresetsId"]', 'preset-alpha', '["exists","preset","preset-alpha"]'],
         ['persona', '["root","selectedPersona"]', 'persona-second', '["exists","persona","persona-second"]'],
-    ] as const)('does not save the selection that replaces a remotely deleted selected %s', async (kind, selectionKey, selectedId, existsKey) => {
+        ['preset', '["root","botPresetsId"]', 'preset-alpha', '["root","botPresetsId"]'],
+        ['persona', '["root","selectedPersona"]', 'persona-second', '["root","selectedPersona"]'],
+    ] as const)('does not save the selection that replaces a remotely deleted selected %s (%s, %s, deleted %s)', async (kind, selectionKey, selectedId, existsKey) => {
         const {database,commit,runtime,receive} = await identityRuntimeHarness()
         await receive([{key:selectionKey,type:'set',value:selectedId}])
         await receive([{key:existsKey,type:'delete'}])
@@ -1025,50 +962,6 @@ describe('received plugin storage protection', () => {
         const h = await pluginHarness()
         await expect(h.receive('remote', options)).rejects.toThrow()
         await expect(h.guest.setItem('settings', 'old')).rejects.toThrow()
-        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toBe('remote')
-        h.guest.dispose()
-    })
-
-    it.each(['projection', 'retry', 'current-recovery', 'current-drift'] as const)('fences plugin observations before awaiting stored receive %s', async phase => {
-        const h = await pluginHarness()
-        await h.guest.getItem('settings')
-        let entered!: () => void
-        let release!: () => void
-        const blocked = new Promise<void>(resolve => { entered = resolve })
-        const resume = new Promise<void>(resolve => { release = resolve })
-        const key = JSON.stringify(['plugin', h.owner, 'settings'])
-        const acquire = h.store.acquireRevision.bind(h.store)
-        let result: { revision: number; affectedKeys: string[]; heldKeys: string[]; deferredKeys: string[]; currentStateRecoveryRequired?: boolean } | undefined
-        if (phase !== 'retry') {
-            vi.spyOn(h.store, 'acquireRevision').mockImplementation(async revision => {
-                const lease = await acquire(revision)
-                if (result) { entered(); await resume }
-                return lease
-            })
-        }
-        let attempt = 0
-        const receiving = h.runtime.applyStoredLwwReceive({ bindingAuthority: 'synthetic', requestId: `fence-before-${phase}`, incomingKeys: [key] }, async () => {
-            if (!result) {
-                const committed = await h.store.commit({ expectedRevision: h.runtime.revision,
-                    pluginStorage: [{ type: 'set', owner: h.owner, key: 'settings', value: 'remote' }] })
-                result = phase === 'current-recovery' || phase === 'current-drift'
-                    ? { revision: h.runtime.revision, affectedKeys: [], heldKeys: [], deferredKeys: [], currentStateRecoveryRequired: phase === 'current-recovery' }
-                    : { ...committed, affectedKeys: [key], heldKeys: [], deferredKeys: [] }
-            }
-            if (phase === 'retry') {
-                if (attempt++ === 0) throw new Error('synthetic lost native receive response')
-                entered(); await resume
-            }
-            return result
-        })
-        try {
-            await blocked
-            expect(h.reload).toHaveBeenCalled()
-        } finally {
-            release()
-            await receiving
-        }
-        await expect(h.guest.setItem('settings', 'stale cached value')).rejects.toThrow('PLUGIN_STORAGE_STALE')
         expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toBe('remote')
         h.guest.dispose()
     })

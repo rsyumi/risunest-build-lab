@@ -112,7 +112,6 @@ async_commands![
     server_sync::commands::server_sync_configure,
     server_sync::commands::server_sync_lww_push,
     server_sync::commands::server_sync_lww_pull,
-    server_sync::commands::server_sync_lww_apply_receive,
     server_sync::commands::server_sync_lww_ack,
     server_sync::commands::server_sync_lww_fence,
     server_sync::commands::server_sync_lww_activate,
@@ -142,9 +141,6 @@ async_commands![
     #[cfg(desktop)]
     appimage_integration::appimage_integration_register,
     native_tokenizer::tokenize_batch,
-    render_display::render_display_start,
-    render_display::render_display_resume,
-    render_display::render_display_cancel,
     native_media::native_media_encode_inlay_image,
     native_media::ipc::native_media_encode_canvas_webp,
     native_media::ipc::native_media_encode_canvas_webp_finish,
@@ -172,8 +168,8 @@ async_commands![
     asset_repository::commands::asset_cas_job_seal_prepared_content,
     asset_repository::commands::asset_cas_job_release,
     native_file_jobs::native_content_source_metadata,
+    native_file_jobs::native_content_update_base_read,
     native_file_jobs::native_file_job_prepared_content,
-    native_file_jobs::native_file_job_prepared_preset,
     native_file_jobs::native_file_job_stage_inline_asset,
     native_file_jobs::screenshot_output::native_file_job_screenshot_output_publish,
     persistent_store::commands::gallery::pds_gallery_page,
@@ -189,8 +185,6 @@ async_commands![
     persistent_store::commands::gallery::pds_gallery_usage_count,
     persistent_store::commands::pds_archive_character,
     persistent_store::commands::pds_restore_character,
-    persistent_store::commands::pds_hydrate_archive_reconcile,
-    persistent_store::commands::pds_reconcile_archived_character,
     persistent_store::commands::image_geometry::pds_read_image_geometry,
     persistent_store::commands::image_geometry::pds_write_image_geometry,
     persistent_store::commands::image_geometry::pds_compute_image_geometry,
@@ -215,14 +209,6 @@ async_commands![
     #[cfg(feature = "native-kei-upload-pilot")]
     persistent_store::commands::pds_kei_backup_upload,
     regex_shadow::regex_execute_batch,
-    native_generation::commands::native_generation_host_init,
-    native_generation::commands::native_generation_reserve_ollama,
-    native_generation::commands::native_generation_execute,
-    native_generation::commands::native_generation_cancel,
-    native_generation::commands::native_generation_status,
-    native_generation::commands::native_generation_active,
-    native_generation::commands::native_generation_capture_witness,
-    native_generation::commands::native_generation_proof,
 ];
 
 fn compact(path: &str) -> String {

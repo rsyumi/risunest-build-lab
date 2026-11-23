@@ -13,7 +13,7 @@ describe('preset chain activation', () => {
         }))
         const run = async () => {
             await activatePresetChain(
-                { presetChain: 'Target', botPresets: [{ name: 'Target' }] },
+                { presetChain: 'Target', botPresets: [{ id: 'target', name: 'Target' }] },
                 changePreset,
                 () => 0,
                 vi.fn(),
@@ -24,7 +24,7 @@ describe('preset chain activation', () => {
         const pending = run()
         await Promise.resolve()
 
-        expect(changePreset).toHaveBeenCalledWith(0)
+        expect(changePreset).toHaveBeenCalledWith('target')
         expect(events).toEqual([])
 
         finish()
@@ -38,7 +38,7 @@ describe('preset chain activation', () => {
         const onMissing = vi.fn()
 
         await activatePresetChain(
-            { presetChain: 'Missing', botPresets: [{ name: 'Other' }] },
+            { presetChain: 'Missing', botPresets: [{ id: 'other', name: 'Other' }] },
             changePreset,
             () => 0,
             onMissing,
@@ -55,7 +55,7 @@ describe('preset chain activation', () => {
         })
         const run = async () => {
             await activatePresetChainForRequest(
-                { presetChain: 'Target', botPresets: [{ name: 'Target' }] },
+                () => ({ presetChain: 'Target', botPresets: [{ id: 'target', name: 'Target' }] }),
                 changePreset,
                 () => 0,
                 vi.fn(),
@@ -66,5 +66,16 @@ describe('preset chain activation', () => {
         await expect(run()).rejects.toThrow('preset CAS failed')
 
         expect(events).not.toContain('request')
+    })
+
+    it('leaves the chain alone when the conversation binding applies a preset', async () => {
+        const changePreset = vi.fn(async () => undefined)
+        const database = { presetChain: 'Target', botPresets: [{ id: 'other', name: 'Other' }, { id: 'target', name: 'Target' }] }
+
+        await activatePresetChainForRequest(() => database, changePreset, () => 0, vi.fn(), async () => true)
+        expect(changePreset).not.toHaveBeenCalled()
+
+        await activatePresetChainForRequest(() => database, changePreset, () => 0, vi.fn(), async () => false)
+        expect(changePreset).toHaveBeenCalledExactlyOnceWith('target')
     })
 })

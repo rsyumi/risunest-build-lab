@@ -4,9 +4,6 @@ pub(crate) mod gallery;
 pub(crate) mod image_geometry;
 pub(crate) mod hypa;
 
-#[cfg(test)]
-pub(crate) use hypa::native_cache_tests::{active_cache_segments, allocation_observer, composition_cache};
-
 use super::archive::ArchivePreview;
 use super::asset_alias_orphans::{OrphanAliasScope, OWNED_ASSET_KEY_PREFIX};
 use super::device_store::plugin_values::{
@@ -17,7 +14,6 @@ use super::export::ExportedRisuSave;
 #[cfg(feature = "native-kei-upload-pilot")]
 use super::kei::KeiUploadResult;
 use super::content_change_index::{ContentChangeWindow, ContentKey};
-use super::lww::AdmissionWait;
 use super::{
     AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead, AssetOwnerLocator,
     AssignedPluginStorage, CharacterPage, CharacterQuery,
@@ -27,7 +23,7 @@ use super::{
     SnapshotCreated, SnapshotInfo, StagingResult, StoreError, StoreResult, Versioned, WorkingSetCommit,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -48,9 +44,36 @@ pub(crate) struct PersistentStoreState {
     renderer_gate: Arc<RendererGate>,
     archive_operations: Mutex<HashMap<String, Arc<AtomicBool>>>,
     retired_purge_started: AtomicBool,
-    // How long a renderer command waits for another connection's commit to release device admission.
-    admission_wait: AdmissionWait,
+    renderer_documents: Mutex<RendererDocuments>,
 }
+
+/// Page documents name themselves when they open sessions that outlive a
+/// command. A document that a later one replaced in `pds_open` gets no new
+/// session, even when its command reaches the store after the page reset.
+#[derive(Default)]
+struct RendererDocuments {
+    current: Option<String>,
+    replaced: VecDeque<String>,
+    /// A page started after `current` opened the store.
+    page_started: bool,
+}
+
+impl RendererDocuments {
+    fn replace(&mut self, document: String) {
+        self.replaced.push_back(document);
+        if self.replaced.len() > REPLACED_RENDERER_DOCUMENTS {
+            self.replaced.pop_front();
+        }
+    }
+}
+
+/// The creation time a page document puts before the first `-` of its name.
+fn renderer_document_created(document: &str) -> Option<u64> {
+    document.split_once('-')?.0.parse().ok()
+}
+
+/// Earlier documents have no command left to send long before this many reloads.
+const REPLACED_RENDERER_DOCUMENTS: usize = 64;
 
 struct ArchiveOperationGuard<'a> {
     state: &'a PersistentStoreState,
@@ -138,32 +161,21 @@ impl RendererGate {
 #[derive(Default)]
 struct RendererGateState {
     maintenance_active: bool,
-    /// Device maintenance, which refuses native jobs instead of letting them wait.
-    device_maintenance_active: bool,
     /// The maintenance is a page reset, which operations wait out instead of failing.
     resetting: bool,
     /// A page started during other maintenance. When that maintenance ends,
     /// admission passes to the page's reset instead of reopening.
     reset_after_maintenance: bool,
     operations: usize,
-    #[cfg(test)]
-    native_reset_waiters: usize,
     /// Advances whenever renderer maintenance starts.
     epoch: u64,
     /// Long operations that stop when maintenance starts instead of delaying it.
     cancellations: Vec<std::sync::Weak<AtomicBool>>,
-    device_cancellations: Vec<std::sync::Weak<AtomicBool>>,
 }
 
 impl RendererGateState {
-    fn begin_maintenance(&mut self, device: bool) {
+    fn begin_maintenance(&mut self) {
         self.maintenance_active = true;
-        self.device_maintenance_active = device;
-        if device {
-            for cancel in self.device_cancellations.drain(..) {
-                if let Some(cancel) = cancel.upgrade() { cancel.store(true, Ordering::Release); }
-            }
-        }
         for cancel in self.cancellations.drain(..) {
             if let Some(cancel) = cancel.upgrade() { cancel.store(true, Ordering::Release); }
         }
@@ -205,19 +217,19 @@ impl Drop for DeviceMaintenanceGuard {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        // Device maintenance ends either way; a page reset that takes over keeps
-        // admission closed only as a reset, which native jobs wait out.
-        state.device_maintenance_active = false;
         if std::mem::take(&mut state.reset_after_maintenance) {
             state.resetting = true;
         } else {
             state.maintenance_active = false;
             state.resetting = false;
         }
-        drop(state);
         self.gate.reopened.notify_all();
-        // Native jobs wait out a reset on the drain signal.
-        self.gate.drained.notify_all();
+    }
+}
+
+fn replaced_document_error() -> StoreError {
+    StoreError::Validation {
+        message: "a later page replaced the page that sent this request".to_owned(),
     }
 }
 
@@ -274,6 +286,59 @@ impl PersistentStoreState {
         Ok(operation())
     }
 
+    /// Makes `document` the page document that opened the store. Returns
+    /// whether that replaced another, whose sessions the caller then releases.
+    /// A replaced document's late open is refused. Takes no other lock, since
+    /// session opens check it under their own.
+    pub(crate) fn claim_renderer_document(&self, document: &str) -> StoreResult<bool> {
+        let mut documents = self.renderer_documents.lock().map_err(|error| StoreError::Store {
+            message: format!("renderer document mutex poisoned: {error}"),
+        })?;
+        if documents.current.as_deref() == Some(document) {
+            return Ok(false);
+        }
+        if documents.replaced.iter().any(|replaced| replaced == document) {
+            return Err(replaced_document_error());
+        }
+        // The first open of an outgoing page can run after the open of the page
+        // that replaced it. With no page start since the current document opened,
+        // an earlier creation time marks such a page.
+        let created = renderer_document_created(document);
+        if !documents.page_started
+            && created.is_some_and(|created| {
+                documents.current.as_deref().and_then(renderer_document_created).is_some_and(|current| created < current)
+            })
+        {
+            documents.replace(document.to_owned());
+            return Err(replaced_document_error());
+        }
+        documents.page_started = false;
+        if let Some(previous) = documents.current.replace(document.to_owned()) {
+            documents.replace(previous);
+        }
+        Ok(true)
+    }
+
+    /// Whether a later page document replaced `document` in `pds_open`.
+    pub(crate) fn is_replaced_document(&self, document: &str) -> bool {
+        self.renderer_documents
+            .lock()
+            .is_ok_and(|documents| documents.replaced.iter().any(|replaced| replaced == document))
+    }
+
+    /// Refuses a session for a page document that a later one replaced. Callers
+    /// hold the lock of the sessions they add to, which the release also takes.
+    pub(crate) fn refuse_replaced_document(&self, document: Option<&str>) -> StoreResult<()> {
+        let Some(document) = document else { return Ok(()) };
+        let documents = self.renderer_documents.lock().map_err(|error| StoreError::Store {
+            message: format!("renderer document mutex poisoned: {error}"),
+        })?;
+        if documents.replaced.iter().any(|replaced| replaced == document) {
+            return Err(replaced_document_error());
+        }
+        Ok(())
+    }
+
     pub(crate) fn maintenance_active(&self) -> bool {
         self.renderer_gate
             .state
@@ -285,39 +350,6 @@ impl PersistentStoreState {
     pub(crate) fn admit_renderer_operation(&self) -> StoreResult<RendererOperationGuard> {
         self.try_admit_renderer_operation_at(None, true)?
             .ok_or_else(renderer_gate_error)
-    }
-
-    /// A renderer reset only releases its leases. Native segments wait for that reset
-    /// without holding an operation permit; device maintenance still refuses them.
-    pub(crate) fn admit_native_job_operation(&self) -> StoreResult<RendererOperationGuard> {
-        let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
-        while state.maintenance_active && !state.device_maintenance_active {
-            #[cfg(test)]
-            { state.native_reset_waiters += 1; }
-            state = self.renderer_gate.drained.wait(state).map_err(|_| renderer_gate_error())?;
-            #[cfg(test)]
-            { state.native_reset_waiters -= 1; }
-        }
-        if state.device_maintenance_active { return Err(renderer_gate_error()); }
-        state.operations += 1;
-        Ok(RendererOperationGuard { gate: Arc::clone(&self.renderer_gate) })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn native_job_waiting_for_reset(&self) -> bool {
-        self.renderer_gate.state.lock().unwrap().native_reset_waiters > 0
-    }
-
-    /// Native owners survive renderer resets, but stop for device maintenance.
-    pub(crate) fn cancel_on_device_maintenance(&self, cancel: &Arc<AtomicBool>) -> StoreResult<()> {
-        let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
-        if state.device_maintenance_active {
-            cancel.store(true, Ordering::Release);
-            return Ok(());
-        }
-        state.device_cancellations.retain(|registered| registered.strong_count() > 0);
-        state.device_cancellations.push(Arc::downgrade(cancel));
-        Ok(())
     }
 
     /// Sets `cancel` when renderer maintenance starts, so an admitted operation
@@ -412,7 +444,7 @@ impl PersistentStoreState {
         let mut state = self.renderer_gate.wait_out_reset(state, deadline)?;
         if state.maintenance_active { return Err(renderer_gate_error()); }
         state.epoch += 1;
-        state.begin_maintenance(true);
+        state.begin_maintenance();
         let maintenance = DeviceMaintenanceGuard { gate: Arc::clone(&self.renderer_gate) };
         while state.operations != 0 {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -470,7 +502,7 @@ impl PersistentStoreState {
         if state.maintenance_active {
             return Ok(None);
         }
-        state.begin_maintenance(true);
+        state.begin_maintenance();
         let maintenance = DeviceMaintenanceGuard {
             gate: Arc::clone(&self.renderer_gate),
         };
@@ -510,6 +542,9 @@ impl PersistentStoreState {
     /// `finish_renderer_reset` drops the returned guard. During other
     /// maintenance, the reset starts when that maintenance ends.
     pub(crate) fn begin_renderer_reset(&self) -> StoreResult<RendererReset> {
+        if let Ok(mut documents) = self.renderer_documents.lock() {
+            documents.page_started = true;
+        }
         let mut state = self
             .renderer_gate
             .state
@@ -529,7 +564,7 @@ impl PersistentStoreState {
                 gate: Some(Arc::clone(&self.renderer_gate)),
             }));
         }
-        state.begin_maintenance(false);
+        state.begin_maintenance();
         state.resetting = true;
         Ok(RendererReset::Started(DeviceMaintenanceGuard {
             gate: Arc::clone(&self.renderer_gate),
@@ -641,7 +676,7 @@ impl Default for PersistentStoreState {
             renderer_gate: Arc::new(RendererGate::default()),
             archive_operations: Mutex::new(HashMap::new()),
             retired_purge_started: AtomicBool::new(false),
-            admission_wait: AdmissionWait::DEFAULT,
+            renderer_documents: Mutex::new(RendererDocuments::default()),
         }
     }
 }
@@ -709,6 +744,13 @@ fn start_retired_purge<R: tauri::Runtime>(app: &AppHandle<R>, state: &Persistent
 impl PersistentStoreState {
     pub(crate) fn with_test_store(store: PersistentStore) -> Self {
         Self { store: Mutex::new(Some(store)), ..Self::default() }
+    }
+
+    /// Closes both stores, as device maintenance does, without its admission
+    /// drain, for a test whose mock app never drops its managed state.
+    pub(crate) fn close_for_test(&self) {
+        self.status_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        lock_store(&self.store).unwrap_or_else(std::sync::PoisonError::into_inner).take();
     }
 
     /// A store the renderer has not opened yet, whose opening starts no purge.
@@ -854,23 +896,14 @@ fn with_store_mutex_mut_admitted<T>(
             message: "renderer operation permit belongs to another persistent store".to_owned(),
         });
     }
-    let mut backoff = state.admission_wait.start();
-    loop {
-        let mut guard = lock_store(&state.store).map_err(|error| StoreError::Store {
-            message: format!("persistent store mutex poisoned: {error}"),
-        })?;
-        let store = guard.as_mut().ok_or_else(|| StoreError::Validation {
-            message: "persistent store has not been opened".to_owned(),
-        })?;
-        if store.lww_try_recover_intents()? {
-            return operation(store);
-        }
-        // Other commands can use the store while this one waits for the commit to end.
-        drop(guard);
-        if !backoff.pause() {
-            return Err(StoreError::CommitBusy);
-        }
-    }
+    let mut store = lock_store(&state.store).map_err(|error| StoreError::Store {
+        message: format!("persistent store mutex poisoned: {error}"),
+    })?;
+    let store = store.as_mut().ok_or_else(|| StoreError::Validation {
+        message: "persistent store has not been opened".to_owned(),
+    })?;
+    store.lww_recover_intents()?;
+    operation(store)
 }
 
 #[track_caller]
@@ -891,21 +924,29 @@ pub(crate) fn commit_staged_replacement<R: tauri::Runtime>(
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_open(
-    app: AppHandle,
+pub(crate) fn pds_open<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, PersistentStoreState>,
+    document: Option<String>,
 ) -> Result<PersistentStoreOpenResult, StoreError> {
-    logged("pds_open", open_for_renderer(&app, &state))
+    logged("pds_open", open_for_renderer(&app, &state, document.as_deref()))
 }
 
 /// Opens the store the renderer works through and starts the work that waits for it.
+/// A page `document` that replaces another releases the sessions the other left open.
 pub(crate) fn open_for_renderer<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &PersistentStoreState,
+    document: Option<&str>,
 ) -> StoreResult<PersistentStoreOpenResult> {
     let operation_guard = state.admit_renderer_operation()?;
     let app_data_dir = crate::app_paths::data_root(app).map_err(|message| StoreError::Store { message })?;
     let (opened, first_open) = open_renderer_persistent_store_admitted(state, &operation_guard, &app_data_dir)?;
+    if let Some(document) = document {
+        if state.claim_renderer_document(document)? {
+            release_replaced_document_sessions(app, state, &operation_guard);
+        }
+    }
     start_retired_purge(app, state);
     // A page that starts before the store opens cannot judge the asset journals
     // whose owners only the store records, so they are judged again now.
@@ -918,6 +959,33 @@ pub(crate) fn open_for_renderer<R: tauri::Runtime>(
         crate::external_storage::leftovers::collect_released_content_later(app);
     }
     Ok(opened)
+}
+
+/// Releases what earlier page documents left open. The page reset clears all
+/// of it too, but an outgoing document's request can open a session after it.
+/// Each release asks under its own lock which documents were replaced, so one
+/// that runs late leaves the sessions of the current document alone.
+fn release_replaced_document_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+) {
+    let replaced = |document: &str| state.is_replaced_document(document);
+    if let Err(error) = with_store_mutex_mut_admitted(state, operation_guard, |store| {
+        store.release_revision_leases_of(&replaced)
+    }) {
+        crate::nlog!("warn", "Revision leases of a replaced page await the next page start: {error}");
+    }
+    if let Some(cas) = app.try_state::<crate::asset_repository::commands::DurableCasJobState>() {
+        if let Err(error) = cas.release_replaced_documents(app, &replaced) {
+            crate::nlog!("warn", "Asset uploads of a replaced page await the next page start: {error}");
+        }
+    }
+    if let Some(media) = app.try_state::<crate::native_media::ipc::NativeMediaIpcState>() {
+        if let Err(error) = media.release_replaced_documents(&replaced) {
+            crate::nlog!("warn", "Media transfers of a replaced page await the next page start: {error}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1251,14 +1319,6 @@ pub(crate) fn pds_read_conversation_metadata(
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_rebase_conversation_history(
-    state: State<'_, PersistentStoreState>,
-    request: super::conversation_rebase::Request,
-) -> Result<super::conversation_rebase::Mapping, StoreError> {
-    logged("pds_rebase_conversation_history", with_store(state, |store| store.rebase_conversation_history(&request)))
-}
-
-#[tauri::command(async)]
 pub(crate) fn pds_read_conversation_window(
     state: State<'_, PersistentStoreState>,
     query: ConversationWindowQuery,
@@ -1488,63 +1548,6 @@ pub(super) async fn restore_character<R: tauri::Runtime>(
         })
     })
     .await
-}
-
-#[tauri::command(async)]
-pub(crate) fn pds_read_native_receive_evidence(
-    state: State<'_, PersistentStoreState>, lease: String,
-) -> Result<super::receive_evidence::NativeReceiveEvidence, StoreError> {
-    logged("pds_read_native_receive_evidence", with_store(state, |store| store.read_native_receive_evidence(&lease)))
-}
-#[tauri::command(async)]
-pub(crate) fn pds_archive_reconcile_histories(
-    state: State<'_, PersistentStoreState>, lease: String, character_id: String, conversation_ids: Vec<String>,
-) -> Result<Vec<super::archive_reconcile::HistoryWitness>, StoreError> {
-    logged("pds_archive_reconcile_histories", with_store(state, |store| {
-        store.archive_reconcile_histories(&lease, &character_id, &conversation_ids)
-    }))
-}
-
-#[tauri::command(async)]
-pub(crate) async fn pds_hydrate_archive_reconcile(
-    app: AppHandle, character_id: String, operation_id: String,
-) -> Result<(), StoreError> {
-    hydrate_archive_reconcile(app, character_id, operation_id).await
-}
-
-pub(super) async fn hydrate_archive_reconcile<R: tauri::Runtime>(
-    app: AppHandle<R>, character_id: String, operation_id: String,
-) -> Result<(), StoreError> {
-    archive_operation(app, "pds_hydrate_archive_reconcile", move |state| {
-        let operation = state.begin_archive_operation(operation_id)?;
-        with_store_mutex(state, |store| store.hydrate_archive_reconcile(
-            &character_id, &|| operation.is_cancelled(), Some(operation.cancelled.clone()),
-        ))
-    }).await
-}
-
-#[tauri::command(async)]
-pub(crate) async fn pds_reconcile_archived_character(
-    app: AppHandle, request: super::archive_reconcile::ArchiveReconcileRequest, operation_id: String,
-) -> Result<super::archive_reconcile::ArchiveReconcileResult, StoreError> {
-    reconcile_archived_character(app, request, operation_id).await
-}
-
-pub(super) async fn reconcile_archived_character<R: tauri::Runtime>(
-    app: AppHandle<R>, request: super::archive_reconcile::ArchiveReconcileRequest, operation_id: String,
-) -> Result<super::archive_reconcile::ArchiveReconcileResult, StoreError> {
-    archive_operation(app, "pds_reconcile_archived_character", move |state| {
-        let operation = state.begin_archive_operation(operation_id)?;
-        let _admission = state.admit_renderer_operation()?;
-        let mut active = lock_store(&state.store).map_err(|error| StoreError::Store {
-            message: format!("persistent store mutex poisoned: {error}"),
-        })?;
-        let store = active.as_mut().ok_or_else(|| StoreError::Validation {
-            message: "persistent store has not been opened".to_owned(),
-        })?;
-        // Receipt lookup inside the operation must precede intent recovery.
-        store.reconcile_archived_character(&request, &|| operation.is_cancelled())
-    }).await
 }
 
 #[tauri::command(async)]
@@ -1864,8 +1867,15 @@ pub(crate) fn pds_materialize(
 pub(crate) fn pds_acquire_revision(
     state: State<'_, PersistentStoreState>,
     revision: i64,
+    document: Option<String>,
 ) -> Result<LeaseResult, StoreError> {
-    logged("pds_acquire_revision", with_store_mut(state, |store| store.acquire_revision(revision)))
+    logged("pds_acquire_revision", with_store_mutex_mut(&state, |store| {
+        // Under the store lock, which the release of a replaced page's leases also takes.
+        state.refuse_replaced_document(document.as_deref())?;
+        let acquired = store.acquire_revision(revision)?;
+        store.set_revision_owner(&acquired.lease, document);
+        Ok(acquired)
+    }))
 }
 
 #[tauri::command(async)]
@@ -1892,7 +1902,7 @@ pub(crate) fn pds_export_risu_save(
         })?;
         let outcome = prepared.create_attached_export(omit_account, account.as_ref());
         let reattach = with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
-            store.reattach_risu_save_export(prepared)
+            reattach_export_lease(&state, store, prepared)
         });
         match (outcome, reattach) {
             (Ok(exported), Ok(())) => Ok(exported),
@@ -1905,6 +1915,19 @@ pub(crate) fn pds_export_risu_save(
             }),
         }
     })())
+}
+
+/// Puts an exported lease back, or releases it when a later page replaced the
+/// page that holds it, which released that page's other leases meanwhile.
+fn reattach_export_lease(
+    state: &PersistentStoreState,
+    store: &mut PersistentStore,
+    mut prepared: crate::persistent_store::PreparedRisuSaveExport,
+) -> StoreResult<()> {
+    if state.refuse_replaced_document(prepared.owner()).is_err() {
+        return prepared.release_reader();
+    }
+    store.reattach_risu_save_export(prepared)
 }
 
 #[tauri::command(async)]
@@ -3015,9 +3038,7 @@ mod tests {
         let reader = rusqlite::Connection::open(&database_path).unwrap();
         reader.execute_batch("BEGIN; SELECT value FROM app_kv WHERE key = 'first';").unwrap();
         store.connection.execute("INSERT INTO app_kv VALUES ('second', '2')", []).unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::mock_app();
         app.manage(PersistentStoreState::with_test_store(store));
 
         pds_checkpoint(app.state(), CheckpointMode::Truncate)
@@ -3043,76 +3064,6 @@ mod tests {
         });
         holder.execute_batch("ROLLBACK").unwrap();
         committed.unwrap();
-    }
-
-    /// While another connection's commit holds device admission, a renderer command waits for it
-    /// up to its bound without holding the store, and a refusal no wait can clear returns at once.
-    #[test]
-    fn renderer_commands_wait_within_their_bound_for_another_connections_commit() {
-        use std::time::{Duration, Instant};
-        type Handle = AppHandle<tauri::test::MockRuntime>;
-        fn while_held<T: Send + 'static>(
-            holder: &PersistentStore, app: &Handle, during: impl FnOnce(),
-            command: impl FnOnce(Handle) -> T + Send + 'static,
-        ) -> (T, Duration) {
-            let admission = holder.acquire_intent_admission().unwrap();
-            let (calling, called) = std::sync::mpsc::channel();
-            let handle = app.clone();
-            let worker = std::thread::spawn(move || {
-                calling.send(()).unwrap();
-                let started = Instant::now();
-                let result = command(handle);
-                (result, started.elapsed())
-            });
-            called.recv().unwrap();
-            std::thread::sleep(Duration::from_millis(100));
-            during();
-            drop(admission);
-            worker.join().unwrap()
-        }
-        let wait = |deadline| AdmissionWait { deadline, first_pause: Duration::from_millis(5), max_pause: Duration::from_millis(20) };
-        let directory = tempdir().unwrap();
-        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
-        app.manage(PersistentStoreState {
-            admission_wait: wait(Duration::from_secs(10)),
-            ..PersistentStoreState::with_test_store(PersistentStore::open(directory.path()).unwrap())
-        });
-        let holder = PersistentStore::open(directory.path()).unwrap();
-
-        let (leased, waited) = while_held(&holder, app.handle(), || {}, |app| pds_acquire_revision(app.state(), 0));
-        assert!(waited >= Duration::from_millis(50));
-        pds_release_revision(app.state(), leased.unwrap().lease).unwrap();
-        let (committed, waited) = while_held(&holder, app.handle(), || {
-            // On its own thread, so a waiting command that kept the store fails this read instead of hanging the test.
-            let (read, revision) = std::sync::mpsc::channel();
-            let reader = app.handle().clone();
-            std::thread::spawn(move || { let _ = read.send(pds_read_revision(reader.state())); });
-            let revision = revision.recv_timeout(Duration::from_secs(1)).expect("a waiting command leaves the store to other commands");
-            assert_eq!(revision.unwrap(), 0);
-        }, |app| pds_commit(app.state(), WorkingSetCommit {
-            expected_revision: 0, root: Some(json!({"username": "synthetic"})), ..Default::default()
-        }, Vec::new()));
-        assert!(waited >= Duration::from_millis(50));
-        assert_eq!(committed.unwrap().revision, 1);
-
-        let bounded = PersistentStoreState {
-            admission_wait: wait(Duration::from_millis(150)),
-            ..PersistentStoreState::with_test_store(PersistentStore::open(directory.path()).unwrap())
-        };
-        let admission = holder.acquire_intent_admission().unwrap();
-        let started = Instant::now();
-        assert!(matches!(with_store_mutex_mut(&bounded, |store| store.revision()), Err(StoreError::CommitBusy)));
-        assert!(started.elapsed() >= Duration::from_millis(150));
-        drop(admission);
-        assert_eq!(with_store_mutex_mut(&bounded, |store| store.revision()).unwrap(), 1);
-
-        let state = app.state::<PersistentStoreState>();
-        state.store.lock().unwrap().as_ref().unwrap().connection.execute_batch("BEGIN").unwrap();
-        let started = Instant::now();
-        assert!(matches!(pds_acquire_revision(app.state(), 1), Err(StoreError::CommitBusy)));
-        assert!(started.elapsed() < Duration::from_secs(1), "an open transaction on this connection is not waited for");
-        state.store.lock().unwrap().as_ref().unwrap().connection.execute_batch("ROLLBACK").unwrap();
-        pds_acquire_revision(app.state(), 1).unwrap();
     }
 
     #[test]
@@ -3854,59 +3805,6 @@ mod tests {
     }
 
     #[test]
-    fn native_owner_cancellation_distinguishes_device_maintenance_from_renderer_reset() {
-        let state = PersistentStoreState::default();
-        let renderer = Arc::new(AtomicBool::new(false));
-        let native = Arc::new(AtomicBool::new(false));
-        state.cancel_on_renderer_maintenance(&renderer).unwrap();
-        state.cancel_on_device_maintenance(&native).unwrap();
-        // Hold the reset gate explicitly: duration cannot change its cancellation scope.
-        let reset = reset_started(state.begin_renderer_reset());
-        assert!(renderer.load(Ordering::Acquire));
-        assert!(!native.load(Ordering::Acquire));
-        let during_reset = Arc::new(AtomicBool::new(false));
-        state.cancel_on_device_maintenance(&during_reset).unwrap();
-        assert!(!during_reset.load(Ordering::Acquire));
-        drop(reset);
-        let maintenance = state.acquire_raw_capture().unwrap();
-        assert!(state.admit_native_job_operation().is_err());
-        assert!(native.load(Ordering::Acquire));
-        assert!(during_reset.load(Ordering::Acquire));
-        let late = Arc::new(AtomicBool::new(false));
-        state.cancel_on_device_maintenance(&late).unwrap();
-        assert!(late.load(Ordering::Acquire));
-        drop(maintenance);
-        drop(state.admit_native_job_operation().unwrap());
-        let next = Arc::new(AtomicBool::new(false));
-        state.cancel_on_device_maintenance(&next).unwrap();
-        assert!(!next.load(Ordering::Acquire));
-        drop(state.acquire_cleanup_maintenance(std::time::Duration::from_secs(1)).unwrap());
-        assert!(next.load(Ordering::Acquire));
-
-        // A page that starts during device maintenance resets once it ends, and
-        // native jobs wait that reset out like any other.
-        let state = Arc::new(PersistentStoreState::default());
-        let capture = state.acquire_raw_capture().unwrap();
-        let reset = reset_after_maintenance(state.begin_renderer_reset());
-        drop(capture);
-        let handed = Arc::new(AtomicBool::new(false));
-        state.cancel_on_device_maintenance(&handed).unwrap();
-        let (admitted, admission) = std::sync::mpsc::channel();
-        let native = Arc::clone(&state);
-        std::thread::spawn(move || admitted.send(native.admit_native_job_operation().map(drop)).unwrap());
-        while !state.native_job_waiting_for_reset() {
-            assert!(admission.try_recv().is_err(), "a native job did not wait for the reset that followed the capture");
-            std::thread::yield_now();
-        }
-        state.finish_renderer_reset(reset.wait_for_gate(), || {}).unwrap();
-        admission
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("the end of the reset wakes a waiting native job")
-            .unwrap();
-        assert!(!handed.load(Ordering::Acquire));
-    }
-
-    #[test]
     fn failed_maintenance_acquisition_reopens_renderer_admission() {
         use std::thread;
 
@@ -3946,6 +3844,104 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn a_later_page_document_ends_what_earlier_documents_left_open_and_refuses_their_requests() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let app = crate::test_app::MockApp::new(tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![pds_open, pds_acquire_revision])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap());
+        app.manage(crate::app_paths::AppPaths {
+            data: root.to_owned(),
+            data_entry: root.to_owned(),
+            webview: None,
+            logs: root.join("logs"),
+            cache: root.join("cache"),
+            cleanup_control: root.join("cleanup"),
+            tauri_derived: Vec::new(),
+            install: None,
+            integration: None,
+        });
+        app.manage(PersistentStoreState::unopened_without_purge());
+        app.manage(crate::native_media::ipc::NativeMediaIpcState::default());
+        let media = app.state::<crate::native_media::ipc::NativeMediaIpcState>();
+        let webview = tauri::WebviewWindowBuilder::new(&*app, "main", Default::default()).build().unwrap();
+        // Through IPC, so the argument the page names is the one each command reads.
+        let invoke = |cmd: &str, mut body: serde_json::Value, document: Option<&str>| {
+            if let Some(document) = document {
+                body["document"] = document.into();
+            }
+            tauri::test::get_ipc_response(&webview, tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: if cfg!(any(windows, target_os = "android")) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            })
+        };
+        let open = |document: &str| invoke("pds_open", serde_json::json!({}), Some(document)).map(drop);
+        let acquire = |document: Option<&str>| {
+            invoke("pds_acquire_revision", serde_json::json!({ "revision": 0 }), document)
+                .map(|response| response.deserialize::<LeaseResult>().unwrap())
+        };
+        let read = |lease: &LeaseResult| with_store_mutex(&app.state(), |store| store.read_root(Some(&lease.lease)).map(drop));
+
+        open("first").unwrap();
+        let outgoing = acquire(Some("first")).unwrap();
+        let unnamed = acquire(None).unwrap();
+        let exporting = acquire(Some("first")).unwrap();
+        let export = with_store_mutex_mut(&app.state(), |store| store.detach_risu_save_export(&exporting.lease)).unwrap();
+        let filled = std::iter::from_fn(|| media.open_input_upload(root, Some("first")).ok()).count();
+        assert!(filled > 0);
+        open("first").unwrap();
+        read(&outgoing).expect("opening again from the same page released its lease");
+        assert!(media.open_input_upload(root, None).is_err(), "opening again from the same page ended its uploads");
+        drop(acquire(Some("first")).expect("opening again from the same page retired it"));
+
+        open("second").unwrap();
+        assert!(matches!(read(&outgoing), Err(StoreError::SnapshotReleased)));
+        media.open_input_upload(root, None).expect("the replaced page's uploads stayed");
+        // A lease the replaced page was exporting is released when the export ends.
+        with_store_mutex_mut(&app.state(), |store| reattach_export_lease(&app.state(), store, export)).unwrap();
+        assert!(matches!(read(&exporting), Err(StoreError::SnapshotReleased)));
+        read(&unnamed).expect("a lease no page named waits for the page reset");
+        assert!(acquire(Some("first")).unwrap_err().to_string().contains("replaced"));
+        assert!(open("first").unwrap_err().to_string().contains("replaced"));
+        let current = acquire(Some("second")).unwrap();
+        open("second").unwrap();
+        read(&current).unwrap();
+        // A cleanup that runs after the current page acquired a lease leaves it.
+        release_replaced_document_sessions(app.handle(), &app.state(), &app.state::<PersistentStoreState>().admit_renderer_operation().unwrap());
+        read(&current).expect("a late cleanup released the current page's lease");
+
+        // Names start with their creation time. With no page start since the current
+        // document opened, an earlier page's first open ran late and is refused.
+        open("2000-later").unwrap();
+        assert!(open("1000-earlier").unwrap_err().to_string().contains("replaced"));
+        assert!(acquire(Some("1000-earlier")).unwrap_err().to_string().contains("replaced"));
+        let later = acquire(Some("2000-later")).unwrap();
+        open("2000-later").unwrap();
+        read(&later).unwrap();
+        // After a page start the next document is the later page, whatever its clock says.
+        app.state::<PersistentStoreState>().reset_renderer_session().unwrap();
+        open("500-after-reset").unwrap();
+
+        // Replacing a page that holds no lease leaves the WAL to the usual checkpoints.
+        let wal_path = root.join("persistent/persistent.sqlite-wal");
+        with_store_mutex(&app.state(), |store| {
+            store.connection.execute_batch("PRAGMA wal_autocheckpoint = 0; INSERT INTO app_kv VALUES ('wal', '1');").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let written = fs::metadata(&wal_path).unwrap().len();
+        assert!(written > 0);
+        open("600-next").unwrap();
+        assert_eq!(fs::metadata(&wal_path).unwrap().len(), written);
     }
 
     fn reset_started(reset: StoreResult<RendererReset>) -> DeviceMaintenanceGuard {
@@ -4283,9 +4279,7 @@ mod tests {
             .replace_put_root(&staging.staging_id, &json!({ "username": "synthetic" }))
             .expect("stage root");
         store.replace_commit(&staging.staging_id, Some(0)).expect("commit root");
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::mock_app();
         app.manage(PersistentStoreState::with_test_store(store));
         let root = pds_read_root(app.state(), None).expect("read root");
         assert_eq!(root.revision, 1);
@@ -4561,7 +4555,7 @@ mod tests {
             renderer_gate: Arc::new(RendererGate::default()),
             archive_operations: Mutex::new(HashMap::new()),
             retired_purge_started: AtomicBool::new(false),
-            admission_wait: AdmissionWait::DEFAULT,
+            renderer_documents: Mutex::new(RendererDocuments::default()),
         });
         let barrier = Arc::new(Barrier::new(3));
         let active = Arc::new(AtomicUsize::new(0));
@@ -4824,7 +4818,7 @@ mod tests {
             (held, remote, alias_object(&store, "assets/orphan.png").unwrap())
         };
         test_remote::keep_only_on_server(root, &remote);
-        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let app = crate::test_app::mock_app();
         app.manage(crate::app_paths::AppPaths {
             data: root.to_owned(),
             data_entry: root.to_owned(),
@@ -4837,7 +4831,7 @@ mod tests {
             integration: None,
         });
         app.manage(PersistentStoreState::default());
-        open_for_renderer(app.handle(), &app.state()).unwrap();
+        open_for_renderer(app.handle(), &app.state(), None).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(10);
         while !recorded(root, &held) {
@@ -4894,7 +4888,7 @@ mod tests {
         let keys = ["assets/only.png", "assets/second.png", "assets/shared.png", "assets/late.png", "sync-conflict-backups/a.risudat"]
             .map(str::to_owned).to_vec();
         let owner = || Some(DeletedOwnerAssets { keys: keys.clone(), started_at_ms });
-        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let app = crate::test_app::mock_app();
         app.manage(PersistentStoreState { store: Mutex::new(Some(store)), ..PersistentStoreState::default() });
         let state = app.state::<PersistentStoreState>();
 

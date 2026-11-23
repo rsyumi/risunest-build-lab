@@ -193,9 +193,8 @@ export function workingSetResidencyModule() {
 export function persistentDataRuntimeModule() {
     type Runtime = ReturnType<typeof import('./storage/persistentDataRuntime.svelte')['getPersistentDataRuntime']>
     return {
-        getPersistentDataRuntime: vi.fn(() => stub<Runtime>({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}),
-            closeNativeGenerations: vi.fn(async () => ({ released: [], fenced: [] })), flushPendingDataLocally: vi.fn(async () => {}),
-            capturePersistentMutationToken: vi.fn(async () => ({ revision: 5 })), acquireDestructiveReplacementFence: vi.fn(async () => ({ revision: 5 })) })),
+        getPersistentDataRuntime: () => stub<Runtime>({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}),
+            capturePersistentMutationToken: vi.fn(async () => ({ revision: 5 })), acquireDestructiveReplacementFence: vi.fn(async () => ({ revision: 5 })) }),
         initializeActiveWorkingSet: vi.fn(), configurePersistentDataRuntime: vi.fn(),
         hasPendingOfficialPublication: vi.fn(() => false), publishCurrentOfficialRevision: vi.fn(),
     } satisfies Partial<typeof import('./storage/persistentDataRuntime.svelte')>
@@ -327,7 +326,7 @@ export function alertModule() {
 }
 
 export function characterCardsModule() {
-    return { applyHubSelection: vi.fn(), characterURLImport: vi.fn(), downloadRisuHub: vi.fn(), hubURL: 'https://hub.invalid' } satisfies Partial<typeof import('./characterCards')>
+    return { applyHubSelection: vi.fn(), characterURLImport: vi.fn(), downloadRisuHub: vi.fn(), hubURL: 'https://hub.invalid', registerOpenedFileImports: vi.fn() } satisfies Partial<typeof import('./characterCards')>
 }
 
 export function androidSafBridgeModule() {
